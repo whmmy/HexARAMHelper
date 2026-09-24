@@ -1,0 +1,407 @@
+"""LCU 连接器 + 游戏阶段状态机
+
+fork 自参考项目 scripts/lcu_connector.py，扩展：
+- get_both_teams(): 双方 10 人阵容（ChampSelect session / gameflow gameData）
+- PhaseMachine: 后台线程轮询 gameflow-phase，驱动
+  ChampSelect → GameStart → InProgress → EndOfGame 生命周期事件（含秒退重开重置、LCU 断连容忍）
+"""
+import threading
+import time
+
+import psutil
+import requests
+import urllib3
+
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+# 常见安装路径（lockfile 兜底，fork 自参考项目）
+COMMON_INSTALL_PATHS = [
+    r"C:\Riot Games\League of Legends",
+    r"D:\Riot Games\League of Legends",
+    r"E:\Riot Games\League of Legends",
+    r"C:\Program Files\Riot Games\League of Legends",
+    r"D:\Program Files\Riot Games\League of Legends",
+    r"C:\Riot Games\英雄联盟",
+    r"D:\Riot Games\英雄联盟",
+    r"D:\WeGameApps\英雄联盟",
+    r"D:\WeGame\英雄联盟",
+    r"E:\WeGame\英雄联盟",
+    r"D:\腾讯游戏\英雄联盟",
+    r"E:\腾讯游戏\英雄联盟",
+]
+
+# gameflow-phase 归并后的逻辑阶段
+IDLE_PHASES = {"None", "Lobby", "Matchmaking", "ReadyCheck",
+               "WaitingForStats", "EndOfGame"}
+
+
+class LCUConnector:
+    """英雄联盟客户端 LCU API 连接器（REST + riot Basic Auth）"""
+
+    LCU_TIMEOUT = 3
+
+    def __init__(self, kb):
+        self.kb = kb  # hexa.knowledge.kb.KnowledgeBase
+        self.port = None
+        self.auth_token = None
+        self.base_url = None
+        self._connected = False
+        self._summoner_id = None
+        self.id_to_cn = {}
+
+    # ── 连接 ──────────────────────────────────────────────────────
+
+    def connect(self) -> bool:
+        if self._connect_via_process() or self._connect_via_lockfile():
+            self._connected = True
+            self._build_champion_id_map()
+            self._cache_summoner_id()
+            print(f"[OK] LCU connected (port: {self.port})")
+            return True
+        self._connected = False
+        return False
+
+    def _connect_via_process(self):
+        try:
+            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+                try:
+                    if proc.info['name'] and proc.info['name'].lower() == 'leagueclientux.exe':
+                        cmdline = proc.info.get('cmdline') or []
+                        port = token = None
+                        for arg in cmdline:
+                            if '--app-port=' in arg:
+                                port = arg.split('=', 1)[1]
+                            elif '--remoting-auth-token=' in arg:
+                                token = arg.split('=', 1)[1]
+                        if port and token:
+                            self.port, self.auth_token = port, token
+                            self.base_url = f"https://127.0.0.1:{port}"
+                            return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                    continue
+        except Exception:
+            pass
+        return False
+
+    def _connect_via_lockfile(self):
+        import os
+        for base in COMMON_INSTALL_PATHS:
+            lockfile = os.path.join(base, 'lockfile')
+            if os.path.exists(lockfile):
+                try:
+                    parts = open(lockfile).read().strip().split(':')
+                    if len(parts) >= 5:
+                        self.port, self.auth_token = parts[2], parts[3]
+                        self.base_url = f"https://127.0.0.1:{self.port}"
+                        return True
+                except Exception:
+                    continue
+        return False
+
+    def is_connected(self):
+        return self._connected
+
+    def _request(self, method, endpoint, **kwargs):
+        if not self.base_url or not self.auth_token:
+            return None
+        try:
+            return requests.request(
+                method, f"{self.base_url}{endpoint}",
+                auth=('riot', self.auth_token),
+                verify=False, timeout=self.LCU_TIMEOUT, **kwargs)
+        except requests.exceptions.ConnectionError:
+            self._connected = False
+            return None
+        except Exception:
+            return None
+
+    # ── 基础信息 ──────────────────────────────────────────────────
+
+    def _build_champion_id_map(self):
+        resp = self._request('GET', '/lol-game-data/assets/v1/champion-summary.json')
+        if not resp or resp.status_code != 200:
+            return
+        try:
+            for champ in resp.json():
+                cid, alias = champ.get('id'), champ.get('alias', '')
+                if cid is None or cid == -1:
+                    continue
+                cn = self.kb.en_to_cn.get(alias.lower())
+                if cn:
+                    self.id_to_cn[cid] = cn
+            print(f"[OK] LCU ID map: {len(self.id_to_cn)} champions")
+        except Exception:
+            pass
+
+    def _cache_summoner_id(self):
+        resp = self._request('GET', '/lol-summoner/v1/current-summoner')
+        if resp and resp.status_code == 200:
+            try:
+                self._summoner_id = resp.json().get('summonerId')
+            except Exception:
+                pass
+
+    # ── 阶段与英雄（fork 参考项目，接口保持一致） ──────────────────
+
+    def get_gameflow_phase(self):
+        if not self._connected:
+            return None
+        resp = self._request('GET', '/lol-gameflow/v1/gameflow-phase')
+        if resp and resp.status_code == 200:
+            try:
+                return resp.json()
+            except Exception:
+                pass
+        return None
+
+    def get_champ_select_champion(self):
+        resp = self._request('GET', '/lol-champ-select/v1/session')
+        if not resp or resp.status_code != 200:
+            return None
+        try:
+            data = resp.json()
+            local_cell = data.get('localPlayerCellId')
+            if local_cell is None:
+                return None
+            for player in data.get('myTeam', []):
+                if player.get('cellId') == local_cell:
+                    cid = player.get('championId', 0)
+                    if cid and cid > 0:
+                        return self.id_to_cn.get(cid)
+        except Exception:
+            pass
+        return None
+
+    def get_gameflow_champion(self):
+        resp = self._request('GET', '/lol-gameflow/v1/session')
+        if not resp or resp.status_code != 200:
+            return None
+        try:
+            data = resp.json().get('gameData', {})
+            all_players = data.get('teamOne', []) + data.get('teamTwo', [])
+            for player in all_players:
+                if player.get('summonerId') == self._summoner_id:
+                    cid = player.get('championId', 0)
+                    if cid and cid > 0:
+                        return self.id_to_cn.get(cid)
+            for sel in data.get('playerChampionSelections', []):
+                if sel.get('summonerId') == self._summoner_id:
+                    cid = sel.get('championId', 0)
+                    if cid and cid > 0:
+                        return self.id_to_cn.get(cid)
+        except Exception:
+            pass
+        return None
+
+    def get_ingame_champion(self):
+        """Live Client Data API 兜底（:2999 免密，仅游戏内可用）"""
+        try:
+            resp = requests.get('https://127.0.0.1:2999/liveclientdata/activeplayer',
+                                verify=False, timeout=2)
+            if resp.status_code == 200:
+                return self.kb.champion_cn(resp.json().get('championName', ''))
+        except Exception:
+            pass
+        return None
+
+    def get_champion_auto(self):
+        """全生命周期自动获取当前英雄，返回 (中文名|None, 来源)"""
+        if not self._connected:
+            if self.connect():
+                pass
+            else:
+                hero = self.get_ingame_champion()
+                return (hero, "Live API") if hero else (None, "")
+        phase = self.get_gameflow_phase()
+        if phase == "ChampSelect":
+            hero = self.get_champ_select_champion()
+            if hero:
+                return hero, "ChampSelect"
+        if phase in ("InProgress", "GameStart"):
+            hero = self.get_gameflow_champion()
+            if hero:
+                return hero, "GameFlow"
+            hero = self.get_ingame_champion()
+            if hero:
+                return hero, "Live API"
+        if phase not in IDLE_PHASES:
+            hero = self.get_champ_select_champion()
+            if hero:
+                return hero, "ChampSelect"
+        return None, phase or ""
+
+    # ── 扩展：双方阵容 ────────────────────────────────────────────
+
+    def get_both_teams(self):
+        """双方 10 人阵容（中文英雄名）。
+
+        返回 {"ally": [...], "enemy": [...], "my_hero": str|None, "source": str}
+        ChampSelect 阶段：myTeam + enemyTeam（大乱斗双方同时选，敌方缺失时为空，
+        由 GameStart 阶段的 gameflow 数据补全）。
+        """
+        phase = self.get_gameflow_phase()
+        if phase == "ChampSelect":
+            data = self._get_json('/lol-champ-select/v1/session') or {}
+            local_cell = data.get('localPlayerCellId')
+            ally, enemy, my_hero = [], [], None
+            for player in data.get('myTeam', []):
+                cid = player.get('championId', 0)
+                if not cid or cid <= 0:
+                    continue
+                cn = self.id_to_cn.get(cid)
+                if cn:
+                    ally.append(cn)
+                    if player.get('cellId') == local_cell:
+                        my_hero = cn
+            for player in data.get('enemyTeam', []):
+                cid = player.get('championId', 0)
+                if not cid or cid <= 0:
+                    continue
+                cn = self.id_to_cn.get(cid)
+                if cn:
+                    enemy.append(cn)
+            return {"ally": ally, "enemy": enemy, "my_hero": my_hero,
+                    "source": "ChampSelect"}
+
+        if phase in ("InProgress", "GameStart"):
+            data = self._get_json('/lol-gameflow/v1/session') or {}
+            game = data.get('gameData', {})
+            team_one = game.get('teamOne', [])
+            team_two = game.get('teamTwo', [])
+            my_side = None
+            for team_idx, team in enumerate((team_one, team_two)):
+                for player in team:
+                    if player.get('summonerId') == self._summoner_id:
+                        my_side = team_idx
+                        break
+                if my_side is not None:
+                    break
+            if my_side is None:
+                # ARAM 模式 gameflow 偶发按观察者视角排列，保守假定 teamOne 为己方
+                my_side = 0
+            def names(team):
+                out = []
+                for p in team:
+                    cn = self.id_to_cn.get(p.get('championId', 0) or -1)
+                    if cn:
+                        out.append(cn)
+                return out
+            ally = names(team_one if my_side == 0 else team_two)
+            enemy = names(team_two if my_side == 0 else team_one)
+            my_hero = self.get_gameflow_champion() or (
+                self.kb.champion_cn(
+                    (team_one if my_side == 0 else team_two)[0].get('championId')
+                ) if ally else None)
+            return {"ally": ally, "enemy": enemy, "my_hero": my_hero,
+                    "source": "GameFlow"}
+
+        return {"ally": [], "enemy": [], "my_hero": None, "source": phase or ""}
+
+    def _get_json(self, endpoint):
+        resp = self._request('GET', endpoint)
+        if resp and resp.status_code == 200:
+            try:
+                return resp.json()
+            except Exception:
+                return None
+        return None
+
+
+class PhaseMachine(threading.Thread):
+    """gameflow-phase 轮询状态机（全自动生命周期驱动，无热键）
+
+    事件回调（在状态机线程执行，UI 层需自行经 queue 转发）：
+      on_champ_select(teams)   进入选人（teams = get_both_teams() 快照）
+      on_game_start(teams)     进入 GameStart（阵容锁定，System2 ChampionContext 时机）
+      on_in_progress()         加载完成进入对局（启动 live_api 轮询）
+      on_end_of_game(reason)   对局结束或秒退重开（GameSession 重置）
+      on_disconnect() / on_reconnect()   LCU 断连/恢复
+      on_phase(phase)          原始阶段变化（调试/UI 显示）
+
+    秒退/掉线回大厅同样触发 on_end_of_game —— 会话重置逻辑统一在回调侧。
+    """
+
+    POLL_INTERVAL = 2.0
+    DISCONNECT_NEEDED = 3  # 连续 N 次获取不到 phase 视为断连
+
+    def __init__(self, lcu: LCUConnector, callbacks: dict = None):
+        super().__init__(daemon=True, name="PhaseMachine")
+        self.lcu = lcu
+        self.cb = callbacks or {}
+        self._running = True
+        self._phase = None           # 上次逻辑阶段
+        self._fail_count = 0
+        self._disconnected = False
+
+    def stop(self):
+        self._running = False
+
+    def run(self):
+        while self._running:
+            phase = self._poll_phase()
+            self._handle(phase)
+            time.sleep(self.POLL_INTERVAL)
+
+    def _poll_phase(self):
+        if not self.lcu.is_connected():
+            self.lcu.connect()
+            if not self.lcu.is_connected():
+                self._fail()
+                return None
+        phase = self.lcu.get_gameflow_phase()
+        if phase is None:
+            self._fail()
+        else:
+            self._fail_count = 0
+            if self._disconnected:
+                self._disconnected = False
+                self._fire("on_reconnect")
+        return phase
+
+    def _fail(self):
+        self._fail_count += 1
+        if (self._fail_count >= self.DISCONNECT_NEEDED
+                and not self._disconnected
+                and self._phase in ("ChampSelect", "GameStart", "InProgress")):
+            self._disconnected = True
+            self._fire("on_disconnect")
+
+    def _handle(self, phase):
+        prev, cur = self._phase, phase
+        if cur == "ChampSelect":
+            # 选人阶段持续刷新快照（骰子换人自动跟随），回调侧按 my_hero 去重
+            self._phase = cur
+            if prev != cur:
+                print(f"[LCU] phase: {prev} -> {cur}")
+                self._fire("on_phase", cur)
+                if prev == "InProgress":
+                    self._fire("on_end_of_game", "dodge_requeue")
+            self._fire("on_champ_select", self._safe_teams())
+            return
+        if cur == prev:
+            return
+        self._phase = cur
+        print(f"[LCU] phase: {prev} -> {cur}")
+        self._fire("on_phase", cur)
+
+        if cur == "GameStart":
+            self._fire("on_game_start", self._safe_teams())
+        elif cur == "InProgress":
+            self._fire("on_in_progress")
+        elif prev == "InProgress" and cur in IDLE_PHASES:
+            self._fire("on_end_of_game", cur)
+
+    def _safe_teams(self):
+        try:
+            return self.lcu.get_both_teams()
+        except Exception as e:
+            print(f"[WARN] get_both_teams 异常: {e}")
+            return {"ally": [], "enemy": [], "my_hero": None, "source": "error"}
+
+    def _fire(self, event, *args):
+        handler = self.cb.get(event)
+        if handler:
+            try:
+                handler(*args)
+            except Exception as e:
+                print(f"[WARN] 回调 {event} 异常: {e}")
