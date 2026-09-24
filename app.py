@@ -96,6 +96,48 @@ def main():
     if os.environ.get("HEXA_SMOKE"):
         # UI 冒烟模式：3 秒后自动退出（验证 GUI 可启动，无人工交互）
         root.after(3000, root.destroy)
+    if os.environ.get("HEXA_MOCK"):
+        # mock 驱动一局（无需游戏客户端）：选人→加载→对局→海克斯→死亡→敌方关键装
+        def mock_drive():
+            import time as _t
+            from hexa.core.live_api import LiveSnapshot, PlayerInfo
+            _t.sleep(2.5)
+            session.on_champ_select({"ally": ["暗裔剑魔"], "enemy": [],
+                                     "my_hero": "暗裔剑魔", "source": "mock"})
+            _t.sleep(1.0)
+            session.on_game_start({
+                "ally": ["暗裔剑魔", "九尾妖狐", "皎月女神", "盲僧", "众星之子"],
+                "enemy": ["黑暗之女", "狂暴之心", "放逐之刃", "诺克萨斯之手", "琴瑟仙女"],
+                "my_hero": "暗裔剑魔", "source": "mock"})
+            session.on_in_progress()
+            _t.sleep(1.0)
+            session.record_augment("贪欲束缚", tier="棱彩")
+
+            def snap(items, dead=False, enemy_items=None):
+                s = LiveSnapshot(ts=_t.time(), ok=True)
+                s.my_champion = "暗裔剑魔"
+                s.my_is_dead = dead
+                s.my_items = [{"name": n, "count": 1} for n in items]
+                s.players.append(PlayerInfo(champion="暗裔剑魔", champion_en="Aatrox",
+                                            team="ORDER", items=s.my_items,
+                                            kills=2, deaths=dead and 1 or 0, assists=3))
+                s.players.append(PlayerInfo(champion="诺克萨斯之手", champion_en="Darius",
+                                            team="CHAOS",
+                                            items=[{"name": n, "count": 1}
+                                                   for n in (enemy_items or ["多兰之刃"])],
+                                            kills=5, deaths=1, assists=3))
+                for cn in ("黑暗之女", "狂暴之心", "琴瑟仙女"):
+                    s.players.append(PlayerInfo(champion=cn, champion_en="", team="CHAOS"))
+                session.on_snapshot(s)
+
+            snap(["多兰之刃"])
+            _t.sleep(1.2)
+            snap(["多兰之刃", "吸血鬼节杖"])
+            _t.sleep(0.8)
+            snap(["多兰之刃", "吸血鬼节杖"], dead=True)            # 死亡 → 下一件三选
+            _t.sleep(10.0)
+            snap(["多兰之刃", "吸血鬼节杖"], enemy_items=["荆棘之甲"])  # 敌方关键装提示
+        threading.Thread(target=mock_drive, daemon=True, name="MockDrive").start()
     try:
         root.mainloop()
     except KeyboardInterrupt:

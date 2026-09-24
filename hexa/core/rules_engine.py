@@ -215,16 +215,29 @@ class RulesEngine:
             scored.append((score, name))
 
         scored.sort(reverse=True)
+        # 抗性建议文案：只对本身带对应抗性的装备写进理由（对纯输出件写"考虑魔抗"是误导）
+        ADVICE_TEXT = {
+            "魔抗优先": "对面法伤多，补魔抗",
+            "护甲优先": "对面物伤多，补护甲",
+            "重伤考虑": "对面治疗多，考虑重伤",
+            "双抗均衡": "对面双伤均衡",
+        }
         out = []
         for score, name in scored[:limit]:
             reason_bits = []
+            info = self.kb.items.get(name, {})
+            tags = set(info.get("tags", []))
+            if advice == "魔抗优先" and "SpellBlock" in tags:
+                reason_bits.append(ADVICE_TEXT["魔抗优先"])
+            elif advice == "护甲优先" and "Armor" in tags:
+                reason_bits.append(ADVICE_TEXT["护甲优先"])
+            elif advice == "重伤考虑" and name in ANTIHEAL_ITEMS:
+                reason_bits.append(ADVICE_TEXT["重伤考虑"])
             if name in building_into:
-                reason_bits.append("身上小件正在往它合")
+                reason_bits.insert(0, "身上小件正在往它合")
             bias = self.kb.item_path_bias(name)
             if bias == current_path:
                 reason_bits.append(f"当前{current_path.upper()}路线")
-            if advice:
-                reason_bits.append(f"敌方{advice}")
             out.append(Candidate(name, "；".join(reason_bits) or "通用推荐"))
         return out
 
