@@ -1,0 +1,63 @@
+{
+ "slug": "annie",
+ "fetched_at": "2026-09-24",
+ "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/annie/build",
+ "patch": "16.19",
+ "starter_items": [
+  [
+   "复用型药水",
+   "遗失的章节"
+  ],
+  [
+   "遗失的章节"
+  ]
+ ],
+ "boots": [
+  [
+   "法师之靴"
+  ],
+  [
+   "明朗之靴"
+  ]
+ ],
+ "core_builds": [
+  [
+   "残疫",
+   "风暴狂涌",
+   "影焰"
+  ],
+  [
+   "残疫",
+   "海克斯科技火箭腰带",
+   "影焰"
+  ],
+  [
+   "残疫",
+   "风暴狂涌",
+   "中娅沙漏"
+  ],
+  [
+   "卢登的回声",
+   "风暴狂涌",
+   "影焰"
+  ],
+  [
+   "残疫",
+   "兰德里的折磨",
+   "影焰"
+  ]
+ ],
+ "skill_orders": [
+  "QWEQQRQWQWRWWEE",
+  "EWQQQRQWQWRWWEE",
+  "QWEQQRQEQWRWWWE"
+ ],
+ "skill_names": {
+  "Q": "碎裂之火",
+  "W": "焚烧",
+  "E": "熔岩护盾",
+  "R": "提伯斯之怒"
+ },
+ "skill_priority": "主Q副W",
+ "hero_cn": "黑暗之女"
+}

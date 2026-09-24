@@ -1,0 +1,64 @@
+{
+ "slug": "aatrox",
+ "fetched_at": "2026-09-24",
+ "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/aatrox/build",
+ "patch": "16.19",
+ "starter_items": [
+  [
+   "长剑",
+   "考尔菲德的战锤"
+  ],
+  [
+   "鞋子",
+   "考尔菲德的战锤"
+  ]
+ ],
+ "boots": [
+  [
+   "水银之靴"
+  ],
+  [
+   "铁板靴"
+  ]
+ ],
+ "core_builds": [
+  [
+   "星蚀",
+   "焚天",
+   "死亡之舞"
+  ],
+  [
+   "焚天",
+   "星蚀",
+   "死亡之舞"
+  ],
+  [
+   "焚天",
+   "朔极之矛",
+   "死亡之舞"
+  ],
+  [
+   "星蚀",
+   "焚天",
+   "斯特拉克的挑战护手"
+  ],
+  [
+   "星蚀",
+   "焚天",
+   "振奋盔甲"
+  ]
+ ],
+ "skill_orders": [
+  "QWEQQRQEQEREEWW",
+  "QEWQQRQEQEREEWW",
+  "EWQQQRQEQEREEWW"
+ ],
+ "skill_names": {
+  "Q": "暗裔利刃",
+  "W": "恶火束链",
+  "E": "暗影冲决",
+  "R": "大灭"
+ },
+ "skill_priority": "主Q副E",
+ "hero_cn": "暗裔剑魔"
+}
