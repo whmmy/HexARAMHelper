@@ -1,0 +1,15 @@
+# HexARAMHelper 依赖清单（与 pyproject.toml 同步维护；pip 用户用本文件）
+# fork 自参考项目 lol-aram-mayhem-hextech-helper，新增 openai，不加 pynput（mouse_ledger 复用 keyboard）
+requests>=2.31
+urllib3>=2.0
+psutil>=5.9
+numpy>=1.26
+opencv-python-headless>=4.9
+mss>=9.0
+keyboard>=0.13.5
+thefuzz>=0.22
+pypinyin>=0.50
+Pillow>=10.0
+pystray>=0.19
+openai>=1.40
+rapidocr_onnxruntime<=1.4.4

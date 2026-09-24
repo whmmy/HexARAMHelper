@@ -1,0 +1,25 @@
+[project]
+name = "hexaramhelper"
+version = "0.1.0"
+description = "海克斯大乱斗 AI 助手（版本翻译器）"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "requests>=2.31",
+    "urllib3>=2.0",
+    "psutil>=5.9",
+    "numpy>=1.26",
+    "opencv-python-headless>=4.9",
+    "mss>=9.0",
+    "keyboard>=0.13.5",
+    "thefuzz>=0.22",
+    "pypinyin>=0.50",
+    "Pillow>=10.0",
+    "pystray>=0.19",
+    "openai>=1.40",
+    # rapidocr_onnxruntime 1.4.4 仅支持 Python <3.13（P1 画面检测才用到，P0 阶段一并装齐）
+    "rapidocr_onnxruntime<=1.4.4",
+]
+
+[tool.uv]
+package = false

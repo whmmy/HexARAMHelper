@@ -27,6 +27,7 @@ ENV/
 # ── 密钥与本地设置（绝不入库） ─────────────
 .env
 .env.*
+!.env.example
 *.key
 *.pem
 hexa/settings.local.json
@@ -35,10 +36,14 @@ settings.json
 # ── 运行时产物 ───────────────────────────
 *.log
 logs/
+fixtures/
 hexa/ui/calibrations/*.json
 !hexa/ui/calibrations/.gitkeep
 hexa/ui/calibrations/samples/*.png
 !hexa/ui/calibrations/samples/.gitkeep
+
+# ── 本地会话工具数据 ──────────────────────
+.zcode/
 
 # ── 爬虫/驱动缓存 ─────────────────────────
 .wdm/
