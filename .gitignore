@@ -1,0 +1,55 @@
+# ── Python ──────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib60/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ── 虚拟环境 ─────────────────────────────
+.venv/
+venv/
+ENV/
+
+# ── 密钥与本地设置（绝不入库） ─────────────
+.env
+.env.*
+*.key
+*.pem
+hexa/settings.local.json
+settings.json
+
+# ── 运行时产物 ───────────────────────────
+*.log
+logs/
+hexa/ui/calibrations/*.json
+!hexa/ui/calibrations/.gitkeep
+hexa/ui/calibrations/samples/*.png
+!hexa/ui/calibrations/samples/.gitkeep
+
+# ── 爬虫/驱动缓存 ─────────────────────────
+.wdm/
+chromedriver*
+ChromeDriver*
+*.prof
+
+# ── 编辑器/系统 ──────────────────────────
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
