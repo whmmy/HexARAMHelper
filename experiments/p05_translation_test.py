@@ -118,6 +118,8 @@ def call_model(api_key: str, user_prompt: str) -> str:
     client = OpenAI(
         api_key=api_key,
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        timeout=120,
+        max_retries=1,
     )
     resp = client.chat.completions.create(
         model="qwen3.8-flash",
@@ -127,7 +129,9 @@ def call_model(api_key: str, user_prompt: str) -> str:
         ],
         temperature=0.3,
         max_tokens=2000,
-        timeout=60,
+        # qwen3 系列默认可能启用深度思考，长输入下非流式等待会超时；
+        # 翻译层任务不需要思考链，显式关闭（未知参数平台会忽略，无害）
+        extra_body={"enable_thinking": False},
     )
     return resp.choices[0].message.content or ""
 
@@ -157,35 +161,71 @@ def iter_strings(node):
             yield from iter_strings(v)
 
 
+def structured_item_names(ctx: dict) -> list:
+    """结构化装备名字段（直接进推荐输出的部分，零幻觉硬标准）：
+    opening_items[].combo[] / build_paths.*.items[] / component_rules[].item+upgrade_to"""
+    names = []
+    for entry in ctx.get("opening_items") or []:
+        names.extend(entry.get("combo") or [])
+    for _path, p in (ctx.get("build_paths") or {}).items():
+        if isinstance(p, dict):
+            names.extend(p.get("items") or [])
+    for rule in ctx.get("component_rules") or []:
+        names.append(rule.get("item", ""))
+        names.append(rule.get("upgrade_to", ""))
+    return [n for n in names if n]
+
+
+def free_text_suspects(ctx: dict, kb) -> list:
+    """自由文本（when/note/shift/reason）中的疑似未命中装备词 —— 仅观测不硬卡。
+    先剔除文本中真实存在的 DD 装备名（子串方向）与海克斯名，再看是否残留
+    含装备关键字且形似名词（≤7 字）的片段。"""
+    import re as _re
+    suspects = []
+    for field in ("opening_items", "build_paths", "component_rules",
+                  "augment_item_links"):
+        for s in iter_strings(ctx.get(field)):
+            if not isinstance(s, str):
+                continue
+            rest = s
+            # 剔除真实装备名/海克斯名（长名优先，防部分匹配残留）
+            for known in sorted(kb.items, key=len, reverse=True):
+                if known in rest:
+                    rest = rest.replace(known, " ")
+            for aug in kb.augment_names:
+                if aug in rest:
+                    rest = rest.replace(aug, " ")
+            for token in _re.split(r"[、/，,。\s；;：:（）()【】\"']+", rest):
+                if 2 <= len(token) <= 7 and _re.search(
+                        r"(靴|剑|刀|杖|弓|甲|帽|典|刃|枪|盾|锤|爪|面具|破败|饮魔|眼泪|章节|药水|腰带)$", token):
+                    suspects.append(token)
+    return suspects
+
+
 def judge(hero_cn: str, kb, ctx: dict, ground: dict) -> dict:
     """返回 {pass, checks: [(名, ok, detail)]}"""
     checks = []
 
-    # ① 零幻觉装备 + ③ 无过时装备（同一校验的两个表述：所有装备名必须在当前 DD 库）
-    item_fields = ["opening_items", "build_paths", "component_rules",
-                   "augment_item_links"]
-    bad_items, all_items = [], set()
-    for field in item_fields:
-        for s in iter_strings(ctx.get(field)):
-            for name in re.split(r"[、/，,\s]+", s):
-                name = name.strip("（()[]{}:：。;；.的")
-                if len(name) >= 2 and kb.valid_item(name):
-                    all_items.add(name)
-                elif len(name) >= 4 and re.search(r"(靴|剑|刀|杖|弓|甲|帽|典|刃|枪|盾|锤|爪|面具|之刃|饮魔刀|破败|冰霜|烈焰|怒火)", name):
-                    if not kb.valid_item(name):
-                        bad_items.append((field, name))
-    checks.append(("①零幻觉：装备名全部命中 DD 库", not bad_items,
-                   f"疑似幻觉: {bad_items[:5]}" if bad_items
-                   else f"命中 {len(all_items)} 个装备"))
+    # ① 零幻觉装备 + ③ 无过时装备（硬标准：结构化装备名字段 100% 命中当前 DD 库）
+    names = structured_item_names(ctx)
+    bad_items = [n for n in names if not kb.valid_item(n)]
+    checks.append(("①零幻觉：推荐字段装备名全部命中 DD 库",
+                   not bad_items,
+                   f"幻觉: {bad_items[:5]}" if bad_items
+                   else f"命中 {len(names)} 个装备名"))
 
-    # ①' 海克斯名零幻觉
+    # ①' 海克斯名零幻觉（affinity 名 + links.augment 字段）
     bad_augs = []
-    for entry in ctx.get("augment_affinity", []):
+    for entry in ctx.get("augment_affinity") or []:
         name = str(entry.get("name", ""))
         if name and not kb.valid_augment(name):
             bad_augs.append(name)
+    for link in ctx.get("augment_item_links") or []:
+        aug = str(link.get("augment", ""))
+        if aug and not kb.valid_augment(aug):
+            bad_augs.append(aug)
     checks.append(("①零幻觉：海克斯名全部命中 229 名单", not bad_augs,
-                   f"疑似幻觉: {bad_augs[:5]}" if bad_augs else "全部命中"))
+                   f"幻觉: {bad_augs[:5]}" if bad_augs else "全部命中"))
 
     # ② 海克斯亲和 top10 与 CSV 排名方向一致（集合交集 ≥7）
     model_top10 = [str(e.get("name", "")) for e in
@@ -196,7 +236,12 @@ def judge(hero_cn: str, kb, ctx: dict, ground: dict) -> dict:
                    overlap >= 7,
                    f"model: {model_top10[:5]}... csv: {csv_top10[:5]}..."))
 
-    # 附加观测（不计通过线）：加点顺序与 OP.GG 一致性
+    # 附加观测1：自由文本装备引用（不计通过线，供 prompt 调优参考）
+    suspects = free_text_suspects(ctx, kb)
+    checks.append(("观测：理由文字无未登记装备词（不计入通过线）",
+                   not suspects, f"待人工复核: {suspects[:6]}" if suspects else "干净"))
+
+    # 附加观测2：加点顺序与 OP.GG 一致性
     skill_note = ""
     expected = ground.get("skill_priority", "")
     got = ctx.get("skill_order", "")
