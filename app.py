@@ -117,6 +117,7 @@ def main():
                 s = LiveSnapshot(ts=_t.time(), ok=True)
                 s.my_champion = "暗裔剑魔"
                 s.my_is_dead = dead
+                s.my_current_gold = 4000   # 演示金币感知：够买第 1 件 + 攒第 2 件
                 s.my_items = [{"name": n, "count": 1} for n in items]
                 s.players.append(PlayerInfo(champion="暗裔剑魔", champion_en="Aatrox",
                                             team="ORDER", items=s.my_items,

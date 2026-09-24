@@ -15,14 +15,26 @@ from hexa.core.rules_engine import Candidate
 
 @dataclass
 class Suggestion:
-    kind: str                    # opening / next_item / augment / event_note
+    kind: str                    # opening / next_items / augment / event_note
     candidates: list = field(default_factory=list)  # [Candidate]
     note: str = ""
+    gold: float = 0.0            # 生成建议时的我方金币（next_items 展示用）
     ts: float = field(default_factory=time.time)
 
     def render(self) -> str:
         if not self.candidates:
             return self.note
+        if self.kind == "next_items":
+            head = "出装主线"
+            if self.gold > 0:
+                head += f"（金币 {self.gold:.0f}）"
+            lines = [head]
+            for i, c in enumerate(self.candidates[:3], 1):
+                price = f"{c.price}G" if c.price else ""
+                extra = f"，{c.afford_note}" if c.afford_note else ""
+                tag = f"（{price}{extra}）" if price else ""
+                lines.append(f"{'①②③'[i-1]} {c.name}{tag} —— {c.reason}")
+            return "\n".join(lines)
         lines = []
         for i, c in enumerate(self.candidates[:3], 1):
             lines.append(f"[推荐{i}] {c.name} —— {c.reason}")
@@ -65,6 +77,8 @@ class GameSession:
             self.threat = None            # ThreatProfile
             self.opening_state = "wait_first_augment"  # wait/offered/bypassed
             self.first_augment = None
+            self._my_gold = 0.0
+            self._last_sig = None         # 快照签名（定时 diff 用）
             self._log("session_reset")
 
     def _log(self, event, detail=""):
@@ -131,11 +145,46 @@ class GameSession:
                 if validated:
                     self.my_hero = validated
             self.my_items = [it["name"] for it in snap.my_items if it.get("name")]
+            self._my_gold = float(snap.my_current_gold or 0)
             # 敌方威胁画像实时补全（含敌方装备扫描）
             enemies = snap.enemies()
             self.threat = self.rules.threat_profile(self.enemy, enemies)
             self._evaluate_triggers(snap, enemies)
             self._recompute_path()
+            self._periodic_recheck(enemies, snap)
+
+    def _periodic_recheck(self, enemies, snap):
+        """定时快照 diff（v4.2）：状态签名变化即重算建议，不再只靠死亡触发。
+
+        签名 = (我方装备, 金币档 250G 粒度, 敌方装备, 死亡态)。
+        P0 规则层重算零成本，签名一变即刷；P2 AI 模式在此基础上加
+        调用间隔与预算守门（triggers.periodic_recheck 可关）。
+        """
+        if self.settings and not self.settings.get(
+                "triggers", "periodic_recheck", default=True):
+            return
+        sig = (
+            tuple(self.my_items),
+            int(self._my_gold // 250),
+            tuple(sorted(it.get("name", "") for p in enemies
+                         for it in p.items if it.get("name"))),
+            bool(snap.my_is_dead),
+        )
+        if sig == self._last_sig:
+            return
+        self._last_sig = sig
+        # 出门装等待期（首海克斯已记、未购装备）不推下一件
+        if self.opening_state == "offered":
+            if not self.my_items:
+                return
+            self.opening_state = "bypassed"
+            self._log("opening_bypassed", "已购装备，转入下一件模式")
+        # 事件提示 8s 内不被例行刷新覆盖
+        if (self.suggestion and self.suggestion.kind == "event_note"
+                and time.time() - self.suggestion.ts < 8):
+            return
+        if self.first_augment or self.my_items:
+            self._suggest_next_items()
 
     # ── 海克斯记账（P1 mouse_ledger 调用入口；冒烟测试直接调用） ───
 
@@ -192,7 +241,7 @@ class GameSession:
         if self.my_items:
             self.opening_state = "bypassed"
             self._log("opening_bypassed", "已购装备，直接进入下一件模式")
-            self._suggest_next_item()
+            self._suggest_next_items()
         else:
             self.opening_state = "offered"
             cands = self.rules.opening_candidates(self.my_hero, self.first_augment)
@@ -200,25 +249,37 @@ class GameSession:
                 "opening", cands, note=f"首个海克斯【{self.first_augment}】已联动")
             self._log("opening_offered", self.first_augment)
 
-    def _suggest_next_item(self):
+    def _suggest_next_items(self):
+        """出装主线序列（v4.2）：金币按序累计——够买第 1 件后剩余继续判第 2 件，
+        兑现"钱够就连买两件"的场景；小件合成线有目标时置顶。"""
         threat = self.threat or self.rules.threat_profile(self.enemy)
-        cands = self.rules.next_item_candidates(
-            self.my_items, self.current_path, threat)
+        seq = self.rules.build_sequence(self.my_items, self.current_path, threat)
         target, note = self.rules.component_advice(self.my_items, self.current_path)
-        if target:
-            cands = [Candidate(target, note)] + [c for c in cands if c.name != target][:2]
-        self.suggestion = Suggestion("next_item", cands)
+        if target and (not seq or seq[0].name != target):
+            tprice = self.kb.items.get(target, {}).get("gold", 0)
+            seq = [Candidate(target, note, price=tprice)] + [
+                c for c in seq if c.name != target][:2]
+        # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
+        remaining = self._my_gold
+        for c in seq:
+            if self._my_gold > 0 and c.price:
+                if remaining >= c.price:
+                    c.afford_note = "可购买"
+                    remaining -= c.price
+                else:
+                    c.afford_note = f"还差{c.price - remaining:.0f}"
+        self.suggestion = Suggestion("next_items", seq, gold=self._my_gold)
 
     # ── 触发器评估（死亡 / 敌方关键装备 / KDA 起飞） ───────────────
 
     def _evaluate_triggers(self, snap, enemies):
         triggers = (self.settings.get("triggers") if self.settings else None) or {}
 
-        # 1. 我死亡（边沿）→ 下一件三选
+        # 1. 我死亡（边沿）→ 立即重算出装主线（事件触发保留）
         if triggers.get("death_next_item", True) and snap.my_is_dead and not self._prev_dead:
             self._log("my_death", f"respawn={snap.my_respawn_timer:.0f}s")
-            if self.opening_state == "offered" or self.opening_state == "bypassed" or self.my_items:
-                self._suggest_next_item()
+            if self.first_augment or self.my_items:
+                self._suggest_next_items()
         self._prev_dead = snap.my_is_dead
 
         # 2. 敌方关键装备完成（集合 diff）→ 克制提示

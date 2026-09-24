@@ -80,6 +80,8 @@ class ThreatProfile:
 class Candidate:
     name: str
     reason: str
+    price: int = 0          # 装备总价（DD gold）
+    afford_note: str = ""   # 金币感知标注（"可购买"/"还差N"），由 GameSession 按序累计填写
 
 
 class RulesEngine:
@@ -240,6 +242,19 @@ class RulesEngine:
                 reason_bits.append(f"当前{current_path.upper()}路线")
             out.append(Candidate(name, "；".join(reason_bits) or "通用推荐"))
         return out
+
+    def build_sequence(self, my_items: list, current_path: str,
+                       threat: ThreatProfile, limit: int = 3) -> list:
+        """出装主线序列（v4.2）：按优先级给后续 2~3 件，而非一次只推一件。
+
+        玩家金币可能足够连买两件——序列让玩家能连续执行；
+        每件带价格，可买性由 GameSession 按金币累计填写（afford_note）。
+        """
+        seq = []
+        for c in self.next_item_candidates(my_items, current_path, threat, limit=limit):
+            price = self.kb.items.get(c.name, {}).get("gold", 0)
+            seq.append(Candidate(c.name, c.reason, price=price))
+        return seq
 
     # ── 3c. 小件合成判断 ─────────────────────────────────────────
 

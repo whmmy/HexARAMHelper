@@ -67,7 +67,7 @@ class MainWindow:
 
         # 威胁 + 建议卡片
         self.card_threat = self._card(main, "敌方威胁画像")
-        self.card_suggest = self._card(main, "当前建议（三选项+理由）")
+        self.card_suggest = self._card(main, "当前建议")
         self.card_augments = self._card(main, "海克斯台账")
 
         # 数据新鲜度（版本翻译器底线：抓取日期常显 + >7 天黄标）

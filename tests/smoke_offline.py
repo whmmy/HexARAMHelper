@@ -44,11 +44,12 @@ REAL_AUG = sorted(kb.augment_names)[0]
 
 
 def make_snap(my_hero_en="Annie", my_items=None, dead=False, enemy_items=None,
-              enemy_kda=(0, 0, 0), my_team="ORDER"):
+              enemy_kda=(0, 0, 0), my_team="ORDER", my_gold=0):
     snap = LiveSnapshot(ts=time.time(), ok=True)
     snap.my_champion_en = my_hero_en
     snap.my_champion = kb.champion_cn(my_hero_en) or my_hero_en
     snap.my_is_dead = dead
+    snap.my_current_gold = my_gold
     snap.my_items = [{"name": n, "count": 1} for n in (my_items or [])]
     snap.players.append(PlayerInfo(
         champion=snap.my_champion, champion_en=my_hero_en, team=my_team,
@@ -160,18 +161,33 @@ def test_session():
           session.suggestion.render() if session.suggestion else "None")
     check("出门装三选项", len(session.suggestion.candidates) == 3)
 
-    # 分支二：已购装备后再死亡 → 下一件（不再出门装）
+    # 分支二 + 定时快照 diff（v4.2）：买到装备后（无死亡）签名变化即转入出装主线
     snap = make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"])
     session.on_snapshot(snap)
     check("AD 路线推断", session.current_path == "ad", session.current_path)
+    check("购装备后自动转主线(无死亡)", session.suggestion.kind == "next_items"
+          and session.opening_state == "bypassed", session.suggestion.kind)
+    seq1 = session.suggestion
+    check("主线≥2件且带价格", len(seq1.candidates) >= 2
+          and all(c.price > 0 for c in seq1.candidates),
+          str([(c.name, c.price) for c in seq1.candidates]))
+    # 相同快照 → 不重算（防刷新）；金币档变化 → 重算
+    session.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"]))
+    check("快照无变化不刷新", session.suggestion is seq1)
+    session.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"], my_gold=4000))
+    check("金币变化触发重算", session.suggestion is not seq1)
+    text = session.suggestion.render()
+    check("金币感知渲染", "金币 4000" in text and "可购买" in text, text.split(chr(10))[0])
+    # 首件若可负担，"可购买"必须标在首件（防"先算钱后插入合成线"的顺序回归）
+    first = session.suggestion.candidates[0]
+    if first.price <= 4000:
+        check("首件可购买标注", first.afford_note == "可购买",
+              f"{first.name} {first.price}G -> {first.afford_note!r}")
+
+    # 死亡（事件触发保留）→ 立即重算主线
     session.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"], dead=True))
-    check("死亡→下一件", session.suggestion and session.suggestion.kind == "next_item",
-          session.suggestion.render() if session.suggestion else "None")
-    cands = session.suggestion.candidates
-    check("下一件落在 current_path（或抗性件）",
-          all(kb.item_path_bias(c.name) in ("ad", None)
-              or {"SpellBlock", "Armor"} & set(kb.items.get(c.name, {}).get("tags", []))
-              for c in cands), str([c.name for c in cands]))
+    check("死亡→重算主线", session.suggestion.kind == "next_items",
+          session.suggestion.kind)
 
     # 小件合成优先呈现
     session.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["十字镐"]))

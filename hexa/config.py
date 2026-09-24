@@ -52,7 +52,8 @@ DEFAULTS = {
     },
     # 局内触发器开关（计划 §5 触发器可配置）
     "triggers": {
-        "death_next_item": True,      # 我死亡 → 下一件三选
+        "death_next_item": True,      # 我死亡 → 立即重算出装主线（事件触发）
+        "periodic_recheck": True,     # 快照 diff 定时重算（v4.2：装备/金币/敌方装备变化即刷）
         "enemy_key_item": True,       # 敌方关键装备完成 → 克制提示
         "enemy_kda": True,            # 敌方 KDA 起飞（每局限 2 次）
         "kda_threshold": 3.0,
