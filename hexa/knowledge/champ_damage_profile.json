@@ -1,0 +1,1521 @@
+{
+ "version": "16.19.1",
+ "generated_at": "2026-09-24",
+ "note": "P0 启发式粗分类（DD tags 推断，非逐英雄校准），P1 精化",
+ "champions": {
+  "暗裔剑魔": {
+   "key": "Aatrox",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "九尾妖狐": {
+   "key": "Ahri",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Assassin"
+   ]
+  },
+  "离群之刺": {
+   "key": "Akali",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin"
+   ]
+  },
+  "影哨": {
+   "key": "Akshan",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "牛头酋长": {
+   "key": "Alistar",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "铁血狼母": {
+   "key": "Ambessa",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "殇之木乃伊": {
+   "key": "Amumu",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "冰晶凤凰": {
+   "key": "Anivia",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "黑暗之女": {
+   "key": "Annie",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "残月之肃": {
+   "key": "Aphelios",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "寒冰射手": {
+   "key": "Ashe",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Support"
+   ]
+  },
+  "铸星龙王": {
+   "key": "AurelionSol",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "双界灵兔": {
+   "key": "Aurora",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Assassin"
+   ]
+  },
+  "沙漠皇帝": {
+   "key": "Azir",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Marksman"
+   ]
+  },
+  "星界游神": {
+   "key": "Bard",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "虚空女皇": {
+   "key": "Belveth",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "蒸汽机器人": {
+   "key": "Blitzcrank",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "复仇焰魂": {
+   "key": "Brand",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "弗雷尔卓德之心": {
+   "key": "Braum",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "狂厄蔷薇": {
+   "key": "Briar",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "皮城女警": {
+   "key": "Caitlyn",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "青钢影": {
+   "key": "Camille",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "魔蛇之拥": {
+   "key": "Cassiopeia",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "虚空恐惧": {
+   "key": "Chogath",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Mage"
+   ]
+  },
+  "英勇投弹手": {
+   "key": "Corki",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "诺克萨斯之手": {
+   "key": "Darius",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "皎月女神": {
+   "key": "Diana",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "荣耀行刑官": {
+   "key": "Draven",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "祖安狂人": {
+   "key": "DrMundo",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Fighter"
+   ]
+  },
+  "时间刺客": {
+   "key": "Ekko",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "蜘蛛女皇": {
+   "key": "Elise",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "痛苦之拥": {
+   "key": "Evelynn",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "探险家": {
+   "key": "Ezreal",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "远古恐惧": {
+   "key": "Fiddlesticks",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "无双剑姬": {
+   "key": "Fiora",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "潮汐海灵": {
+   "key": "Fizz",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Fighter"
+   ]
+  },
+  "正义巨像": {
+   "key": "Galio",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Mage"
+   ]
+  },
+  "海洋之灾": {
+   "key": "Gangplank",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "德玛西亚之力": {
+   "key": "Garen",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "迷失之牙": {
+   "key": "Gnar",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "酒桶": {
+   "key": "Gragas",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Mage"
+   ]
+  },
+  "法外狂徒": {
+   "key": "Graves",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "灵罗娃娃": {
+   "key": "Gwen",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "战争之影": {
+   "key": "Hecarim",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "大发明家": {
+   "key": "Heimerdinger",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "异画师": {
+   "key": "Hwei",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "海兽祭司": {
+   "key": "Illaoi",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "刀锋舞者": {
+   "key": "Irelia",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "翠神": {
+   "key": "Ivern",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "风暴之怒": {
+   "key": "Janna",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "德玛西亚皇子": {
+   "key": "JarvanIV",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "武器大师": {
+   "key": "Jax",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "未来守护者": {
+   "key": "Jayce",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Marksman"
+   ]
+  },
+  "戏命师": {
+   "key": "Jhin",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "暴走萝莉": {
+   "key": "Jinx",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "虚空之女": {
+   "key": "Kaisa",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "复仇之矛": {
+   "key": "Kalista",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "天启者": {
+   "key": "Karma",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "死亡颂唱者": {
+   "key": "Karthus",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "虚空行者": {
+   "key": "Kassadin",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "不祥之刃": {
+   "key": "Katarina",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "正义天使": {
+   "key": "Kayle",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "影流之镰": {
+   "key": "Kayn",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "狂暴之心": {
+   "key": "Kennen",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "虚空掠夺者": {
+   "key": "Khazix",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin"
+   ]
+  },
+  "永猎双子": {
+   "key": "Kindred",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "暴怒骑士": {
+   "key": "Kled",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "深渊巨口": {
+   "key": "KogMaw",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "纳祖芒荣耀": {
+   "key": "KSante",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Fighter"
+   ]
+  },
+  "诡术妖姬": {
+   "key": "Leblanc",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "盲僧": {
+   "key": "LeeSin",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "曙光女神": {
+   "key": "Leona",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "含羞蓓蕾": {
+   "key": "Lillia",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Mage"
+   ]
+  },
+  "冰霜女巫": {
+   "key": "Lissandra",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "灰烬驱魔人": {
+   "key": "Locke",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "圣枪游侠": {
+   "key": "Lucian",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "仙灵女巫": {
+   "key": "Lulu",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "光辉女郎": {
+   "key": "Lux",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "熔岩巨兽": {
+   "key": "Malphite",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Mage"
+   ]
+  },
+  "虚空先知": {
+   "key": "Malzahar",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "扭曲树精": {
+   "key": "Maokai",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "无极剑圣": {
+   "key": "MasterYi",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "流光镜影": {
+   "key": "Mel",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "明烛": {
+   "key": "Milio",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "赏金猎人": {
+   "key": "MissFortune",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "齐天大圣": {
+   "key": "MonkeyKing",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "铁铠冥魂": {
+   "key": "Mordekaiser",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Mage"
+   ]
+  },
+  "堕落天使": {
+   "key": "Morgana",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "百裂冥犬": {
+   "key": "Naafiri",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Fighter"
+   ]
+  },
+  "唤潮鲛姬": {
+   "key": "Nami",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "沙漠死神": {
+   "key": "Nasus",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "深海泰坦": {
+   "key": "Nautilus",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "万花通灵": {
+   "key": "Neeko",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "狂野女猎手": {
+   "key": "Nidalee",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Mage"
+   ]
+  },
+  "不羁之悦": {
+   "key": "Nilah",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "永恒梦魇": {
+   "key": "Nocturne",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "雪原双子": {
+   "key": "Nunu",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Mage"
+   ]
+  },
+  "狂战士": {
+   "key": "Olaf",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "发条魔灵": {
+   "key": "Orianna",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "山隐之焰": {
+   "key": "Ornn",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank"
+   ]
+  },
+  "不屈之枪": {
+   "key": "Pantheon",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "圣锤之毅": {
+   "key": "Poppy",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Fighter"
+   ]
+  },
+  "血港鬼影": {
+   "key": "Pyke",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Assassin"
+   ]
+  },
+  "元素女皇": {
+   "key": "Qiyana",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin"
+   ]
+  },
+  "德玛西亚之翼": {
+   "key": "Quinn",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "幻翎": {
+   "key": "Rakan",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support"
+   ]
+  },
+  "披甲龙龟": {
+   "key": "Rammus",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank"
+   ]
+  },
+  "虚空遁地兽": {
+   "key": "RekSai",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "镕铁少女": {
+   "key": "Rell",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "炼金男爵": {
+   "key": "Renata",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "荒漠屠夫": {
+   "key": "Renekton",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "傲之追猎者": {
+   "key": "Rengar",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin",
+    "Fighter"
+   ]
+  },
+  "放逐之刃": {
+   "key": "Riven",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "机械公敌": {
+   "key": "Rumble",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Mage"
+   ]
+  },
+  "符文法师": {
+   "key": "Ryze",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "沙漠玫瑰": {
+   "key": "Samira",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "北地之怒": {
+   "key": "Sejuani",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank"
+   ]
+  },
+  "涤魂圣枪": {
+   "key": "Senna",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Marksman"
+   ]
+  },
+  "星籁歌姬": {
+   "key": "Seraphine",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "腕豪": {
+   "key": "Sett",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "恶魔小丑": {
+   "key": "Shaco",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin"
+   ]
+  },
+  "暮光之眼": {
+   "key": "Shen",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank"
+   ]
+  },
+  "龙血武姬": {
+   "key": "Shyvana",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "炼金术士": {
+   "key": "Singed",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Mage"
+   ]
+  },
+  "亡灵战神": {
+   "key": "Sion",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Fighter"
+   ]
+  },
+  "战争女神": {
+   "key": "Sivir",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "上古领主": {
+   "key": "Skarner",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Fighter"
+   ]
+  },
+  "炽炎雏龙": {
+   "key": "Smolder",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "琴瑟仙女": {
+   "key": "Sona",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "众星之子": {
+   "key": "Soraka",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "诺克萨斯统领": {
+   "key": "Swain",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "解脱者": {
+   "key": "Sylas",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Assassin"
+   ]
+  },
+  "暗黑元首": {
+   "key": "Syndra",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "河流之王": {
+   "key": "TahmKench",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Support"
+   ]
+  },
+  "岩雀": {
+   "key": "Taliyah",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "刀锋之影": {
+   "key": "Talon",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin"
+   ]
+  },
+  "瓦洛兰之盾": {
+   "key": "Taric",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Support",
+    "Tank"
+   ]
+  },
+  "迅捷斥候": {
+   "key": "Teemo",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "魂锁典狱长": {
+   "key": "Thresh",
+   "damage": "ap",
+   "is_tank": true,
+   "tags": [
+    "Support",
+    "Tank"
+   ]
+  },
+  "麦林炮手": {
+   "key": "Tristana",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "巨魔之王": {
+   "key": "Trundle",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "蛮族之王": {
+   "key": "Tryndamere",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "卡牌大师": {
+   "key": "TwistedFate",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Marksman"
+   ]
+  },
+  "瘟疫之源": {
+   "key": "Twitch",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "兽灵行者": {
+   "key": "Udyr",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "无畏战车": {
+   "key": "Urgot",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "惩戒之箭": {
+   "key": "Varus",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Mage"
+   ]
+  },
+  "暗夜猎手": {
+   "key": "Vayne",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman",
+    "Assassin"
+   ]
+  },
+  "邪恶小法师": {
+   "key": "Veigar",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "虚空之眼": {
+   "key": "Velkoz",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "愁云使者": {
+   "key": "Vex",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "皮城执法官": {
+   "key": "Vi",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "破败之王": {
+   "key": "Viego",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "奥术先驱": {
+   "key": "Viktor",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "猩红收割者": {
+   "key": "Vladimir",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Fighter"
+   ]
+  },
+  "不灭狂雷": {
+   "key": "Volibear",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "祖安怒兽": {
+   "key": "Warwick",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "逆羽": {
+   "key": "Xayah",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "远古巫灵": {
+   "key": "Xerath",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  },
+  "德邦总管": {
+   "key": "XinZhao",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "疾风剑豪": {
+   "key": "Yasuo",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "封魔剑魂": {
+   "key": "Yone",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter",
+    "Assassin"
+   ]
+  },
+  "牧魂人": {
+   "key": "Yorick",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Fighter",
+    "Tank"
+   ]
+  },
+  "不破之誓": {
+   "key": "Yunara",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "魔法猫咪": {
+   "key": "Yuumi",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "不落魔锋": {
+   "key": "Zaahen",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Fighter"
+   ]
+  },
+  "生化魔人": {
+   "key": "Zac",
+   "damage": "ad",
+   "is_tank": true,
+   "tags": [
+    "Tank",
+    "Fighter"
+   ]
+  },
+  "影流之主": {
+   "key": "Zed",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Assassin"
+   ]
+  },
+  "祖安花火": {
+   "key": "Zeri",
+   "damage": "ad",
+   "is_tank": false,
+   "tags": [
+    "Marksman"
+   ]
+  },
+  "爆破鬼才": {
+   "key": "Ziggs",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "时光守护者": {
+   "key": "Zilean",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Support",
+    "Mage"
+   ]
+  },
+  "暮光星灵": {
+   "key": "Zoe",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage"
+   ]
+  },
+  "荆棘之兴": {
+   "key": "Zyra",
+   "damage": "ap",
+   "is_tank": false,
+   "tags": [
+    "Mage",
+    "Support"
+   ]
+  }
+ }
+}
