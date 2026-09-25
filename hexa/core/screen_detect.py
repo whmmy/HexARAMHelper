@@ -208,7 +208,14 @@ class DetectorCore:
 # ── 截屏检测线程 ─────────────────────────────────────────────────────
 
 class ScreenDetector(threading.Thread):
-    """每 2s 截屏 → 标题条 OCR → 库匹配 → DetectorCore；活跃期识别卡片。
+    """每 2s 检测：非活跃期小区域模板预筛（几 ms），命中才 OCR；活跃期全帧识别。
+
+    性能设计（对局 CPU 优化）：
+    - 非活跃期（一局 95% 时间）只截 3 个标题条小图（非全屏），先 cv2.matchTemplate
+      预筛——模板=上次界面激活时自动保存的标题条灰度图；未命中不跑 OCR。
+    - 盲扫兜底：每 BLIND_OCR_EVERY 帧强制 OCR 一次（模板失效/未生成时也能发现
+      界面，最迟 ~6s）；模板从第一次真实激活起就位，此后非活跃期几乎零 OCR。
+    - 活跃期全帧截屏一次，标题 + 卡片共用（界面几十秒，成本可忽略）。
 
     回调（检测线程内执行，UI 消费请自行 queue/after 转发）：
       on_state(active: bool, round_id: int)
@@ -218,6 +225,8 @@ class ScreenDetector(threading.Thread):
 
     POLL_INTERVAL = 2.0
     MISMATCH_LIMIT = 5     # 连续 N 轮"标题命中但卡片全失配" → 提示重标定
+    BLIND_OCR_EVERY = 3    # 非活跃期每 N 帧强制 OCR 一次（防模板漏检）
+    TPL_HIT = 0.60         # matchTemplate 命中阈值（卡框美术恒定，文字占比小）
 
     def __init__(self, kb, ocr, layout: Layout = None):
         super().__init__(daemon=True, name="ScreenDetector")
@@ -234,6 +243,9 @@ class ScreenDetector(threading.Thread):
         self._mismatch_run = 0
         self._screen = None
         self.last_active = False
+        self._tick_count = 0
+        self._tpl = None                  # [灰度标题条 ndarray ×3] 模板预筛
+        self._tpl_loaded = False          # 懒加载一次
 
     # ── 控制 ──────────────────────────────────────────────────────
 
@@ -256,7 +268,7 @@ class ScreenDetector(threading.Thread):
     # ── 截屏 ──────────────────────────────────────────────────────
 
     def _grab(self, screen=None):
-        """主屏截屏 → BGR ndarray。screen 可传独立 mss 实例（标定线程用，
+        """主屏全帧 → BGR ndarray。screen 可传独立 mss 实例（标定线程用，
         mss 非线程安全，检测线程实例加锁自用）。"""
         import mss
         import numpy
@@ -269,6 +281,111 @@ class ScreenDetector(threading.Thread):
                 shot = self._screen.grab(self._screen.monitors[1])
         img = numpy.asarray(shot)
         return img[:, :, :3][:, :, ::-1].copy()  # BGRA→BGR
+
+    def _screen_size(self):
+        with self._grab_lock:
+            if self._screen is None:
+                import mss
+                self._screen = mss.mss()
+            mon = self._screen.monitors[1]
+        return mon["width"], mon["height"]
+
+    def _grab_bands(self, band_rects) -> list:
+        """只截 3 个标题条小图（非活跃期省掉全屏 14MB 拷贝）→ BGR ndarray 列表"""
+        import mss
+        import numpy
+        strips = []
+        with self._grab_lock:
+            if self._screen is None:
+                self._screen = mss.mss()
+            for band in band_rects:
+                x, y, w, h = band
+                shot = self._screen.grab({
+                    "top": max(0, int(y)), "left": max(0, int(x)),
+                    "width": max(1, int(w)), "height": max(1, int(h)),
+                    "mon": 1})
+                strips.append(numpy.asarray(shot)[:, :, :3][:, :, ::-1].copy())
+        return strips
+
+    # ── 模板预筛 ──────────────────────────────────────────────────
+
+    def _template_path(self):
+        if self.layout is None:
+            return None
+        try:
+            w, h = self._screen_size()
+        except Exception:
+            return None
+        return CALIB_DIR / f"{w}x{h}_tpl.npz"
+
+    def _load_templates(self):
+        if self._tpl_loaded:
+            return
+        self._tpl_loaded = True
+        path = self._template_path()
+        if not path or not path.exists():
+            return
+        try:
+            import numpy
+            data = numpy.load(path)
+            tpls = [data[f"t{i}"] for i in range(3)]
+            if len(tpls) == 3 and all(t.size for t in tpls):
+                self._tpl = tpls
+                print(f"[DETECT] 模板预筛已加载: {path.name}")
+        except Exception as e:
+            print(f"[WARN] 模板加载失败（走盲扫）: {e}")
+
+    def _save_templates(self, frame, regions):
+        """界面激活帧的标题条灰度图存为模板（每次激活滚动刷新，保持不漂移）"""
+        try:
+            import cv2
+            import numpy
+            path = self._template_path()
+            if not path:
+                return
+            tpls = []
+            for band in regions["title_bands"]:
+                x, y, w, h = band
+                crop = frame[max(0, int(y)):int(y + h), max(0, int(x)):int(x + w)]
+                if crop.size:
+                    tpls.append(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY))
+            if len(tpls) == 3:
+                CALIB_DIR.mkdir(parents=True, exist_ok=True)
+                numpy.savez_compressed(path, t0=tpls[0], t1=tpls[1], t2=tpls[2])
+                self._tpl = tpls
+        except Exception as e:
+            print(f"[WARN] 模板保存失败（不影响检测）: {e}")
+
+    def _template_score(self, strips) -> float:
+        """3 条标题条与模板的最大 matchTemplate 相似度（结构变化时返回 0）"""
+        import cv2
+        best = 0.0
+        try:
+            for strip, tpl in zip(strips, self._tpl):
+                if strip.shape[0] < tpl.shape[0] or strip.shape[1] < tpl.shape[1]:
+                    return 0.0
+                gray = cv2.cvtColor(strip, cv2.COLOR_BGR2GRAY)
+                res = cv2.matchTemplate(gray, tpl, cv2.TM_CCOEFF_NORMED)
+                best = max(best, float(res.max()))
+        except Exception:
+            return 0.0
+        return best
+
+    # ── 标题识别 ──────────────────────────────────────────────────
+
+    def _ocr_title_strips(self, strips) -> tuple:
+        """标题条小图列表 → (命中数, 命中名列表)"""
+        hits, titles = 0, []
+        for crop in strips:
+            best = None
+            for text, rect, score in self.ocr.recognize(crop):
+                m = self.ocr.match_augment(text)
+                if m and (best is None or m[1] > best[1]):
+                    best = m
+            if best:
+                hits += 1
+                titles.append(best[0])
+        return hits, titles
 
     # ── 主循环 ────────────────────────────────────────────────────
 
@@ -287,59 +404,74 @@ class ScreenDetector(threading.Thread):
     def _tick(self):
         if self.layout is None or not self.ocr.available:
             return
-        import cv2
+        self._tick_count += 1
+        regions = self.layout.to_pixels(*self._screen_size())
+
+        # ── 非活跃期：小图模板预筛，命中/盲扫帧才 OCR ──────────────
+        if self.core.state != "active":
+            self._load_templates()
+            strips = self._grab_bands(regions["title_bands"])
+            do_ocr = self._tick_count % self.BLIND_OCR_EVERY == 0
+            if not do_ocr and self._tpl is not None:
+                do_ocr = self._template_score(strips) >= self.TPL_HIT
+            hits, _titles = self._ocr_title_strips(strips) if do_ocr else (0, [])
+            self.core.feed_titles(hits)
+            self._fire_state_change()
+            return
+
+        # ── 活跃期：全帧一次，标题 + 卡片共用 ─────────────────────
         frame = self._grab()
         sh, sw = frame.shape[:2]
-        regions = self.layout.to_pixels(sw, sh)
 
-        # 1. 标题条 OCR + 229 库匹配（主信号）
-        hits = 0
-        titles = []
-        for band in regions["title_bands"]:
-            x, y, w, h = band
-            crop = frame[max(0, y):y + h, max(0, x):x + w]
-            items = self.ocr.recognize(crop)
-            best = None
-            for text, rect, score in items:
-                m = self.ocr.match_augment(text)
-                if m and (best is None or m[1] > best[1]):
-                    best = m
-            if best:
-                hits += 1
-                titles.append(best[0])
+        hits, _titles = self._ocr_title_strips(
+            [self._crop(frame, band) for band in regions["title_bands"]])
         self.core.feed_titles(hits)
+        self._fire_state_change()
 
+        card_texts, any_text = self._ocr_cards(frame, regions["cards"])
+        if not any_text:
+            self._mismatch_run += 1
+            if self._mismatch_run == self.MISMATCH_LIMIT and self.on_calibrate_hint:
+                self.on_calibrate_hint()
+        else:
+            self._mismatch_run = 0
+        self.core.feed_cards(card_texts)
+        stable = self.core.consume_cards()
+        if stable and self.on_cards:
+            self.on_cards(stable, self.core.round_id)
+
+    def _crop(self, frame, rect):
+        x, y, w, h = rect
+        return frame[max(0, int(y)):int(y + h), max(0, int(x)):int(x + w)]
+
+    def _fire_state_change(self):
         active = self.core.state == "active"
         if active != self.last_active:
             self.last_active = active
+            if active:
+                # 首次激活：截当前帧存模板（后续非活跃期走预筛）
+                try:
+                    frame = self._grab()
+                    regions = self.layout.to_pixels(*self._screen_size())
+                    self._save_templates(frame, regions)
+                except Exception:
+                    pass
+            else:
+                self._mismatch_run = 0  # 跨活跃期不累计失配
             if self.on_state:
                 self.on_state(active, self.core.round_id)
-        if not active:
-            self._mismatch_run = 0  # 跨活跃期不累计失配
 
-        # 2. 活跃期：卡片区域识别 → 内容稳定 → 回调
-        if active:
-            card_texts = []
-            any_text = False
-            for rect in regions["cards"]:
-                x, y, w, h = rect
-                crop = frame[max(0, y):y + h, max(0, x):x + w]
-                found = self.ocr.match_augments_in(self.ocr.recognize(crop))
-                if found:
-                    any_text = True
-                    card_texts.append(found[0][0])
-                else:
-                    card_texts.append(None)
-            if not any_text:
-                self._mismatch_run += 1
-                if self._mismatch_run == self.MISMATCH_LIMIT and self.on_calibrate_hint:
-                    self.on_calibrate_hint()
+    def _ocr_cards(self, frame, card_rects) -> tuple:
+        card_texts, any_text = [], False
+        for rect in card_rects:
+            found = self.ocr.match_augments_in(
+                self.ocr.recognize(self._crop(frame, rect)))
+            if found:
+                any_text = True
+                card_texts.append(found[0][0])
             else:
-                self._mismatch_run = 0
-            self.core.feed_cards(card_texts)
-            stable = self.core.consume_cards()
-            if stable and self.on_cards:
-                self.on_cards(stable, self.core.round_id)
+                card_texts.append(None)
+        return card_texts, any_text
 
     # ── 自动标定（主窗口"开始标定"触发，阻塞 ~2s） ────────────────
 
@@ -358,6 +490,7 @@ class ScreenDetector(threading.Thread):
                 regions = self._regions_from_bands(bands, sw, sh)
                 save_layout(sw, sh, regions, confidence=0.9)
                 self.set_layout(Layout(regions, source="auto_calib"))
+                self._save_templates(frame, self.layout.to_pixels(sw, sh))
                 return True
             if i < attempts - 1:
                 time.sleep(1.5)

@@ -14,6 +14,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 BASE = "https://127.0.0.1:2999/liveclientdata"
 TIMEOUT = 2
+_SESSION = requests.Session()  # 复用连接，省去每请求 TLS 握手
 
 
 @dataclass
@@ -166,7 +167,7 @@ class LivePoller(threading.Thread):
     @staticmethod
     def _get_json(endpoint):
         try:
-            resp = requests.get(f"{BASE}{endpoint}", verify=False, timeout=TIMEOUT)
+            resp = _SESSION.get(f"{BASE}{endpoint}", verify=False, timeout=TIMEOUT)
             if resp.status_code == 200:
                 return resp.json()
         except Exception:

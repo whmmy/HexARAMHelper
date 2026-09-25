@@ -45,6 +45,14 @@ def main():
     settings = Settings()
     kb = KnowledgeBase()
     rules = RulesEngine(kb)
+
+    # 降进程优先级：本工具任何突发计算（OCR/截图）都不与游戏抢核
+    try:
+        import psutil
+        psutil.Process().nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+    except Exception:
+        pass
+
     dumper = FixtureDumper(enabled=bool(settings.get("fixtures", "dump", default=False)))
 
     # UI 队列（后台线程 → UI 线程；可承载事件串与可调用对象）
@@ -179,12 +187,17 @@ def main():
         session.replace_engine(new_engine)
 
     # overlay 显隐键（唯一热键，可选项；Tk 调度统一走 ui 队列）
+    # GetAsyncKeyState 轮询而非 keyboard 库——keyboard 在 import 时就装全局
+    # 键盘低级钩子，钩子回调依赖本进程线程调度，进程有 CPU 突刺时全系统
+    # 按键都会延迟（游戏内"动不了"的元凶）。P0 只需 F10，无需钩子。
     def hotkey_loop():
-        import keyboard
+        import ctypes
+        VK_F10 = 0x79
         last = 0.0
         while True:
             try:
-                if keyboard.is_pressed("f10") and time.time() - last > 0.8:
+                if (ctypes.windll.user32.GetAsyncKeyState(VK_F10) & 0x8000
+                        and time.time() - last > 0.8):
                     last = time.time()
                     ui_queue.put(overlay.toggle)
             except Exception:

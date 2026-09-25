@@ -48,6 +48,7 @@ class LCUConnector:
         self._connected = False
         self._summoner_id = None
         self.id_to_cn = {}
+        self._sess = requests.Session()  # 复用连接，省去每请求 TLS 握手
 
     # ── 连接 ──────────────────────────────────────────────────────
 
@@ -62,21 +63,26 @@ class LCUConnector:
         return False
 
     def _connect_via_process(self):
+        """两段式扫描（性能关键）：先只取 pid+name（psutil 缓存，便宜），
+        命中 leagueclientux.exe 才查 cmdline（昂贵系统调用）——
+        全量读 cmdline 每次连接尝试都要几百 ms 且高频尖峰。"""
         try:
-            for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            for proc in psutil.process_iter(['pid', 'name']):
                 try:
-                    if proc.info['name'] and proc.info['name'].lower() == 'leagueclientux.exe':
-                        cmdline = proc.info.get('cmdline') or []
-                        port = token = None
-                        for arg in cmdline:
-                            if '--app-port=' in arg:
-                                port = arg.split('=', 1)[1]
-                            elif '--remoting-auth-token=' in arg:
-                                token = arg.split('=', 1)[1]
-                        if port and token:
-                            self.port, self.auth_token = port, token
-                            self.base_url = f"https://127.0.0.1:{port}"
-                            return True
+                    name = (proc.info.get('name') or '').lower()
+                    if name != 'leagueclientux.exe':
+                        continue
+                    cmdline = proc.cmdline() or []
+                    port = token = None
+                    for arg in cmdline:
+                        if '--app-port=' in arg:
+                            port = arg.split('=', 1)[1]
+                        elif '--remoting-auth-token=' in arg:
+                            token = arg.split('=', 1)[1]
+                    if port and token:
+                        self.port, self.auth_token = port, token
+                        self.base_url = f"https://127.0.0.1:{port}"
+                        return True
                 except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
                     continue
         except Exception:
@@ -105,7 +111,7 @@ class LCUConnector:
         if not self.base_url or not self.auth_token:
             return None
         try:
-            return requests.request(
+            return self._sess.request(
                 method, f"{self.base_url}{endpoint}",
                 auth=('riot', self.auth_token),
                 verify=False, timeout=self.LCU_TIMEOUT, **kwargs)
@@ -323,6 +329,8 @@ class PhaseMachine(threading.Thread):
 
     POLL_INTERVAL = 2.0
     DISCONNECT_NEEDED = 3  # 连续 N 次获取不到 phase 视为断连
+    # 客户端不在时重连退避（秒）——避免每 2s 全量进程扫描的高频尖峰
+    CONNECT_BACKOFF = [2, 4, 8, 15, 30, 60]
 
     def __init__(self, lcu: LCUConnector, callbacks: dict = None):
         super().__init__(daemon=True, name="PhaseMachine")
@@ -332,6 +340,7 @@ class PhaseMachine(threading.Thread):
         self._phase = None           # 上次逻辑阶段
         self._fail_count = 0
         self._disconnected = False
+        self._backoff_idx = 0
 
     def stop(self):
         self._running = False
@@ -340,19 +349,25 @@ class PhaseMachine(threading.Thread):
         while self._running:
             phase = self._poll_phase()
             self._handle(phase)
-            time.sleep(self.POLL_INTERVAL)
+            if self.lcu.is_connected():
+                time.sleep(self.POLL_INTERVAL)
+            else:
+                time.sleep(self.CONNECT_BACKOFF[self._backoff_idx])
 
     def _poll_phase(self):
         if not self.lcu.is_connected():
-            self.lcu.connect()
-            if not self.lcu.is_connected():
+            if not self.lcu.connect():
                 self._fail()
+                self._backoff_idx = min(self._backoff_idx + 1,
+                                        len(self.CONNECT_BACKOFF) - 1)
                 return None
+            self._backoff_idx = 0
         phase = self.lcu.get_gameflow_phase()
         if phase is None:
             self._fail()
         else:
             self._fail_count = 0
+            self._backoff_idx = 0
             if self._disconnected:
                 self._disconnected = False
                 self._fire("on_reconnect")

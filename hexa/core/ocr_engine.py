@@ -23,7 +23,17 @@ class OcrEngine:
             with self._lock:
                 if self._ocr is None:
                     from rapidocr_onnxruntime import RapidOCR
-                    self._ocr = RapidOCR()
+                    # det_limit_type='max' 是性能关键：默认 'min' 会把 80px 高的
+                    # 标题条上采样到 736（1352ms/条，持续跑满一整个核）；'max'
+                    # 只限制长边、小图原样推理（~100ms/条，实测识别无损）
+                    # intra_op_num_threads=2 是对局 CPU 关键：默认 -1 = 全部物理核，
+                    # 且 ORT 线程池自旋等待——小图推理墙钟 14ms 却烧 188ms CPU 时间
+                    # （9 线程），游戏内每 6s 盲扫一次 = 周期性 2.5 核尖峰（卡顿元凶）。
+                    # 2 线程墙钟不变、CPU 时间降 ~10 倍（微基准 experiments/ 实测）。
+                    self._ocr = RapidOCR(use_angle_cls=False,
+                                         det_limit_side_len=960,
+                                         det_limit_type='max',
+                                         intra_op_num_threads=2)
         return self._ocr
 
     # ── 识别 ──────────────────────────────────────────────────────
