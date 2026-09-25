@@ -1,6 +1,7 @@
-"""主窗口：状态/阵容/建议/台账/数据新鲜度/日志（fork 参考项目骨架）
+"""主窗口：状态/阵容/建议/台账(可纠错)/数据新鲜度/AI 仪表/日志
 
-线程模型：后台线程（PhaseMachine/LivePoller）→ ui_queue → after(100) 轮询渲染。
+线程模型：后台线程（PhaseMachine/LivePoller/检测器）→ ui_queue → after 轮询。
+ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度的统一出口）。
 """
 import queue
 import tkinter as tk
@@ -14,11 +15,16 @@ STAGE_CN = {
 
 
 class MainWindow:
-    def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue, log_queue: queue.Queue):
+    def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue,
+                 log_queue: queue.Queue, on_open_settings=None,
+                 on_calibrate=None):
         self.root = root
         self.session = session
         self.ui_queue = ui_queue
         self.log_queue = log_queue
+        self.on_open_settings = on_open_settings
+        self.on_calibrate = on_calibrate
+        self._ledger_cache = None      # 台账按钮去重重建
         self._build()
         self.root.after(100, self._poll_ui)
         self.root.after(200, self._poll_log)
@@ -27,7 +33,7 @@ class MainWindow:
 
     def _build(self):
         self.root.title("HexARAMHelper 海克斯大乱斗助手")
-        self.root.geometry("560x720")
+        self.root.geometry("560x760")
         self.root.minsize(480, 560)
         Theme.style_root(self.root)
 
@@ -44,6 +50,12 @@ class MainWindow:
         self.lbl_hero.pack(side=tk.LEFT, padx=(16, 0))
         self.lbl_path = ttk.Label(status, text="路线: -")
         self.lbl_path.pack(side=tk.LEFT, padx=(16, 0))
+        if self.on_open_settings:
+            ttk.Button(status, text="⚙ 设置", command=self.on_open_settings
+                       ).pack(side=tk.RIGHT)
+        if self.on_calibrate:
+            ttk.Button(status, text="开始标定", command=self.on_calibrate
+                       ).pack(side=tk.RIGHT, padx=(0, 8))
 
         # 手动输英雄兜底行
         manual = ttk.Frame(main)
@@ -65,16 +77,24 @@ class MainWindow:
         teams.columnconfigure(0, weight=1)
         teams.columnconfigure(1, weight=1)
 
-        # 威胁 + 建议卡片
+        # 威胁 + 建议 + 台账(纠错)卡片
         self.card_threat = self._card(main, "敌方威胁画像")
         self.card_suggest = self._card(main, "当前建议")
-        self.card_augments = self._card(main, "海克斯台账")
+        ledger_frame = ttk.Frame(main, style="Card.TFrame", padding=8)
+        ledger_frame.pack(fill=tk.X, pady=(8, 0))
+        ttk.Label(ledger_frame, text="海克斯台账（点名字撤销纠错）",
+                  style="Dim.TLabel").pack(anchor=tk.NW)
+        self.ledger_box = ttk.Frame(ledger_frame, style="Card.TFrame")
+        self.ledger_box.pack(anchor=tk.NW, pady=(4, 0), fill=tk.X)
+        self.card_ranks = self._card(main, "海克斯时刻评级")
 
         # 数据新鲜度（版本翻译器底线：抓取日期常显 + >7 天黄标）
         fresh = ttk.Frame(main)
         fresh.pack(fill=tk.X, pady=(8, 0))
         self.lbl_fresh = ttk.Label(fresh, text="数据版本: -", style="Dim.TLabel")
         self.lbl_fresh.pack(side=tk.LEFT)
+        self.lbl_engine = ttk.Label(fresh, text="AI: -", style="Dim.TLabel")
+        self.lbl_engine.pack(side=tk.RIGHT)
 
         # 日志
         logcard = ttk.Frame(main)
@@ -111,7 +131,12 @@ class MainWindow:
     def _poll_ui(self):
         try:
             while True:
-                self.ui_queue.get_nowait()
+                item = self.ui_queue.get_nowait()
+                if callable(item):
+                    try:
+                        item()
+                    except Exception as e:
+                        print(f"[WARN] UI 调度异常: {e}")
         except queue.Empty:
             pass
         state = self.session.ui_state()
@@ -125,10 +150,52 @@ class MainWindow:
         self.lbl_enemy.config(text="敌方: " + (" ".join(state['enemy']) or "-"))
         self.card_threat.config(text=state['threat'] or "-")
         self.card_suggest.config(text=state['suggestion'] or "-（对局内触发时给出）")
-        self.card_augments.config(
-            text="\n".join(f"· {a}" for a in state['augments']) or "-（P1 鼠标记账接入）")
+        self._render_ledger(state['augments'])
+        self._render_ranks(state.get('card_ranks') or [])
         self._render_freshness(state)
+        self._render_engine(state.get('engine') or {})
         self.root.after(500, self._poll_ui)
+
+    def _render_ledger(self, augments):
+        """台账纠错：点名字撤销（列表变化才重建，防每 500ms 重建闪烁）"""
+        key = tuple(augments)
+        if key == self._ledger_cache:
+            return
+        self._ledger_cache = key
+        for w in self.ledger_box.winfo_children():
+            w.destroy()
+        if not augments:
+            ttk.Label(self.ledger_box, text="-（游戏内海克斯界面点击后自动记录）",
+                      style="Dim.TLabel").pack(anchor=tk.NW)
+            return
+        for name in augments:
+            row = ttk.Frame(self.ledger_box, style="Card.TFrame")
+            row.pack(anchor=tk.NW, fill=tk.X, pady=1)
+            ttk.Label(row, text=f"· {name}").pack(side=tk.LEFT)
+            ttk.Button(row, text="撤销", width=5,
+                       command=lambda n=name: self.session.revoke_augment(n)
+                       ).pack(side=tk.RIGHT)
+
+    def _render_ranks(self, ranks):
+        if not ranks:
+            self.card_ranks.config(text="-（海克斯界面出现时显示）")
+            return
+        lines = []
+        for i, r in enumerate(ranks[:3], 1):
+            grade = r.get("grade", "?")
+            lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}  [{grade}]  "
+                         f"{r.get('reason', '')}")
+        self.card_ranks.config(text="\n".join(lines))
+
+    def _render_engine(self, st):
+        mode = st.get("mode", "rule")
+        if mode == "rule":
+            txt, color = "AI: 关（规则模式）", Theme.TEXT_DIM
+        else:
+            txt = (f"AI: {mode} | 本局 {st.get('calls', 0)}/{st.get('budget', 0)} 次"
+                   f" | ¥{st.get('cost_game', 0):.4f} | 上下文 {st.get('ctx_source', '-')}")
+            color = Theme.SUCCESS
+        self.lbl_engine.config(text=txt, foreground=color)
 
     def _render_freshness(self, state):
         info = self.session.data_freshness()

@@ -4,12 +4,18 @@
        → ui_state() 供 UI 线程轮询渲染。
 
 承载：双方阵容 / 我的装备与死亡态 / 海克斯台账 / current_path / 时间线 /
-     出门装两分支状态机（v4.1 §2）/ 触发器评估（死亡·敌方关键装·KDA）。
+     出门装两分支状态机（v4.1 §2）/ 触发器评估（死亡·敌方关键装·KDA）/
+     DecisionEngine 编排（同步规则底线 + AI 异步精修，serial 防旧覆新）/
+     建议历史与复盘日志（P3）。
 """
+import json
 import threading
 import time
 from dataclasses import dataclass, field
 
+from hexa.ai import engine as engine_mod
+from hexa.ai.engine import KIND_CTX, KIND_NEXT, KIND_OPENING, KIND_RANKS
+from hexa.config import BASE_DIR
 from hexa.core.rules_engine import Candidate
 
 
@@ -19,21 +25,24 @@ class Suggestion:
     candidates: list = field(default_factory=list)  # [Candidate]
     note: str = ""
     gold: float = 0.0            # 生成建议时的我方金币（next_items 展示用）
+    source: str = "rule"         # rule / ai（AI 精修覆盖后标记）
+    serial: int = 0              # 建议序号（AI 精修防旧覆新）
     ts: float = field(default_factory=time.time)
 
     def render(self) -> str:
         if not self.candidates:
             return self.note
+        tag = " ·AI" if self.source == "ai" else ""
         if self.kind == "next_items":
-            head = "出装主线"
+            head = "出装主线" + tag
             if self.gold > 0:
                 head += f"（金币 {self.gold:.0f}）"
             lines = [head]
             for i, c in enumerate(self.candidates[:3], 1):
                 price = f"{c.price}G" if c.price else ""
                 extra = f"，{c.afford_note}" if c.afford_note else ""
-                tag = f"（{price}{extra}）" if price else ""
-                lines.append(f"{'①②③'[i-1]} {c.name}{tag} —— {c.reason}")
+                tag_i = f"（{price}{extra}）" if price else ""
+                lines.append(f"{'①②③'[i-1]} {c.name}{tag_i} —— {c.reason}")
             return "\n".join(lines)
         lines = []
         for i, c in enumerate(self.candidates[:3], 1):
@@ -46,12 +55,15 @@ class Suggestion:
 class GameSession:
     """单局生命周期：ChampSelect → GameStart → InProgress → EndOfGame/秒退重置"""
 
-    def __init__(self, kb, rules, settings=None, fixture_dumper=None, live_poller=None):
+    def __init__(self, kb, rules, settings=None, fixture_dumper=None,
+                 live_poller=None, engine=None):
         self.kb = kb
         self.rules = rules
         self.settings = settings
         self.dumper = fixture_dumper
         self.live = live_poller
+        self.engine = engine or engine_mod.RuleDecisionEngine(kb, rules)
+        self.engine.bind(self._on_engine_result)
         self._lock = threading.RLock()
         self.reset()
 
@@ -79,6 +91,11 @@ class GameSession:
             self.first_augment = None
             self._my_gold = 0.0
             self._last_sig = None         # 快照签名（定时 diff 用）
+            self._sug_serial = 0          # 建议序号（AI 精修防旧覆新）
+            self._card_serial = 0         # 海克斯时刻评级序号
+            self.card_ranks = []          # 当前海克斯三卡片评级 [{name,grade,reason}]
+            self.history = []             # 建议历史（复盘日志）
+            self._game_t0 = time.time()
             self._log("session_reset")
 
     def _log(self, event, detail=""):
@@ -115,7 +132,18 @@ class GameSession:
             if self.dumper:
                 self.dumper.start_session(self.my_hero or "unknown")
                 self.dumper.dump_lcu("/lol-gameflow/v1/session", teams)
-            # P2 在此触发 System2 ChampionContext 生成（当前仅规则模式）
+            # System2 ChampionContext（AI 引擎后台生成；规则引擎空操作）
+            hero, ally, enemy = self.my_hero, list(self.ally), list(self.enemy)
+
+        # 引擎回调在锁外启动（内部再起线程，避免持锁起线程）
+        self.engine.start_game(hero or "", ally, enemy)
+
+    def replace_engine(self, new_engine):
+        """设置保存后热切换引擎（重建 AI 客户端/预算态；规则↔AI 即时生效）"""
+        with self._lock:
+            self.engine = new_engine
+            self.engine.bind(self._on_engine_result)
+        print(f"[SESSION] 引擎已切换: {new_engine.mode}")
 
     def on_in_progress(self):
         with self._lock:
@@ -127,6 +155,7 @@ class GameSession:
     def on_end_of_game(self, reason):
         with self._lock:
             self._log("end_of_game", reason)
+            self._write_review_log()
             if self.live:
                 self.live.leave_game()
             if self.dumper:
@@ -157,8 +186,8 @@ class GameSession:
         """定时快照 diff（v4.2）：状态签名变化即重算建议，不再只靠死亡触发。
 
         签名 = (我方装备, 金币档 250G 粒度, 敌方装备, 死亡态)。
-        P0 规则层重算零成本，签名一变即刷；P2 AI 模式在此基础上加
-        调用间隔与预算守门（triggers.periodic_recheck 可关）。
+        规则层重算零成本，签名一变即刷；AI 模式下 periodic 类精修由
+        引擎守门（min_interval + budget），事件类不受间隔限制。
         """
         if self.settings and not self.settings.get(
                 "triggers", "periodic_recheck", default=True):
@@ -184,7 +213,7 @@ class GameSession:
                 and time.time() - self.suggestion.ts < 8):
             return
         if self.first_augment or self.my_items:
-            self._suggest_next_items()
+            self._suggest_next_items(reason="periodic")
 
     # ── 海克斯记账（P1 mouse_ledger 调用入口；冒烟测试直接调用） ───
 
@@ -203,7 +232,7 @@ class GameSession:
             return True
 
     def revoke_augment(self, name: str):
-        """台账纠错（P3 UI 点击区调用）"""
+        """台账纠错（主窗口点击区调用）"""
         with self._lock:
             before = len(self.augments)
             self.augments = [a for a in self.augments if a["name"] != name]
@@ -231,6 +260,29 @@ class GameSession:
             self._log("hero_manual", matches[0])
         return matches[0]
 
+    # ── 海克斯时刻（screen_detect 检测到三卡片 → 评级；记账入口 record_augment） ──
+
+    def rank_augment_cards(self, card_names: list) -> list:
+        """三张卡片基准评级（同步）+ AI 精修（异步经 _on_engine_result 覆盖）"""
+        with self._lock:
+            self._card_serial += 1
+            serial = self._card_serial
+            hero = self.my_hero or ""
+            taken = [a["name"] for a in self.augments]
+            items = list(self.my_items)
+            threat = self.threat
+        ranks = self.engine.rank_cards(hero, card_names, taken, items,
+                                       threat, serial)
+        with self._lock:
+            if serial == self._card_serial:
+                self.card_ranks = ranks
+        return ranks
+
+    def clear_card_ranks(self):
+        """海克斯界面消失后清除时刻评级（overlay 时刻块随之隐藏）"""
+        with self._lock:
+            self.card_ranks = []
+
     # ── 出门装两分支状态机（v4.1 §2：先海克斯后出门装） ────────────
 
     def _decide_opening_or_next(self):
@@ -241,19 +293,30 @@ class GameSession:
         if self.my_items:
             self.opening_state = "bypassed"
             self._log("opening_bypassed", "已购装备，直接进入下一件模式")
-            self._suggest_next_items()
+            self._suggest_next_items(reason="event")
         else:
             self.opening_state = "offered"
-            cands = self.rules.opening_candidates(self.my_hero, self.first_augment)
-            self.suggestion = Suggestion(
-                "opening", cands, note=f"首个海克斯【{self.first_augment}】已联动")
-            self._log("opening_offered", self.first_augment)
+            serial = self._new_serial()
+            threat = self.threat
+            first = self.first_augment
+            cands = self.engine.opening_candidates(first, threat, serial)
+            note = f"首个海克斯【{first}】已联动"
+            self._set_suggestion(Suggestion("opening", cands, note=note,
+                                            serial=serial))
+            self._log("opening_offered", first)
 
-    def _suggest_next_items(self):
+    def _suggest_next_items(self, reason: str = "event"):
         """出装主线序列（v4.2）：金币按序累计——够买第 1 件后剩余继续判第 2 件，
-        兑现"钱够就连买两件"的场景；小件合成线有目标时置顶。"""
+        兑现"钱够就连买两件"的场景；小件合成线有目标时置顶。
+
+        reason: event（死亡/首海克斯后，不受 AI 间隔守门）| periodic（快照 diff）
+        """
         threat = self.threat or self.rules.threat_profile(self.enemy)
-        seq = self.rules.build_sequence(self.my_items, self.current_path, threat)
+        serial = self._new_serial()
+        seq = self.engine.next_candidates(self.my_items, self._my_gold,
+                                          self.current_path, threat, serial,
+                                          reason=reason,
+                                          augments=list(self.augments))
         target, note = self.rules.component_advice(self.my_items, self.current_path)
         if target and (not seq or seq[0].name != target):
             tprice = self.kb.items.get(target, {}).get("gold", 0)
@@ -268,7 +331,59 @@ class GameSession:
                     remaining -= c.price
                 else:
                     c.afford_note = f"还差{c.price - remaining:.0f}"
-        self.suggestion = Suggestion("next_items", seq, gold=self._my_gold)
+        self._set_suggestion(Suggestion("next_items", seq, gold=self._my_gold,
+                                        serial=serial))
+
+    # ── 建议落位（serial 管理 + 历史） ─────────────────────────────
+
+    def _new_serial(self) -> int:
+        with self._lock:
+            self._sug_serial += 1
+            return self._sug_serial
+
+    def _set_suggestion(self, sugg: Suggestion, serial: int = None):
+        with self._lock:
+            sugg.serial = serial if serial is not None else self._sug_serial
+            self.suggestion = sugg
+            self.history.append((time.time(), sugg.kind, sugg.render()))
+
+    # ── AI 精修结果（引擎后台线程回调） ────────────────────────────
+
+    def _on_engine_result(self, kind, payload, serial):
+        with self._lock:
+            if kind == KIND_CTX:
+                self._log("engine_ctx", str(payload.get("source")))
+                return
+            if kind == KIND_RANKS:
+                if serial == self._card_serial and payload:
+                    self.card_ranks = payload
+                    self._log("card_ranks_ai", str(len(payload)))
+                return
+            # opening / next_items：serial 匹配当前建议且类型一致才覆盖
+            cur = self.suggestion
+            if serial != self._sug_serial or cur is None:
+                return
+            if kind == KIND_OPENING and cur.kind == "opening":
+                if payload:
+                    cur.candidates = payload
+                    cur.source = "ai"
+                    cur.ts = time.time()
+                    self._log("opening_ai", f"{len(payload)} 项")
+            elif kind == KIND_NEXT and cur.kind == "next_items":
+                if payload:
+                    cur.candidates = payload
+                    cur.source = "ai"
+                    cur.ts = time.time()
+                    # AI 重排后需按当前金币重算可买性（保序累计）
+                    remaining = self._my_gold
+                    for c in cur.candidates:
+                        if self._my_gold > 0 and c.price:
+                            if remaining >= c.price:
+                                c.afford_note = "可购买"
+                                remaining -= c.price
+                            else:
+                                c.afford_note = f"还差{c.price - remaining:.0f}"
+                    self._log("next_items_ai", f"{len(payload)} 项")
 
     # ── 触发器评估（死亡 / 敌方关键装备 / KDA 起飞） ───────────────
 
@@ -279,7 +394,7 @@ class GameSession:
         if triggers.get("death_next_item", True) and snap.my_is_dead and not self._prev_dead:
             self._log("my_death", f"respawn={snap.my_respawn_timer:.0f}s")
             if self.first_augment or self.my_items:
-                self._suggest_next_items()
+                self._suggest_next_items(reason="event")
         self._prev_dead = snap.my_is_dead
 
         # 2. 敌方关键装备完成（集合 diff）→ 克制提示
@@ -294,6 +409,8 @@ class GameSession:
                     note = KEY_ENEMY_ITEMS[item]
                     self.suggestion = Suggestion(
                         "event_note", [Candidate(f"敌方 {champ} 出了 {item}", note)])
+                    self.history.append(
+                        (time.time(), "event_note", self.suggestion.render()))
                     self._log("enemy_key_item", f"{champ} {item}")
 
         # 3. 敌方 KDA 起飞（每局限 2 次）
@@ -306,6 +423,8 @@ class GameSession:
                         "event_note",
                         [Candidate(f"{p.champion} 已起飞 {p.kills}/{p.deaths}/{p.assists}",
                                    "考虑针对性装备（抗性/重伤/金身类）")])
+                    self.history.append(
+                        (time.time(), "event_note", self.suggestion.render()))
                     self._log("enemy_kda_alert", f"{p.champion} {p.kills}/{p.deaths}")
                     break
 
@@ -318,12 +437,52 @@ class GameSession:
             self.current_path = new_path
             self._log("current_path", new_path)
 
+    # ── 复盘日志（P3：局终落盘，供赛后回顾） ──────────────────────
+
+    def _write_review_log(self):
+        try:
+            out_dir = BASE_DIR / "log" / "games"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._game_t0))
+            hero = (self.my_hero or "unknown").replace("/", "_")
+            stats = {}
+            try:
+                stats = self.engine.stats()
+            except Exception:
+                pass
+            doc = {
+                "hero": self.my_hero,
+                "started_at": time.strftime("%Y-%m-%d %H:%M:%S",
+                                            time.localtime(self._game_t0)),
+                "duration_s": round(time.time() - self._game_t0, 1),
+                "ally": list(self.ally), "enemy": list(self.enemy),
+                "augments": list(self.augments),
+                "final_items": list(self.my_items),
+                "current_path": self.current_path,
+                "threat": self.threat.summary() if self.threat else "",
+                "engine": stats,
+                "suggestions": [
+                    {"ts": round(t, 1), "kind": k, "text": x}
+                    for t, k, x in self.history[-60:]],
+                "timeline": [
+                    {"ts": round(t, 1), "event": e, "detail": d}
+                    for t, e, d in self.timeline[-200:]],
+            }
+            path = out_dir / f"{ts}_{hero}.json"
+            path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
+                            encoding="utf-8")
+            print(f"[SESSION] 复盘日志已写入 {path.name}")
+        except Exception as e:
+            print(f"[WARN] 复盘日志写入失败: {e}")
+
     # ── UI 消费 ───────────────────────────────────────────────────
 
     def data_freshness(self) -> dict:
         """数据新鲜度（版本翻译器底线：抓取日期常显，>7 天黄标）"""
         import datetime
-        info = {"dd_version": self.kb.dd_version, "date": "-", "age_days": None}
+        info = {"dd_version": self.kb.dd_version, "date": "-",
+                "age_days": None, "builds_patch": self.kb.builds_patch,
+                "builds_date": self.kb.builds_fetched}
         try:
             mtime = self.kb.data_dir.joinpath("hero_augments.csv").stat().st_mtime
             d = datetime.date.fromtimestamp(mtime)
@@ -337,6 +496,11 @@ class GameSession:
         with self._lock:
             threat = self.threat.summary() if self.threat else ""
             drift = self.rules.path_drift(self.current_path, self.my_items)
+            try:
+                engine_stats = self.engine.stats()
+            except Exception:
+                engine_stats = {}
+            skill = self.engine.skill_order(self.my_hero or "") if self.my_hero else ""
             return {
                 "stage": self.stage,
                 "my_hero": self.my_hero,
@@ -348,5 +512,10 @@ class GameSession:
                 "path_drift": drift,
                 "threat": threat,
                 "suggestion": self.suggestion.render() if self.suggestion else "",
+                "suggestion_kind": self.suggestion.kind if self.suggestion else "",
+                "suggestion_source": self.suggestion.source if self.suggestion else "",
+                "card_ranks": [dict(r) for r in self.card_ranks],
+                "skill_order": skill,
                 "dd_version": self.kb.dd_version,
+                "engine": engine_stats,
             }

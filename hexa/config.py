@@ -22,6 +22,25 @@ KNOW_DIR = BASE_DIR / "hexa" / "knowledge"
 FIXTURES_DIR = BASE_DIR / "fixtures"
 SETTINGS_PATH = BASE_DIR / "settings.json"
 
+
+def load_dotenv(path: Path = None):
+    """读取项目根 .env（简单 KEY=VALUE；不覆盖已有环境变量；无额外依赖）"""
+    path = path or (BASE_DIR / ".env")
+    if not path.exists():
+        return
+    try:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            os.environ.setdefault(k.strip(), v.strip())
+    except Exception as e:
+        print(f"[WARN] .env 读取失败: {e}")
+
+
+load_dotenv()
+
 # ── settings.json 默认值 ─────────────────────────────────────────
 
 DEFAULTS = {

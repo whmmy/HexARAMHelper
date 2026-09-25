@@ -49,6 +49,13 @@ class KnowledgeBase:
         # DD 装备: 中文名 -> {tags, gold, plaintext}
         self.items = {}
         self.dd_version = ""
+        # OP.GG builds: 中文名 -> {core_builds, starter_items, boots, skill_orders, ...}
+        self.builds = {}
+        self.builds_patch = ""
+        self.builds_fetched = ""
+        # 海克斯语义标签: 名 -> {path_bias, tags, is_upgrade}
+        self.augment_tags = {}
+        self.augment_tags_version = ""
         self._load_all()
 
     # ── 加载 ──────────────────────────────────────────────────────
@@ -59,9 +66,46 @@ class KnowledgeBase:
         self._load_pinyin()
         self._load_knowledge()
         self._load_items()
+        self._load_builds()
+        self._load_augment_tags()
         print(f"[OK] 知识库加载: {len(self.hero_augments)} 英雄先验 / "
               f"{len(self.augment_names)} 海克斯 / {len(self.items)} 装备 / "
-              f"{len(self.champ_profile)} 英雄画像")
+              f"{len(self.champ_profile)} 英雄画像 / {len(self.builds)} 英雄 builds")
+
+    def _load_builds(self):
+        """A 层统计层：data/builds/{slug}.json × 173（OP.GG 出装/出门/鞋子/加点）"""
+        builds_dir = self.data_dir / "builds"
+        if not builds_dir.is_dir():
+            print(f"[WARN] 缺少 {builds_dir}（OP.GG builds，出装候选池将退化为全库扫描）")
+            return
+        patches = set()
+        for path in sorted(builds_dir.glob("*.json")):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            hero = (data.get("hero_cn") or "").strip()
+            if not hero:
+                continue
+            self.builds[hero] = data
+            if data.get("patch"):
+                patches.add(data["patch"])
+            if data.get("fetched_at") and data["fetched_at"] > self.builds_fetched:
+                self.builds_fetched = data["fetched_at"]
+        if patches:
+            self.builds_patch = sorted(patches)[-1]
+
+    def _load_augment_tags(self):
+        """B 层语义标签库（System2 离线打标；缺失时 rules_engine 用内置小表兜底）"""
+        path = self.know_dir / "augments.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self.augment_tags = data.get("augments", {})
+                if data.get("version"):
+                    self.augment_tags_version = data["version"]
+            except Exception as e:
+                print(f"[WARN] augments.json 读取失败: {e}")
 
     def _load_hero_augments(self):
         path = self.data_dir / "hero_augments.csv"
@@ -218,3 +262,53 @@ class KnowledgeBase:
 
     def valid_augment(self, name: str) -> bool:
         return name in self.augment_names
+
+    # ── OP.GG builds 查询（P1：候选池升级为高频装） ─────────────────
+
+    def build_for(self, hero_cn: str) -> dict:
+        """英雄 OP.GG builds 原始数据（无数据返回 {}）"""
+        return self.builds.get(hero_cn, {})
+
+    def core_item_pool(self, hero_cn: str) -> list:
+        """该英雄 OP.GG 高频核心装（按登场序展平去重，越靠前越高频）。
+
+        仅保留 DD 库内条目（OP.GG 与 DD 中文命名一致，实测命中率 100%，
+        此处过滤只作防御）。
+        """
+        build = self.builds.get(hero_cn, {})
+        pool, seen = [], set()
+        for combo in build.get("core_builds", []):
+            for name in combo:
+                if name not in seen and self.valid_item(name):
+                    seen.add(name)
+                    pool.append(name)
+        return pool
+
+    def starter_combos(self, hero_cn: str) -> list:
+        """出门装方案（[[...], ...]，全部组件过 DD 校验）"""
+        build = self.builds.get(hero_cn, {})
+        out = []
+        for combo in build.get("starter_items", []):
+            if combo and all(self.valid_item(n) for n in combo):
+                out.append(list(combo))
+        return out
+
+    def boots_options(self, hero_cn: str) -> list:
+        build = self.builds.get(hero_cn, {})
+        return [list(c) for c in build.get("boots", [])
+                if c and all(self.valid_item(n) for n in c)]
+
+    def skill_advice(self, hero_cn: str) -> dict:
+        """静态加点建议（v4.1 收窄：只给大概顺序，不做实时技能点计算）"""
+        build = self.builds.get(hero_cn, {})
+        orders = build.get("skill_orders") or []
+        return {
+            "priority": build.get("skill_priority") or "",
+            "order": orders[0] if orders else [],
+            "names": build.get("skill_names") or {},
+        }
+
+    # ── 海克斯语义标签（B 层，System2 离线打标产物） ────────────────
+
+    def augment_tag_info(self, name: str) -> dict:
+        return self.augment_tags.get(name, {})

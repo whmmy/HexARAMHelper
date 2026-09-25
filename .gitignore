@@ -36,6 +36,7 @@ settings.json
 # ── 运行时产物 ───────────────────────────
 *.log
 logs/
+log/
 fixtures/
 hexa/ui/calibrations/*.json
 !hexa/ui/calibrations/.gitkeep

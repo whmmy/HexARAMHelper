@@ -1,0 +1,379 @@
+"""海克斯界面检测（计划 §3 / §7 core/screen_detect.py）
+
+架构：DetectorCore（纯逻辑状态机，可离线测试）+ ScreenDetector（截屏线程）。
+
+主信号：标题条小区域 OCR + 229 海克斯库模糊匹配（每 2s）——
+≥2 个标题命中且连续 2 帧 = 界面出现；连续 3 帧无命中 = 消失（迟滞防误触）。
+界面活跃期间持续比对卡片内容：内容变化（reroll/新轮）即重启识别，
+稳定 2 帧才回调 on_cards 计入推荐/台账。
+OCR 连续失配 = UI 漂移/改版 → on_calibrate_hint 提示重标定，不默默推错。
+模板匹配（cv2.matchTemplate）退为预热加速与 OCR 异常兜底。
+
+区域坐标（Layout）：默认层 = 16:9 百分比常量（占位，真机标定校准）；
+加载时把横向偏移换算为「高度基准 + 屏幕中心锚定」单位（H 相对量），
+16:10/21:9/32:9 兜得住；标定结果按分辨率存 calibrations/{W}x{H}.json
+（gitignore 排除，用户屏幕专属）；自动标定 = 中央横带全量 OCR 找
+三组海克斯标题聚类 + reroll 特征文本。
+"""
+import json
+import threading
+import time
+from pathlib import Path
+
+CALIB_DIR = Path(__file__).resolve().parent.parent / "ui" / "calibrations"
+
+# ── 默认布局（16:9 百分比占位；auto_calibrate 一次后即按真机生效） ──
+# title_bands: 三个卡片标题条 (x, y, w, h)；cards: 三张卡片矩形（点击热区，
+# 严禁交叠）；reroll: 刷新按钮矩形。均为屏幕比例。
+DEFAULT_LAYOUT_169 = {
+    "title_bands": [[0.245, 0.418, 0.170, 0.055],
+                    [0.415, 0.418, 0.170, 0.055],
+                    [0.585, 0.418, 0.170, 0.055]],
+    "cards":       [[0.225, 0.455, 0.170, 0.420],
+                    [0.415, 0.455, 0.170, 0.420],
+                    [0.605, 0.455, 0.170, 0.420]],
+    "reroll":      [0.445, 0.900, 0.110, 0.055],
+}
+ASPECT_169 = 16 / 9
+
+
+class Layout:
+    """区域布局：内部以「高度相对量 + 中心锚定」存储，适配任意宽高比。
+
+    存储单元：x 用相对屏幕中心的 H 偏移（xu = (fx-0.5)*16/9），
+    y/w/h 用 H 相对量（w 预乘 16/9）。to_pixels 时：
+      px_x = W/2 + xu*H ; px_y = y*H ; px_w = wu*H ; px_h = h*H
+    """
+
+    def __init__(self, data: dict = None, source: str = "default"):
+        d = data or DEFAULT_LAYOUT_169
+        self.source = source
+        self.title_bands = [self._to_h_units(r) for r in d["title_bands"]]
+        self.cards = [self._to_h_units(r) for r in d["cards"]]
+        self.reroll = self._to_h_units(d["reroll"])
+
+    @staticmethod
+    def _to_h_units(r):
+        x, y, w, h = r
+        return [(x - 0.5) * ASPECT_169, y, w * ASPECT_169, h]
+
+    @staticmethod
+    def _from_h_units(r):
+        xu, y, wu, h = r
+        return [xu / ASPECT_169 + 0.5, y, wu / ASPECT_169, h]
+
+    def to_pixels(self, screen_w: int, screen_h: int):
+        def conv(r):
+            xu, y, wu, h = r
+            x = int(screen_w / 2 + xu * screen_h)
+            yy = int(y * screen_h)
+            return [x, yy, int(wu * screen_h), int(h * screen_h)]
+        return {"title_bands": [conv(r) for r in self.title_bands],
+                "cards": [conv(r) for r in self.cards],
+                "reroll": conv(self.reroll)}
+
+    def as_169(self) -> dict:
+        return {"title_bands": [self._from_h_units(r) for r in self.title_bands],
+                "cards": [self._from_h_units(r) for r in self.cards],
+                "reroll": self._from_h_units(self.reroll)}
+
+
+def load_layout(screen_w: int, screen_h: int) -> Layout:
+    """分辨率专属标定 → 默认布局（返回 Layout 与是否已标定）"""
+    path = CALIB_DIR / f"{screen_w}x{screen_h}.json"
+    if path.exists():
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return Layout(data.get("regions"), source=f"calib:{path.name}")
+        except Exception as e:
+            print(f"[WARN] 标定文件损坏，用默认布局: {e}")
+    return Layout()
+
+
+def save_layout(screen_w: int, screen_h: int, regions: dict, confidence: float):
+    CALIB_DIR.mkdir(parents=True, exist_ok=True)
+    path = CALIB_DIR / f"{screen_w}x{screen_h}.json"
+    doc = {"screen": [screen_w, screen_h], "confidence": confidence,
+           "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "regions": regions}
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"[CALIB] 已保存标定 {path.name}（置信度 {confidence:.2f}）")
+
+
+def point_in_rect(x: int, y: int, rect) -> bool:
+    rx, ry, rw, rh = rect
+    return rx <= x < rx + rw and ry <= y < ry + rh
+
+
+# ── 纯逻辑状态机（离线可测） ─────────────────────────────────────────
+
+class DetectorCore:
+    """海克斯界面出现/消失迟滞 + 卡片内容稳定判定。
+
+    喂入：feed_titles(hits: int) 每帧标题命中数；
+         feed_cards(card_texts: list[str|None]) 界面活跃期的每帧卡片识别结果。
+    输出：state('inactive'|'appearing'|'active'|'leaving')、
+         stable_cards（稳定 2 帧后非空，消费后调 consume_cards()）。
+    """
+
+    APPEAR_FRAMES = 2     # 连续 2 帧命中 → 出现
+    LEAVE_FRAMES = 3      # 连续 3 帧无命中 → 消失（迟滞）
+    STABLE_FRAMES = 2     # 内容稳定 2 帧 → 允许计入台账
+    MIN_TITLE_HITS = 2    # ≥2 个标题命中 = 界面出现
+
+    def __init__(self):
+        self.state = "inactive"
+        self.round_id = 0            # 本局第几轮海克斯（内容变化即 +1）
+        self._hit_run = 0
+        self._miss_run = 0
+        self._last_content = None
+        self._content_run = 0
+        self.stable_cards = None
+        self.stable_round = 0
+
+    def feed_titles(self, hits: int):
+        if self.state in ("inactive", "leaving"):
+            if hits >= self.MIN_TITLE_HITS:
+                self._hit_run += 1
+                self._miss_run = 0
+                if self._hit_run >= self.APPEAR_FRAMES:
+                    self.state = "active"
+                    self._hit_run = 0
+                    self._content_run = 0
+                    self._last_content = None
+                    self.round_id += 1
+                    print(f"[DETECT] 海克斯界面出现（第 {self.round_id} 轮）")
+            else:
+                self._hit_run = 0
+                self._miss_run = 0
+                if self.state == "leaving":
+                    self.state = "inactive"
+        elif self.state == "active":
+            if hits < self.MIN_TITLE_HITS:
+                self._miss_run += 1
+                if self._miss_run >= self.LEAVE_FRAMES:
+                    self.state = "inactive"
+                    self._miss_run = 0
+                    self.stable_cards = None
+                    print("[DETECT] 海克斯界面消失")
+            else:
+                self._miss_run = 0
+
+    def feed_cards(self, card_texts: list):
+        """active 状态下每帧喂卡片识别结果（list[str|None]，长度 3）"""
+        if self.state != "active":
+            return
+        content = tuple(card_texts)
+        if content != self._last_content:
+            self._last_content = content
+            self._content_run = 1
+            self.stable_cards = None
+            if any(card_texts):
+                print(f"[DETECT] 卡片内容变化: {card_texts}")
+        else:
+            self._content_run += 1
+            if self._content_run >= self.STABLE_FRAMES and any(card_texts):
+                if self.stable_cards is None:
+                    self.stable_cards = list(card_texts)
+                    self.stable_round = self.round_id
+                    print(f"[DETECT] 卡片内容稳定: {card_texts}")
+
+    def consume_cards(self):
+        out = self.stable_cards
+        self.stable_cards = None
+        return out
+
+    def reset_round(self):
+        """reroll/强制重扫：内容状态清零，等下一帧稳定"""
+        self._last_content = None
+        self._content_run = 0
+        self.stable_cards = None
+
+
+# ── 截屏检测线程 ─────────────────────────────────────────────────────
+
+class ScreenDetector(threading.Thread):
+    """每 2s 截屏 → 标题条 OCR → 库匹配 → DetectorCore；活跃期识别卡片。
+
+    回调（检测线程内执行，UI 消费请自行 queue/after 转发）：
+      on_state(active: bool, round_id: int)
+      on_cards(stable_cards: list[str], round_id: int)   # 稳定 2 帧后
+      on_calibrate_hint()                                # OCR 连续失配
+    """
+
+    POLL_INTERVAL = 2.0
+    MISMATCH_LIMIT = 5     # 连续 N 轮"标题命中但卡片全失配" → 提示重标定
+
+    def __init__(self, kb, ocr, layout: Layout = None):
+        super().__init__(daemon=True, name="ScreenDetector")
+        self.kb = kb
+        self.ocr = ocr
+        self.core = DetectorCore()
+        self.layout = layout
+        self.on_state = None
+        self.on_cards = None
+        self.on_calibrate_hint = None
+        self._running = False
+        self._paused = threading.Event()   # set = 暂停检测（非对局期）
+        self._mismatch_run = 0
+        self._screen = None
+        self.last_active = False
+
+    # ── 控制 ──────────────────────────────────────────────────────
+
+    def set_layout(self, layout: Layout):
+        self.layout = layout
+
+    def pause(self):
+        self._paused.set()
+
+    def resume(self):
+        self._paused.clear()
+
+    def force_rescan(self):
+        """reroll 按钮点击后调用：立即重启内容识别"""
+        self.core.reset_round()
+
+    def stop(self):
+        self._running = False
+
+    # ── 截屏 ──────────────────────────────────────────────────────
+
+    def _grab(self):
+        """主屏截屏 → BGR ndarray"""
+        import mss
+        import numpy
+        if self._screen is None:
+            self._screen = mss.mss()
+        shot = self._screen.grab(self._screen.monitors[1])
+        img = numpy.asarray(shot)
+        return img[:, :, :3][:, :, ::-1].copy()  # BGRA→BGR
+
+    # ── 主循环 ────────────────────────────────────────────────────
+
+    def run(self):
+        self._running = True
+        while self._running:
+            if self._paused.wait(timeout=1.0):
+                time.sleep(0.2)
+                continue
+            try:
+                self._tick()
+            except Exception as e:  # noqa: BLE001 —— 单帧失败不影响循环
+                print(f"[WARN] 检测帧异常: {e}")
+            time.sleep(self.POLL_INTERVAL)
+
+    def _tick(self):
+        if self.layout is None or not self.ocr.available:
+            return
+        import cv2
+        frame = self._grab()
+        sh, sw = frame.shape[:2]
+        regions = self.layout.to_pixels(sw, sh)
+
+        # 1. 标题条 OCR + 229 库匹配（主信号）
+        hits = 0
+        titles = []
+        for band in regions["title_bands"]:
+            x, y, w, h = band
+            crop = frame[max(0, y):y + h, max(0, x):x + w]
+            items = self.ocr.recognize(crop)
+            best = None
+            for text, rect, score in items:
+                m = self.ocr.match_augment(text)
+                if m and (best is None or m[1] > best[1]):
+                    best = m
+            if best:
+                hits += 1
+                titles.append(best[0])
+        self.core.feed_titles(hits)
+
+        active = self.core.state == "active"
+        if active != self.last_active:
+            self.last_active = active
+            if self.on_state:
+                self.on_state(active, self.core.round_id)
+
+        # 2. 活跃期：卡片区域识别 → 内容稳定 → 回调
+        if active:
+            card_texts = []
+            any_text = False
+            for rect in regions["cards"]:
+                x, y, w, h = rect
+                crop = frame[max(0, y):y + h, max(0, x):x + w]
+                found = self.ocr.match_augments_in(self.ocr.recognize(crop))
+                if found:
+                    any_text = True
+                    card_texts.append(found[0][0])
+                else:
+                    card_texts.append(None)
+            if not any_text:
+                self._mismatch_run += 1
+                if self._mismatch_run == self.MISMATCH_LIMIT and self.on_calibrate_hint:
+                    self.on_calibrate_hint()
+            else:
+                self._mismatch_run = 0
+            self.core.feed_cards(card_texts)
+            stable = self.core.consume_cards()
+            if stable and self.on_cards:
+                self.on_cards(stable, self.core.round_id)
+
+    # ── 自动标定（主窗口"开始标定"触发，阻塞 ~2s） ────────────────
+
+    def auto_calibrate(self, attempts: int = 3) -> bool:
+        """中央横带全量 OCR 找三组海克斯标题聚类 → 推导区域 → 保存。
+
+        需要海克斯界面正在屏幕上。成功返回 True（layout 已更新）。
+        """
+        import numpy as np
+        for i in range(attempts):
+            frame = self._grab()
+            sh, sw = frame.shape[:2]
+            bands = self._find_title_clusters(frame)
+            if bands and len(bands) == 3:
+                x_ratio = 16 / 9 / (sw / sh)  # 宽高比修正（H 单位换算用）
+                regions = self._regions_from_bands(bands, sw, sh)
+                save_layout(sw, sh, regions, confidence=0.9)
+                self.set_layout(Layout(regions, source="auto_calib"))
+                return True
+            if i < attempts - 1:
+                time.sleep(1.5)
+        print("[CALIB] 自动标定失败：未找到三组海克斯标题（确认界面在屏后重试/手动标定）")
+        return False
+
+    def _find_title_clusters(self, frame):
+        """中央横带 OCR → 海克斯命中文本按 x 聚类为 ≤3 组，返回屏幕像素 bbox"""
+        sh, sw = frame.shape[:2]
+        y0, y1 = int(sh * 0.30), int(sh * 0.62)
+        band = frame[y0:y1, :]
+        items = self.ocr.recognize(band)
+        hits = []
+        for text, rect, score in items:
+            m = self.ocr.match_augment(text)
+            if m and m[1] >= 78:
+                hits.append((m[0], rect[0] + rect[2] / 2, y0 + rect[1], rect[2],
+                             rect[3], m[1]))
+        hits.sort(key=lambda h: h[1])
+        # 按 x 间距聚类（间距 > 带宽 18% 分新组）
+        clusters = []
+        for h in hits:
+            if clusters and h[1] - clusters[-1][-1][1] < sw * 0.18:
+                clusters[-1].append(h)
+            else:
+                clusters.append([h])
+        clusters = [c for c in clusters if len(c) >= 1][:3]
+        return clusters if len(clusters) == 3 else None
+
+    def _regions_from_bands(self, clusters, sw, sh):
+        bands, cards = [], []
+        for cl in clusters:
+            cx = sum(h[1] for h in cl) / len(cl)
+            w = max(h[3] for h in cl) * 2.2
+            h_h = max(h[4] for h in cl) * 1.9
+            y = min(h[2] for h in cl)
+            bands.append([cx / sw - w / (2 * sw), y / sh, w / sw, h_h / sh])
+            cw = w * 1.25
+            cards.append([(cx - cw / 2) / sw, (y + h_h * 0.9) / sh,
+                          cw / sw, 0.40])
+        reroll = [0.5 - 0.06, min(b[1] + b[3] for b in bands) + max(c[1] + c[3]
+                  for c in cards) - 0.02, 0.12, 0.05]
+        return {"title_bands": bands, "cards": cards, "reroll": reroll}
