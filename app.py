@@ -72,13 +72,15 @@ def main():
 
     # ── 决策引擎（规则 / AI 双槽位） ──────────────────────────────
     engine = engine_mod.build_engine(kb, rules, settings)
-    live = LivePoller(kb, fixture_dumper=dumper)
+    lcu = LCUConnector(kb)
+    # 国服 activeplayer 缺英雄名/装备：注入召唤师名给 LivePoller 做玩家锚定
+    live = LivePoller(kb, fixture_dumper=dumper,
+                      summoner_name_fn=lcu.summoner_name)
     session = GameSession(kb, rules, settings=settings,
                           fixture_dumper=dumper, live_poller=live,
                           engine=engine)
     live.on_snapshot = session.on_snapshot
 
-    lcu = LCUConnector(kb)
     phase = PhaseMachine(lcu, callbacks={
         "on_champ_select": session.on_champ_select,
         "on_game_start": session.on_game_start,

@@ -58,6 +58,8 @@ DEFAULTS = {
         "temperature": 0.3,
         "max_tokens": 1500,
         "timeout": 60,
+        "price_in": 2.4,              # ¥/百万 token（费用仪表）
+        "price_out": 9.6,
     },
     # System 1：快照建议器（每局 8~11 次）
     "system1": {
@@ -68,6 +70,8 @@ DEFAULTS = {
         "temperature": 0.3,
         "max_tokens": 800,
         "timeout": 30,
+        "price_in": 0.8,
+        "price_out": 2.7,
     },
     # 局内触发器开关（计划 §5 触发器可配置）
     "triggers": {
@@ -130,6 +134,13 @@ class Settings:
                 return default
             node = node[k]
         return node
+
+    def get_float(self, *keys, default: float) -> float:
+        """数值读取：空串/非法值回退 default（历史 settings.json 可能存 ""）"""
+        try:
+            return float(self.get(*keys, default=default))
+        except (TypeError, ValueError):
+            return default
 
     def set(self, *keys_and_value):
         *keys, value = keys_and_value

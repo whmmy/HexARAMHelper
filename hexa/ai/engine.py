@@ -115,7 +115,7 @@ class AIDecisionEngine(DecisionEngine):
 
     def _try_reserve(self) -> bool:
         """原子占位：预算内则计数 +1 并返回 True（检查与计数同锁，防竞态超限）"""
-        budget = int(self.settings.get("ai", "budget_per_game", default=15))
+        budget = int(self.settings.get_float("ai", "budget_per_game", default=15))
         with self._lock:
             if self._calls >= budget:
                 return False
@@ -125,7 +125,7 @@ class AIDecisionEngine(DecisionEngine):
     def _interval_ok(self, kind: str, reason: str) -> bool:
         if reason != "periodic":
             return True
-        min_iv = float(self.settings.get("ai", "min_interval", default=20))
+        min_iv = self.settings.get_float("ai", "min_interval", default=20)
         return time.time() - self._last_refine.get(kind, 0) >= min_iv
 
     def _submit(self, kind, serial, fn):
@@ -272,10 +272,10 @@ class AIDecisionEngine(DecisionEngine):
     def stats(self):
         u1 = getattr(self.client_s1, "usage", None)
         u2 = getattr(self.client_s2, "usage", None)
-        p1i = float(self.settings.get("system1", "price_in", default=0.8))
-        p1o = float(self.settings.get("system1", "price_out", default=2.7))
-        p2i = float(self.settings.get("system2", "price_in", default=2.4))
-        p2o = float(self.settings.get("system2", "price_out", default=9.6))
+        p1i = self.settings.get_float("system1", "price_in", default=0.8)
+        p1o = self.settings.get_float("system1", "price_out", default=2.7)
+        p2i = self.settings.get_float("system2", "price_in", default=2.4)
+        p2o = self.settings.get_float("system2", "price_out", default=9.6)
         cost_game = cost_total = 0.0
         calls = self._calls
         if u1:

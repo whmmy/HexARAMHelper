@@ -188,6 +188,10 @@ class MainWindow:
         self.card_ranks.config(text="\n".join(lines))
 
     def _render_engine(self, st):
+        if not st:
+            # stats 异常被上游吞掉时不误报"关"（AI 可能实际在跑）
+            self.lbl_engine.config(text="AI: -", foreground=Theme.TEXT_DIM)
+            return
         mode = st.get("mode", "rule")
         if mode == "rule":
             txt, color = "AI: 关（规则模式）", Theme.TEXT_DIM

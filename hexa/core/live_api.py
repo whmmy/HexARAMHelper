@@ -74,11 +74,17 @@ class LivePoller(threading.Thread):
 
     POLL_INTERVAL = 5.0
 
-    def __init__(self, kb, on_snapshot=None, fixture_dumper=None):
+    def __init__(self, kb, on_snapshot=None, fixture_dumper=None,
+                 summoner_name_fn=None):
         super().__init__(daemon=True, name="LivePoller")
         self.kb = kb
         self.on_snapshot = on_snapshot
         self.dumper = fixture_dumper
+        # 本地玩家定位（国服 activeplayer 缺 championName/items 时的兜底）
+        self.summoner_name_fn = summoner_name_fn
+        self._my_summoner = ""        # LCU 召唤师名缓存（非空后不再请求）
+        self._me_matched_via = ""     # 本局命中的匹配策略（日志诊断用）
+        self._me_miss_logged = False
         self._running = False
         self._in_game = threading.Event()
         self.last_snapshot: LiveSnapshot | None = None
@@ -91,6 +97,8 @@ class LivePoller(threading.Thread):
     def leave_game(self):
         self._in_game.clear()
         self.last_snapshot = None
+        self._me_matched_via = ""
+        self._me_miss_logged = False
 
     def stop(self):
         self._running = False
@@ -113,6 +121,46 @@ class LivePoller(threading.Thread):
                         print(f"[WARN] on_snapshot 回调异常: {e}")
             time.sleep(self.POLL_INTERVAL)
 
+    # ── 本地玩家定位（国服/国际服字段兜底） ────────────────────────
+
+    @staticmethod
+    def _norm_champ_raw(raw) -> str:
+        """rawChampionName → 尾段小写英文名。
+        兼容 "game_character_displayname_Leona" 与裸名 "Leona"；
+        raw 字段是游戏内部键，国服也保持英文，可作稳定匹配锚点。"""
+        s = str(raw or "").strip().lower()
+        return s.rsplit("_", 1)[-1] if s else ""
+
+    def _match_me(self, active, playerlist):
+        """在 playerlist 中定位本地玩家，返回 (条目, 命中策略)。
+
+        国服 activeplayer 实测 championName=None、items=[]，championName
+        匹配必失败，按序兜底：championName（国际服）→ rawChampionName
+        尾段 → LCU 召唤师名（summonerName / riotId）。
+        """
+        if not playerlist:
+            return None, ""
+        active = active or {}
+        my_champ = str(active.get("championName") or "").strip().lower().replace(" ", "")
+        my_raw = self._norm_champ_raw(active.get("rawChampionName"))
+        if not self._my_summoner and self.summoner_name_fn:
+            try:
+                self._my_summoner = str(self.summoner_name_fn() or "").strip()
+            except Exception:
+                self._my_summoner = ""
+        my_names = {self._my_summoner.lower()} - {""}
+        for p in playerlist:
+            p_champ = str(p.get("championName") or "").strip().lower().replace(" ", "")
+            if my_champ and p_champ == my_champ:
+                return p, "championName"
+            if my_raw and self._norm_champ_raw(p.get("rawChampionName")) == my_raw:
+                return p, "rawChampionName"
+            p_names = {str(p.get(k) or "").strip().lower()
+                       for k in ("summonerName", "riotId")} - {""}
+            if my_names & p_names:
+                return p, "summoner"
+        return None, ""
+
     # ── 单次快照 ──────────────────────────────────────────────────
 
     def _poll_once(self) -> LiveSnapshot | None:
@@ -126,16 +174,17 @@ class LivePoller(threading.Thread):
         snap.raw_playerlist = playerlist or []
 
         # activeplayer（免密；只在游戏内可用）
-        snap.my_champion_en = active.get("championName", "") if active else ""
+        # 国服实测 championName=null：or "" 防旧写法 .get(k, "") 取到 None 崩线程
+        snap.my_champion_en = str(active.get("championName") or "") if active else ""
         snap.my_level = int(active.get("level") or 0) if active else 0
         # gold 字段名按实测为准（currentGold / goldTotal 均做容错）
         snap.my_current_gold = float(active.get("currentGold") or 0) if active else 0.0
         snap.my_total_gold = float(active.get("goldTotal") or 0) if active else 0.0
 
-        # playerlist → PlayerInfo
-        my_en = snap.my_champion_en.lower().replace(" ", "")
+        # playerlist → PlayerInfo；本地玩家按多策略锚定
+        me, via = self._match_me(active, playerlist)
         for p in (playerlist or []):
-            en = str(p.get("championName", ""))
+            en = str(p.get("championName") or "")
             cn = self.kb.champion_cn(en) or ""
             scores = p.get("scores") or {}
             info = PlayerInfo(
@@ -152,11 +201,18 @@ class LivePoller(threading.Thread):
                 riot_id=str(p.get("riotId", "")),
             )
             snap.players.append(info)
-            if en.lower().replace(" ", "") == my_en:
+            if p is me:
                 snap.my_champion = cn or en
                 snap.my_is_dead = info.is_dead
                 snap.my_respawn_timer = info.respawn_timer
                 snap.my_items = info.items
+        if via and via != self._me_matched_via:
+            self._me_matched_via = via
+            print(f"[LIVE] 本地玩家定位成功（{via}）→ {snap.my_champion or '?'}")
+        elif not me and not self._me_miss_logged:
+            self._me_miss_logged = True
+            print("[LIVE] WARN: playerlist 中定位不到本地玩家"
+                  "（国服字段缺失且召唤师名不可用）——装备/金币追踪将缺失")
 
         # dump（开关在 dumper 内部判断）
         if self.dumper:

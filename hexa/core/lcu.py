@@ -47,6 +47,7 @@ class LCUConnector:
         self.base_url = None
         self._connected = False
         self._summoner_id = None
+        self._summoner_name = ""
         self.id_to_cn = {}
         self._sess = requests.Session()  # 复用连接，省去每请求 TLS 握手
 
@@ -143,9 +144,20 @@ class LCUConnector:
         resp = self._request('GET', '/lol-summoner/v1/current-summoner')
         if resp and resp.status_code == 200:
             try:
-                self._summoner_id = resp.json().get('summonerId')
+                data = resp.json()
+                self._summoner_id = data.get('summonerId')
+                # 国服 Live API playerlist 匹配锚点（riotId/displayName 兜底）
+                self._summoner_name = str(data.get('gameName')
+                                          or data.get('displayName')
+                                          or data.get('summonerName') or "")
             except Exception:
                 pass
+
+    def summoner_name(self) -> str:
+        """当前召唤师名（缓存；未连接返回空——LivePoller 每 5s 重试至拿到）"""
+        if not self._summoner_name and self._connected:
+            self._cache_summoner_id()
+        return self._summoner_name
 
     # ── 阶段与英雄（fork 参考项目，接口保持一致） ──────────────────
 
@@ -382,6 +394,10 @@ class PhaseMachine(threading.Thread):
             self._fire("on_disconnect")
 
     def _handle(self, phase):
+        if phase is None:
+            # 瞬时失败（接口抖动/超时）：保留上一阶段，防止把 InProgress
+            # 覆盖成 None 后永久错过 InProgress→IDLE 的局终转换（丢复盘日志）
+            return
         prev, cur = self._phase, phase
         if cur == "ChampSelect":
             # 选人阶段持续刷新快照（骰子换人自动跟随），回调侧按 my_hero 去重

@@ -23,7 +23,7 @@ from hexa.ai.client import UsageStats
 from hexa.ai.engine import (AIDecisionEngine, KIND_NEXT, KIND_OPENING,
                             RuleDecisionEngine)
 from hexa.core.game_state import GameSession
-from hexa.core.live_api import LiveSnapshot, PlayerInfo
+from hexa.core.live_api import LivePoller, LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
 from hexa.core.mouse_ledger import CardLedger
 from hexa.core.rules_engine import RulesEngine, ThreatProfile
@@ -333,7 +333,23 @@ def test_phase_machine():
     check("结束事件", "end_of_game" in kinds and
           events[kinds.index("end_of_game")][1] == "WaitingForStats")
 
-    # 秒退重开：InProgress → ChampSelect → end_of_game(dodge_requeue) + 新选人
+    # 回归（2026-09-25 真机丢日志）：局终前接口瞬时 None 曾把 _phase 从
+    # InProgress 覆盖成 None，永久错过 InProgress→IDLE 转换 → 复盘日志不落盘
+    events.clear()
+    pm2 = PhaseMachine(FakeLCU(), callbacks={
+        "on_in_progress": lambda: events.append(("in_progress",)),
+        "on_end_of_game": lambda r: events.append(("end_of_game", r)),
+    })
+    pm2._handle("InProgress")
+    pm2._handle(None)               # 瞬时抖动：保留上一阶段
+    pm2._handle("InProgress")       # 恢复（cur==prev 不重发）
+    pm2._handle("WaitingForStats")  # 局终必须照常触发
+    kinds2 = [e[0] for e in events]
+    check("瞬时 None 不吞局终事件",
+          kinds2 == ["in_progress", "end_of_game"], str(kinds2))
+
+
+# 秒退重开：InProgress → ChampSelect → end_of_game(dodge_requeue) + 新选人
     events.clear()
     run("InProgress")
     run("ChampSelect")
@@ -355,6 +371,47 @@ def test_phase_machine():
     for _ in range(PhaseMachine.DISCONNECT_NEEDED):
         check_phase = pm2._poll_phase()
     check("断连事件", ("disconnect",) in events, str(events[-3:]))
+
+
+# ── 4.5 Live API 本地玩家定位（国服兜底） ────────────────────────
+
+def test_live_me_match():
+    print("\n[4.5] Live API 本地玩家定位（国服 activeplayer 缺字段兜底）")
+    poller = LivePoller(kb)
+    # 国服实测形态：activeplayer.championName=None，playerlist 中文名 + raw 英文键
+    cn_pl = [
+        {"championName": "曙光女神",
+         "rawChampionName": "game_character_displayname_Leona",
+         "summonerName": "玩家甲", "team": "ORDER",
+         "items": [{"name": "圣物之盾", "count": 1}]},
+        {"championName": "黑暗之女",
+         "rawChampionName": "game_character_displayname_Annie",
+         "summonerName": "我我我", "team": "CHAOS"},
+    ]
+    me, via = poller._match_me(
+        {"championName": None, "currentGold": 2774.9,
+         "rawChampionName": "game_character_displayname_Annie"}, cn_pl)
+    check("国服 rawChampionName 定位", me is cn_pl[1] and via == "rawChampionName",
+          f"via={via}")
+
+    # 极端：raw 也缺失 → 退到 LCU 召唤师名（summonerName / riotId）
+    poller2 = LivePoller(kb, summoner_name_fn=lambda: "我我我")
+    me2, via2 = poller2._match_me({"championName": None}, cn_pl)
+    check("召唤师名定位", me2 is cn_pl[1] and via2 == "summoner", f"via={via2}")
+
+    # 国际服 championName 路径不回归
+    intl = [{"championName": "Leona", "team": "ORDER"},
+            {"championName": "Annie", "team": "CHAOS"}]
+    me3, via3 = poller2._match_me({"championName": "Annie"}, intl)
+    check("国际服 championName 定位", me3 is intl[1] and via3 == "championName",
+          f"via={via3}")
+
+    # 定位不到 → (None, "")，且不误配
+    me4, via4 = poller2._match_me({}, [{"championName": "Leona"}])
+    check("定位不到不误配", me4 is None and via4 == "", f"via={via4}")
+    # playerlist 空 / championName 为 null 均安全
+    check("空 playerlist 安全", poller._match_me({}, []) == (None, ""))
+    check("None 防护", str(poller._norm_champ_raw(None)) == "")
 
 
 # ── 5. 画面检测状态机 / 坐标 / 记账映射（纯逻辑，离线） ──────────
@@ -434,6 +491,12 @@ class FakeSettings:
                 return default
             node = node[k]
         return node
+
+    def get_float(self, *keys, default):
+        try:
+            return float(self.get(*keys, default=default))
+        except (TypeError, ValueError):
+            return default
 
     def set(self, *keys_and_value):
         *keys, value = keys_and_value
@@ -814,6 +877,37 @@ def test_review_fixes():
     time.sleep(1.0)
     check("预算原子占位", len(c1b.calls) == 1, f"calls={len(c1b.calls)}")
 
+    # -- P0 回归：历史 settings.json 价格空串 → stats() 不炸（防误报"AI: 关"） --
+    eng_s, _fc1, _fc2 = build_ai_engine(script_s2=[ctx_json_for(hero)])
+    eng_s.settings._d["system1"]["price_in"] = ""    # 旧版设置窗口保存的空串
+    eng_s.settings._d["system2"]["price_out"] = ""
+    try:
+        st_stats = eng_s.stats()
+        ok = (st_stats["mode"] == "ai" and st_stats["budget"] == 15
+              and st_stats["cost_game"] >= 0)
+    except Exception as e:  # noqa: BLE001 —— 回归点就是"不该抛"
+        ok = False
+        print("stats() 异常:", e)
+    check("stats 空价格回退默认", ok, str(st_stats.get("cost_game")))
+
+    # -- Settings.get_float：空串/非法值/缺失键均回退默认 --
+    import tempfile as _tempfile
+    from pathlib import Path as _Path
+    from hexa.config import Settings as _Settings
+    with _tempfile.TemporaryDirectory() as td:
+        _p = _Path(td) / "settings.json"
+        _p.write_text(_json.dumps(
+            {"system1": {"price_in": "", "timeout": "abc"}}), encoding="utf-8")
+        s = _Settings(path=_p)
+        check("get_float 空串回退",
+              s.get_float("system1", "price_in", default=0.8) == 0.8)
+        check("get_float 非法回退",
+              s.get_float("system1", "timeout", default=60) == 60)
+        check("get_float 缺键回退",
+              s.get_float("system1", "price_out", default=2.7) == 2.7)
+        check("get_float 默认价合并",
+              s.get_float("system2", "price_in", default=0) == 2.4)
+
 
 # ── main ─────────────────────────────────────────────────────────
 
@@ -822,6 +916,7 @@ if __name__ == "__main__":
     test_rules()
     test_session()
     test_phase_machine()
+    test_live_me_match()
     test_detect_and_layout()
     test_ai_engine()
     test_session_ai_serial()

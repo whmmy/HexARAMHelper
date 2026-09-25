@@ -8,21 +8,22 @@
 import tkinter as tk
 from tkinter import ttk
 
+from hexa.config import DEFAULTS
 from hexa.ui.theme import Theme
 
 MODEL_PRESETS = ["qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash",
                  "deepseek-v4-pro", "deepseek-v4.1-flash", "kimi-k3", "glm-5.3"]
 
 SLOT_FIELDS = [
-    # (key, label, width, is_number)
+    # (key, label, width, is_number)  数值字段空/非法保存时回落 DEFAULTS
     ("base_url", "Base URL", 46, False),
     ("api_key", "API Key（留空读环境变量）", 46, False),
     ("api_key_env", "Key 环境变量名", 14, False),
-    ("temperature", "温度", 6, False),
+    ("temperature", "温度", 6, True),
     ("max_tokens", "max_tokens", 8, True),
     ("timeout", "超时(秒)", 6, True),
-    ("price_in", "输入价 ¥/M tok", 8, False),
-    ("price_out", "输出价 ¥/M tok", 8, False),
+    ("price_in", "输入价 ¥/M tok", 8, True),
+    ("price_out", "输出价 ¥/M tok", 8, True),
 ]
 
 
@@ -43,6 +44,13 @@ class _ProbeSettings:
                 return self.real.get(*keys, default=default)
             node = node[k]
         return node
+
+    def get_float(self, *keys, default: float) -> float:
+        """与 Settings.get_float 同语义（表单值穿透）"""
+        try:
+            return float(self.get(*keys, default=default))
+        except (TypeError, ValueError):
+            return default
 
     def set(self, *keys_and_value):
         *keys, value = keys_and_value
@@ -199,8 +207,9 @@ class SettingsWindow(tk.Toplevel):
             str(s.get("triggers", "kda_threshold", default=3.0)))
         for slot in ("system1", "system2"):
             for key, _label, _w, _n in SLOT_FIELDS:
+                default = DEFAULTS.get(slot, {}).get(key, "")
                 self.vars[f"{slot}.{key}"].set(
-                    str(s.get(slot, key, default="") or ""))
+                    str(s.get(slot, key, default=default) or default))
             self.vars[f"{slot}.model"].set(str(s.get(slot, "model", default="")))
             self.vars[f"{slot}.fallback_model"].set(
                 str(s.get(slot, "fallback_model", default="")))
@@ -222,7 +231,9 @@ class SettingsWindow(tk.Toplevel):
                   self.vars[f"{slot}.fallback_model"].get().strip())
             for key, _label, _w, is_num in SLOT_FIELDS:
                 if is_num:
-                    s.set(slot, key, self._num(f"{slot}.{key}", 0, float))
+                    s.set(slot, key, self._num(
+                        f"{slot}.{key}", DEFAULTS.get(slot, {}).get(key, 0),
+                        float))
                 else:
                     s.set(slot, key, self.vars[f"{slot}.{key}"].get().strip())
         print("[OK] 设置已保存")

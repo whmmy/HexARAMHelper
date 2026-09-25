@@ -95,7 +95,7 @@ class LLMClient:
         return self._client
 
     def _timeout(self) -> float:
-        return float(self.settings.get(self.slot, "timeout", default=60))
+        return self.settings.get_float(self.slot, "timeout", default=60)
 
     # ── 调用 ──────────────────────────────────────────────────────
 
@@ -104,9 +104,8 @@ class LLMClient:
         """返回 (文本, meta)。失败重试 1 次（超时则降级 fallback_model 再试）；
         全部失败 raise LLMError。meta = {model, latency, tokens_in, tokens_out}"""
         max_tokens = max_tokens or int(
-            self.settings.get(self.slot, "max_tokens", default=800))
-        temperature = float(
-            self.settings.get(self.slot, "temperature", default=0.3))
+            self.settings.get_float(self.slot, "max_tokens", default=800))
+        temperature = self.settings.get_float(self.slot, "temperature", default=0.3)
         model = self.model
         fb = self.settings.get(self.slot, "fallback_model", default="")
         attempts = [model, fb] if (fb and fb != model) else [model, model]
