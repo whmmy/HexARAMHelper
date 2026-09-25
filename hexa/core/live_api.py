@@ -131,12 +131,25 @@ class LivePoller(threading.Thread):
         s = str(raw or "").strip().lower()
         return s.rsplit("_", 1)[-1] if s else ""
 
+    @staticmethod
+    def _name_set(src, keys=("summonerName", "riotId", "riotIdGameName")):
+        """名字候选集：全名 + 去 #tag 裸名（LCU 召唤师名常无 tag，Live API 带 tag）"""
+        out = set()
+        for k in keys:
+            v = str((src or {}).get(k) or "").strip().lower()
+            if v:
+                out.add(v)
+                out.add(v.split("#", 1)[0])
+        out.discard("")
+        return out
+
     def _match_me(self, active, playerlist):
         """在 playerlist 中定位本地玩家，返回 (条目, 命中策略)。
 
-        国服 activeplayer 实测 championName=None、items=[]，championName
-        匹配必失败，按序兜底：championName（国际服）→ rawChampionName
-        尾段 → LCU 召唤师名（summonerName / riotId）。
+        国服 activeplayer 实测 championName=None、items=[] 且无
+        rawChampionName，前两级匹配必失败；名字兜底用 activeplayer
+        自带 summonerName/riotId（与 playerlist 同格式，免 LCU 即可
+        锚定），再补 LCU 召唤师名，比对均含去 #tag 裸名。
         """
         if not playerlist:
             return None, ""
@@ -148,16 +161,15 @@ class LivePoller(threading.Thread):
                 self._my_summoner = str(self.summoner_name_fn() or "").strip()
             except Exception:
                 self._my_summoner = ""
-        my_names = {self._my_summoner.lower()} - {""}
+        my_names = self._name_set(active) | self._name_set(
+            {"summonerName": self._my_summoner})
         for p in playerlist:
             p_champ = str(p.get("championName") or "").strip().lower().replace(" ", "")
             if my_champ and p_champ == my_champ:
                 return p, "championName"
             if my_raw and self._norm_champ_raw(p.get("rawChampionName")) == my_raw:
                 return p, "rawChampionName"
-            p_names = {str(p.get(k) or "").strip().lower()
-                       for k in ("summonerName", "riotId")} - {""}
-            if my_names & p_names:
+            if my_names & self._name_set(p):
                 return p, "summoner"
         return None, ""
 
@@ -184,8 +196,15 @@ class LivePoller(threading.Thread):
         # playerlist → PlayerInfo；本地玩家按多策略锚定
         me, via = self._match_me(active, playerlist)
         for p in (playerlist or []):
-            en = str(p.get("championName") or "")
-            cn = self.kb.champion_cn(en) or ""
+            raw = str(p.get("championName") or "").strip()
+            if raw and not raw.isascii():
+                # 国服 championName 直接是中文（如 "不祥之刃"）：
+                # 反查英文 slug 存 champion_en，中文名存 champion
+                en = self.kb.cn_to_en.get(raw, "")
+                cn = raw
+            else:
+                en = raw
+                cn = self.kb.champion_cn(en) or ""
             scores = p.get("scores") or {}
             info = PlayerInfo(
                 champion=cn,
@@ -196,7 +215,8 @@ class LivePoller(threading.Thread):
                 kills=int(scores.get("kills") or 0),
                 deaths=int(scores.get("deaths") or 0),
                 assists=int(scores.get("assists") or 0),
-                items=[{"name": it.get("name", ""), "count": it.get("count", 1)}
+                items=[{"name": str(it.get("displayName") or it.get("name") or ""),
+                        "count": it.get("count", 1)}
                        for it in (p.get("items") or [])],
                 riot_id=str(p.get("riotId", "")),
             )

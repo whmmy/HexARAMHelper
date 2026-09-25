@@ -179,19 +179,34 @@ class KnowledgeBase:
             return
         data = json.loads(path.read_text(encoding="utf-8"))
         self.dd_version = data.get("version", self.dd_version)
+        # 同名装备在 DD 里有多份模式条目（峡谷 3xxx/8xxx、大乱斗 22xxxx、
+        # KIWI 模式 77xxxx，价格各异）；商店实测按峡谷价出售，故同名去重
+        # 优先保留 id 最短（峡谷正价）条目，避免价格随机错+合成链指向
+        # 模式专属名导致建议与商店对不上。仅模式存在的名字照常保留。
+        best = {}
         for _iid, it in data.get("data", {}).items():
             name = (it.get("name") or "").strip()
-            if name:
-                self.items[name] = {
-                    "id": _iid,
-                    "tags": it.get("tags", []),
-                    "gold": (it.get("gold") or {}).get("total", 0),
-                    "plaintext": it.get("plaintext", ""),
-                    "from": it.get("from", []) or [],   # 组件 item id 列表
-                    "into": it.get("into", []) or [],   # 升级目标 item id 列表
-                }
-        # id -> name 索引（组件/升级链换算用）
-        self.item_id_to_name = {v["id"]: k for k, v in self.items.items()}
+            if not name:
+                continue
+            cur = best.get(name)
+            if cur is None or len(_iid) < len(cur[0]) or (
+                    len(_iid) == len(cur[0]) and int(_iid or 0) < int(cur[0] or 0)):
+                best[name] = (_iid, it)
+        for name, (_iid, it) in best.items():
+            self.items[name] = {
+                "id": _iid,
+                "tags": it.get("tags", []),
+                "gold": (it.get("gold") or {}).get("total", 0),
+                "plaintext": it.get("plaintext", ""),
+                "from": it.get("from", []) or [],   # 组件 item id 列表
+                "into": it.get("into", []) or [],   # 升级目标 item id 列表
+            }
+        # id -> name 索引（组件/升级链换算用）：全量 id 都映射到规范名，
+        # 任一模式条目的 from/into 引用都能落到同一装备
+        self.item_id_to_name = {
+            iid: (it.get("name") or "").strip()
+            for iid, it in data.get("data", {}).items()
+            if (it.get("name") or "").strip()}
 
     # ── 英雄查询（fork 参考项目 DataManager 接口） ─────────────────
 

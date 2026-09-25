@@ -166,6 +166,7 @@ class GameSession:
     # ── LivePoller 回调（轮询线程） ────────────────────────────────
 
     def on_snapshot(self, snap):
+        late_start = None
         with self._lock:
             if self.stage not in ("in_game", "game_start"):
                 return
@@ -174,14 +175,35 @@ class GameSession:
                 validated = self.kb.validate_hero(snap.my_champion)
                 if validated:
                     self.my_hero = validated
+                    # 中途启动（重启/断连恢复）未经历 game_start：
+                    # 快照补齐阵容并补 start_game，否则引擎空转建议为空
+                    self.ally = [p.champion for p in snap.allies()
+                                 if p.champion and p.champion != validated]
+                    self.enemy = [p.champion for p in snap.enemies()
+                                  if p.champion]
+                    self._log("hero_late_detected",
+                              f"me={validated} ally={len(self.ally)} "
+                              f"enemy={len(self.enemy)}")
+                    late_start = (self.engine, validated,
+                                  list(self.ally), list(self.enemy))
             self.my_items = [it["name"] for it in snap.my_items if it.get("name")]
             self._my_gold = float(snap.my_current_gold or 0)
-            # 敌方威胁画像实时补全（含敌方装备扫描）
             enemies = snap.enemies()
+            # LCU 阵容缺失兜底（国服偶发/中途启动）：快照名单直接回填，
+            # 否则威胁画像按空名单计算恒为"暂无数据"
+            if not self.enemy and enemies:
+                self.enemy = [p.champion for p in enemies if p.champion]
+                self.ally = [p.champion for p in snap.allies()
+                             if p.champion and p.champion != self.my_hero]
+            # 敌方威胁画像实时补全（含敌方装备扫描）
             self.threat = self.rules.threat_profile(self.enemy, enemies)
             self._evaluate_triggers(snap, enemies)
             self._recompute_path()
             self._periodic_recheck(enemies, snap)
+        # 锁外补 start_game（同 on_game_start 规矩：不持锁起线程）
+        if late_start:
+            engine, hero, ally, enemy = late_start
+            engine.start_game(hero, ally, enemy)
 
     def _periodic_recheck(self, enemies, snap):
         """定时快照 diff（v4.2）：状态签名变化即重算建议，不再只靠死亡触发。

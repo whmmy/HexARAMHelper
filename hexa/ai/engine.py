@@ -65,6 +65,7 @@ class RuleDecisionEngine(DecisionEngine):
         self.kb = kb
         self.rules = rules
         self.on_result = None
+        self._hero = ""  # start_game 前（如中途启动）快照回调仍会读取
 
     def start_game(self, hero, ally, enemy):
         self._hero = hero

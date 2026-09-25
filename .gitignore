@@ -42,6 +42,7 @@ hexa/ui/calibrations/*.json
 !hexa/ui/calibrations/.gitkeep
 hexa/ui/calibrations/samples/*.png
 !hexa/ui/calibrations/samples/.gitkeep
+media/
 
 # ── 本地会话工具数据 ──────────────────────
 .zcode/
