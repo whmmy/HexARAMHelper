@@ -94,10 +94,10 @@ def main():
             session.clear_card_ranks()   # 时刻块随界面消失（台账仍在）
 
     def _on_cards(stable_cards, round_id):
-        detector.last_cards = list(stable_cards)
+        detector.last_cards = list(stable_cards)  # 含 None 占位（保证卡片序对齐）
         names = [n for n in stable_cards if n]
         print(f"[DETECT] 本轮卡片: {names}")
-        ranks = session.rank_augment_cards(names)  # 同步基准 + AI 异步精修
+        ranks = session.rank_augment_cards(stable_cards)  # 同步基准 + AI 异步精修
         ui(lambda: print("[AI] 海克斯评级: " +
                          ", ".join(f"{r['name']}[{r['grade']}]" for r in ranks)))
 
@@ -123,30 +123,53 @@ def main():
         if session.record_augment(name):
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
 
+    def _on_reroll():
+        detector.force_rescan()
+        detector.last_cards = None  # 重扫稳定前点击不记账（防按旧卡片名记录）
+        ui(lambda: print("[LEDGER] reroll → 已触发重扫"))
+
     ledger = MouseLedger(
         on_click=_on_click,
         gate=lambda: detector.core.state == "active",
-        on_reroll=lambda: (detector.force_rescan(),
-                           ui(lambda: print("[LEDGER] reroll → 已触发重扫"))),
+        on_reroll=_on_reroll,
         reroll_rect_provider=lambda: (
             detector.layout.to_pixels(screen_w, screen_h)["reroll"]
             if detector.layout else None),
     )
 
     # ── UI ────────────────────────────────────────────────────────
+    def _open_settings():
+        """设置窗口单例：已开则置前，防多实例同时写 settings"""
+        global _settings_win
+        try:
+            if _settings_win is not None and _settings_win.winfo_exists():
+                _settings_win.deiconify()
+                _settings_win.lift()
+                _settings_win.focus_force()
+                return
+        except Exception:
+            pass
+        _settings_win = SettingsWindow(
+            root, settings, kb,
+            engine_stats_fn=lambda: session.engine.stats(),
+            rebuild_engine_fn=_rebuild_engine)
+
+    _settings_win = None
+
     def _start_calibrate():
         def run():
-            ok = detector.auto_calibrate()
+            try:
+                ok = detector.auto_calibrate()
+            except Exception as e:  # noqa: BLE001 —— 标定失败要反馈而非静默
+                ok = False
+                print(f"[CALIB] 标定异常: {e}")
             ui(lambda: print("[CALIB] 标定成功，区域已按本机分辨率保存"
                              if ok else "[CALIB] 标定失败（确认海克斯界面在屏幕上后重试）"))
         ui(lambda: print("[CALIB] 标定中…（保持海克斯界面在屏幕上）"))
         threading.Thread(target=run, daemon=True, name="Calibrate").start()
 
     main_win = MainWindow(root, session, ui_queue, log_queue,
-                          on_open_settings=lambda: SettingsWindow(
-                              root, settings, kb,
-                              engine_stats_fn=lambda: session.engine.stats(),
-                              rebuild_engine_fn=_rebuild_engine),
+                          on_open_settings=_open_settings,
                           on_calibrate=_start_calibrate)
     overlay = Overlay(root, session, ui_queue,
                       visible=bool(settings.get("ui", "overlay_visible", default=True)))
@@ -155,7 +178,7 @@ def main():
         new_engine = engine_mod.build_engine(kb, rules, settings)
         session.replace_engine(new_engine)
 
-    # overlay 显隐键（唯一热键，可选项）
+    # overlay 显隐键（唯一热键，可选项；Tk 调度统一走 ui 队列）
     def hotkey_loop():
         import keyboard
         last = 0.0
@@ -163,15 +186,14 @@ def main():
             try:
                 if keyboard.is_pressed("f10") and time.time() - last > 0.8:
                     last = time.time()
-                    ui_queue.put("overlay_toggle")
-                    root.after(0, overlay.toggle)
+                    ui_queue.put(overlay.toggle)
             except Exception:
                 pass
             time.sleep(0.05)
     threading.Thread(target=hotkey_loop, daemon=True, name="Hotkeys").start()
 
-    # 系统托盘（fork 参考项目）
-    tray = start_tray(root)
+    # 系统托盘（fork 参考项目；回调同样经 ui 队列进 Tk 主线程）
+    tray = start_tray(root, ui_queue)
     root.protocol("WM_DELETE_WINDOW", lambda: (hide_to_tray(root)))
 
     # 对局阶段 → 检测器暂停/恢复（非对局期不截屏不 OCR）
@@ -265,7 +287,7 @@ def hide_to_tray(root: tk.Tk):
     root.withdraw()
 
 
-def start_tray(root: tk.Tk):
+def start_tray(root: tk.Tk, ui_queue: queue.Queue):
     try:
         import pystray
         from PIL import Image, ImageDraw
@@ -289,8 +311,10 @@ def start_tray(root: tk.Tk):
         icon = pystray.Icon(
             "HexARAMHelper", _icon(), "海克斯大乱斗助手",
             pystray.Menu(
-                pystray.MenuItem("显示主窗口", lambda: root.after(0, root.deiconify)),
-                pystray.MenuItem("退出", lambda: root.after(0, root.destroy)),
+                pystray.MenuItem("显示主窗口",
+                                 lambda: ui_queue.put(root.deiconify)),
+                pystray.MenuItem("退出",
+                                 lambda: ui_queue.put(root.destroy)),
             ))
         threading.Thread(target=icon.run, daemon=True, name="Tray").start()
         return icon

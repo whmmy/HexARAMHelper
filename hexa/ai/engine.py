@@ -104,6 +104,7 @@ class AIDecisionEngine(DecisionEngine):
         self.cache = system2_mod.ContextCache()
         self.on_result = None
         self._lock = threading.Lock()
+        self._epoch = 0            # 游戏代际（换局 +1；旧局在途结果整包丢弃）
         self._calls = 0            # 本局 System1 调用计数（预算守门）
         self._last_refine = {"opening": 0.0, "next_items": 0.0,
                              "augment_ranks": 0.0}
@@ -112,9 +113,14 @@ class AIDecisionEngine(DecisionEngine):
 
     # ── 守门 ──────────────────────────────────────────────────────
 
-    def _budget_left(self) -> bool:
+    def _try_reserve(self) -> bool:
+        """原子占位：预算内则计数 +1 并返回 True（检查与计数同锁，防竞态超限）"""
         budget = int(self.settings.get("ai", "budget_per_game", default=15))
-        return self._calls < budget
+        with self._lock:
+            if self._calls >= budget:
+                return False
+            self._calls += 1
+            return True
 
     def _interval_ok(self, kind: str, reason: str) -> bool:
         if reason != "periodic":
@@ -123,10 +129,21 @@ class AIDecisionEngine(DecisionEngine):
         return time.time() - self._last_refine.get(kind, 0) >= min_iv
 
     def _submit(self, kind, serial, fn):
-        """后台执行 AI 精修；结果经 on_result(kind, payload, serial) 回传"""
+        """后台执行 AI 精修；结果经 on_result(kind, payload, serial) 回传。
+
+        提交时捕获游戏代际——旧局迟到结果在回调前整包丢弃（防串局）。
+        """
+        with self._lock:
+            epoch = self._epoch
+
         def run():
             try:
                 payload = fn()
+                with self._lock:
+                    stale = epoch != self._epoch
+                if stale:
+                    print(f"[AI] 丢弃旧局精修结果 {kind}（代际过期）")
+                    return
                 if payload is not None and self.on_result:
                     self._last_refine[kind] = time.time()
                     self.on_result(kind, payload, serial)
@@ -142,11 +159,18 @@ class AIDecisionEngine(DecisionEngine):
     def start_game(self, hero, ally, enemy):
         self._hero = hero
         with self._lock:
+            self._epoch += 1
+            epoch = self._epoch
             self._calls = 0
+        self._last_refine = {"opening": 0.0, "next_items": 0.0,
+                             "augment_ranks": 0.0}
         usage = getattr(self.client_s2, "usage", None)
         if usage:
             usage.new_game()
         self.delegate._hero = hero
+        if not hero:
+            print("[AI] 英雄未知，跳过 System2 上下文生成（可手动设英雄后重开局）")
+            return
         if not (self.client_s2.configured and self.client_s1.configured):
             print("[AI] 槽位未配置完整，本局纯规则模式")
             return
@@ -157,6 +181,14 @@ class AIDecisionEngine(DecisionEngine):
         def gen():
             ctx = self.s2.generate(kb, rules, self.client_s2, hero, ally, enemy,
                                    data_version=kb.builds_patch)
+            with self._lock:
+                stale = epoch != self._epoch
+            if stale:
+                print(f"[AI] 丢弃旧局 ChampionContext（{ctx.hero}，代际过期）")
+                return
+            if ctx.hero != hero:
+                print(f"[AI] Context 英雄不符（{ctx.hero} != {hero}），丢弃")
+                return
             self.cache.set(ctx)
             src = "AI 上下文已生成" if ctx.source == "ai" else "AI 失败，规则版上下文"
             print(f"[AI] System2 完成（{ctx.source}）：亲和{len(ctx.augment_affinity)}"
@@ -174,7 +206,7 @@ class AIDecisionEngine(DecisionEngine):
 
     def opening_candidates(self, first_augment, threat, serial):
         base = self.delegate.opening_candidates(first_augment, threat, serial)
-        if not (self._ctx_ready() and self._budget_left()):
+        if not (self._ctx_ready() and self._try_reserve()):
             return base
         ctx = self.cache.get()
         kb = self.delegate.kb
@@ -182,7 +214,6 @@ class AIDecisionEngine(DecisionEngine):
         taken = [first_augment] if first_augment else []
 
         def fn():
-            self._count_call()
             picks = self.s1.suggest_opening(
                 self.client_s1, ctx, self._hero, first_augment, summary, base)
             return [Candidate(p["name"], p["reason"],
@@ -195,8 +226,8 @@ class AIDecisionEngine(DecisionEngine):
                         serial, reason="event", augments=None):
         base = self.delegate.next_candidates(my_items, gold, current_path,
                                              threat, serial, reason)
-        if not (self._ctx_ready() and self._budget_left()
-                and self._interval_ok(KIND_NEXT, reason)):
+        if not (self._ctx_ready() and self._interval_ok(KIND_NEXT, reason)
+                and self._try_reserve()):
             return base
         ctx = self.cache.get()
         kb = self.delegate.kb
@@ -204,10 +235,9 @@ class AIDecisionEngine(DecisionEngine):
         taken = [a["name"] for a in (augments or [])]
 
         def fn():
-            self._count_call()
             picks = self.s1.suggest_next(
                 self.client_s1, ctx, my_items, gold, current_path, summary,
-                taken, [], base)
+                taken, base)
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
                     for p in picks]
@@ -217,23 +247,17 @@ class AIDecisionEngine(DecisionEngine):
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
         base = self.delegate.rank_cards(hero, card_names, taken, my_items,
                                         threat, serial)
-        if not (self._ctx_ready() and self._budget_left()):
+        if not (self._ctx_ready() and self._try_reserve()):
             return base
         ctx = self.cache.get()
-        self._taken = [{"name": a} for a in (taken or [])]
         summary = threat.summary() if threat else ""
 
         def fn():
-            self._count_call()
             return self.s1.rank_augments(
                 self.client_s1, ctx, hero, card_names, taken or [], my_items,
                 summary, base)
         self._submit(KIND_RANKS, serial, fn)
         return base
-
-    def _count_call(self):
-        with self._lock:
-            self._calls += 1
 
     # ── 查询 ──────────────────────────────────────────────────────
 

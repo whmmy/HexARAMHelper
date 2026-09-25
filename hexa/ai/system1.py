@@ -78,13 +78,14 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
         hit = next((p for p in picks if p["name"] == main), None)
         reason = hit["reason"] if hit else grp.get("when") or "OP.GG 高频出门"
         out.append({"name": main, "reason": reason, "combo": grp["combo"]})
-    # 模型排序在前，未命中的按原序补齐
-    out.sort(key=lambda x: -1 if any(p["name"] == x["name"] for p in picks) else 0)
+    # 按模型给出的排序稳定重排（未命中的按原序排后）
+    rank = {p["name"]: i for i, p in enumerate(picks)}
+    out.sort(key=lambda x: rank.get(x["name"], len(rank)))
     return out[:3]
 
 
 def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
-                 threat_summary: str, augments: list, enemy_detail: list,
+                 threat_summary: str, augments: list,
                  rule_candidates: list) -> list:
     """下一件三选重排+写理由。返回 [{"name","reason"}]；失败/有效<2 → 规则版。
 
@@ -96,7 +97,7 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
     rule_reason = {c.name: c.reason for c in rule_candidates}
     user = "\n\n".join([
         _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                      enemy_detail),
+                      enemy=[]),
         "《候选清单（只能从中选）》\n" + "\n".join(
             f"- {c.name}：{c.reason}" for c in rule_candidates),
     ])

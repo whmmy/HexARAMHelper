@@ -82,20 +82,3 @@ class OcrEngine:
             if name not in hits or mscore > hits[name][1]:
                 hits[name] = (name, mscore, rect)
         return sorted(hits.values(), key=lambda h: -h[1])
-
-    def titles_from_bands(self, image, bands: list) -> list:
-        """在给定相对坐标条带（[(x,y,w,h)] 屏幕比例）内分别 OCR，返回每条带主文本"""
-        import cv2
-        h, w = image.shape[:2]
-        titles = []
-        for (rx, ry, rw, rh) in bands:
-            crop = image[int(ry * h):int((ry + rh) * h),
-                         int(rx * w):int((rx + rw) * w)]
-            items = self.recognize(crop)
-            if items:
-                # 取最高分文本
-                best = max(items, key=lambda it: it[2])
-                titles.append((best[0], best[2]))
-            else:
-                titles.append(("", 0.0))
-        return titles

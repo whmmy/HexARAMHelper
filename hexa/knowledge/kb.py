@@ -93,7 +93,11 @@ class KnowledgeBase:
             if data.get("fetched_at") and data["fetched_at"] > self.builds_fetched:
                 self.builds_fetched = data["fetched_at"]
         if patches:
-            self.builds_patch = sorted(patches)[-1]
+            # 数值化取最大（字符串比较会把 "16.9" 排在 "16.19" 后）
+            def vkey(v):
+                return tuple(int(x) if x.isdigit() else 0
+                             for x in str(v).split("."))
+            self.builds_patch = sorted(patches, key=vkey)[-1]
 
     def _load_augment_tags(self):
         """B 层语义标签库（System2 离线打标；缺失时 rules_engine 用内置小表兜底）"""

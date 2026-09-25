@@ -20,7 +20,11 @@ import threading
 import time
 from pathlib import Path
 
-CALIB_DIR = Path(__file__).resolve().parent.parent / "ui" / "calibrations"
+from hexa.config import BASE_DIR
+
+# 标定文件放应用根下可写目录（PyInstaller 冻结后包目录只读；
+# gitignore 排除 *.json，用户屏幕专属不入库）
+CALIB_DIR = BASE_DIR / "calibrations"
 
 # ── 默认布局（16:9 百分比占位；auto_calibrate 一次后即按真机生效） ──
 # title_bands: 三个卡片标题条 (x, y, w, h)；cards: 三张卡片矩形（点击热区，
@@ -48,9 +52,15 @@ class Layout:
     def __init__(self, data: dict = None, source: str = "default"):
         d = data or DEFAULT_LAYOUT_169
         self.source = source
-        self.title_bands = [self._to_h_units(r) for r in d["title_bands"]]
-        self.cards = [self._to_h_units(r) for r in d["cards"]]
-        self.reroll = self._to_h_units(d["reroll"])
+        if d.get("units") == "h":
+            # 自动标定按真实分辨率直接换算的 H 单位（任意宽高比精确）
+            self.title_bands = [list(r) for r in d["title_bands"]]
+            self.cards = [list(r) for r in d["cards"]]
+            self.reroll = list(d["reroll"])
+        else:
+            self.title_bands = [self._to_h_units(r) for r in d["title_bands"]]
+            self.cards = [self._to_h_units(r) for r in d["cards"]]
+            self.reroll = self._to_h_units(d["reroll"])
 
     @staticmethod
     def _to_h_units(r):
@@ -109,10 +119,12 @@ def point_in_rect(x: int, y: int, rect) -> bool:
 class DetectorCore:
     """海克斯界面出现/消失迟滞 + 卡片内容稳定判定。
 
+    状态机只有 inactive/active 两态：连续 2 帧标题命中 → active；
+    active 下连续 3 帧无命中 → inactive（迟滞防误触）。
     喂入：feed_titles(hits: int) 每帧标题命中数；
          feed_cards(card_texts: list[str|None]) 界面活跃期的每帧卡片识别结果。
-    输出：state('inactive'|'appearing'|'active'|'leaving')、
-         stable_cards（稳定 2 帧后非空，消费后调 consume_cards()）。
+    输出：state、stable_cards（同内容稳定 2 帧后置位一次，消费后调
+         consume_cards()；内容不变不会重复置位——发射后闩锁，防每帧重发）。
     """
 
     APPEAR_FRAMES = 2     # 连续 2 帧命中 → 出现
@@ -127,11 +139,12 @@ class DetectorCore:
         self._miss_run = 0
         self._last_content = None
         self._content_run = 0
+        self._emitted_content = None  # 发射后闩锁：同内容只发一次 on_cards
         self.stable_cards = None
         self.stable_round = 0
 
     def feed_titles(self, hits: int):
-        if self.state in ("inactive", "leaving"):
+        if self.state == "inactive":
             if hits >= self.MIN_TITLE_HITS:
                 self._hit_run += 1
                 self._miss_run = 0
@@ -140,13 +153,11 @@ class DetectorCore:
                     self._hit_run = 0
                     self._content_run = 0
                     self._last_content = None
+                    self._emitted_content = None
                     self.round_id += 1
                     print(f"[DETECT] 海克斯界面出现（第 {self.round_id} 轮）")
             else:
                 self._hit_run = 0
-                self._miss_run = 0
-                if self.state == "leaving":
-                    self.state = "inactive"
         elif self.state == "active":
             if hits < self.MIN_TITLE_HITS:
                 self._miss_run += 1
@@ -154,6 +165,7 @@ class DetectorCore:
                     self.state = "inactive"
                     self._miss_run = 0
                     self.stable_cards = None
+                    self._emitted_content = None
                     print("[DETECT] 海克斯界面消失")
             else:
                 self._miss_run = 0
@@ -171,11 +183,14 @@ class DetectorCore:
                 print(f"[DETECT] 卡片内容变化: {card_texts}")
         else:
             self._content_run += 1
-            if self._content_run >= self.STABLE_FRAMES and any(card_texts):
-                if self.stable_cards is None:
-                    self.stable_cards = list(card_texts)
-                    self.stable_round = self.round_id
-                    print(f"[DETECT] 卡片内容稳定: {card_texts}")
+            # 发射后闩锁：稳定 2 帧且该内容未发射过才置位（防每帧重发烧预算）
+            if (self._content_run >= self.STABLE_FRAMES and any(card_texts)
+                    and self.stable_cards is None
+                    and self._emitted_content != content):
+                self.stable_cards = list(card_texts)
+                self.stable_round = self.round_id
+                self._emitted_content = content
+                print(f"[DETECT] 卡片内容稳定: {card_texts}")
 
     def consume_cards(self):
         out = self.stable_cards
@@ -183,10 +198,11 @@ class DetectorCore:
         return out
 
     def reset_round(self):
-        """reroll/强制重扫：内容状态清零，等下一帧稳定"""
+        """reroll/强制重扫：内容状态清零，等下一帧稳定（闩锁一并清）"""
         self._last_content = None
         self._content_run = 0
         self.stable_cards = None
+        self._emitted_content = None
 
 
 # ── 截屏检测线程 ─────────────────────────────────────────────────────
@@ -214,6 +230,7 @@ class ScreenDetector(threading.Thread):
         self.on_calibrate_hint = None
         self._running = False
         self._paused = threading.Event()   # set = 暂停检测（非对局期）
+        self._grab_lock = threading.Lock()  # mss 实例非线程安全
         self._mismatch_run = 0
         self._screen = None
         self.last_active = False
@@ -238,13 +255,18 @@ class ScreenDetector(threading.Thread):
 
     # ── 截屏 ──────────────────────────────────────────────────────
 
-    def _grab(self):
-        """主屏截屏 → BGR ndarray"""
+    def _grab(self, screen=None):
+        """主屏截屏 → BGR ndarray。screen 可传独立 mss 实例（标定线程用，
+        mss 非线程安全，检测线程实例加锁自用）。"""
         import mss
         import numpy
-        if self._screen is None:
-            self._screen = mss.mss()
-        shot = self._screen.grab(self._screen.monitors[1])
+        if screen is not None:
+            shot = screen.grab(screen.monitors[1])
+        else:
+            with self._grab_lock:
+                if self._screen is None:
+                    self._screen = mss.mss()
+                shot = self._screen.grab(self._screen.monitors[1])
         img = numpy.asarray(shot)
         return img[:, :, :3][:, :, ::-1].copy()  # BGRA→BGR
 
@@ -292,6 +314,8 @@ class ScreenDetector(threading.Thread):
             self.last_active = active
             if self.on_state:
                 self.on_state(active, self.core.round_id)
+        if not active:
+            self._mismatch_run = 0  # 跨活跃期不累计失配
 
         # 2. 活跃期：卡片区域识别 → 内容稳定 → 回调
         if active:
@@ -323,14 +347,14 @@ class ScreenDetector(threading.Thread):
         """中央横带全量 OCR 找三组海克斯标题聚类 → 推导区域 → 保存。
 
         需要海克斯界面正在屏幕上。成功返回 True（layout 已更新）。
+        截屏用独立 mss 实例（与检测线程隔离，mss 非线程安全）。
         """
-        import numpy as np
+        import mss
         for i in range(attempts):
-            frame = self._grab()
+            frame = self._grab(screen=mss.mss())
             sh, sw = frame.shape[:2]
             bands = self._find_title_clusters(frame)
             if bands and len(bands) == 3:
-                x_ratio = 16 / 9 / (sw / sh)  # 宽高比修正（H 单位换算用）
                 regions = self._regions_from_bands(bands, sw, sh)
                 save_layout(sw, sh, regions, confidence=0.9)
                 self.set_layout(Layout(regions, source="auto_calib"))
@@ -364,16 +388,21 @@ class ScreenDetector(threading.Thread):
         return clusters if len(clusters) == 3 else None
 
     def _regions_from_bands(self, clusters, sw, sh):
+        """由标题聚类推导区域，直接输出 H 单位（units:"h"）——
+        按真实分辨率换算，任意宽高比回读零漂移。"""
         bands, cards = [], []
         for cl in clusters:
-            cx = sum(h[1] for h in cl) / len(cl)
-            w = max(h[3] for h in cl) * 2.2
-            h_h = max(h[4] for h in cl) * 1.9
-            y = min(h[2] for h in cl)
-            bands.append([cx / sw - w / (2 * sw), y / sh, w / sw, h_h / sh])
-            cw = w * 1.25
-            cards.append([(cx - cw / 2) / sw, (y + h_h * 0.9) / sh,
-                          cw / sw, 0.40])
-        reroll = [0.5 - 0.06, min(b[1] + b[3] for b in bands) + max(c[1] + c[3]
-                  for c in cards) - 0.02, 0.12, 0.05]
-        return {"title_bands": bands, "cards": cards, "reroll": reroll}
+            cx_px = sum(h[1] for h in cl) / len(cl)
+            w_px = max(h[3] for h in cl) * 2.2
+            h_px = max(h[4] for h in cl) * 1.9
+            y_px = min(h[2] for h in cl)
+            bands.append([(cx_px - sw / 2) / sh, y_px / sh, w_px / sh, h_px / sh])
+            cw_px = w_px * 1.25
+            cards.append([(cx_px - cw_px / 2 - sw / 2) / sh,
+                          (y_px + h_px * 0.9) / sh, cw_px / sh, 0.40])
+        reroll_y = (min(b[1] + b[3] for b in bands)
+                    + max(c[1] + c[3] for c in cards) - 0.02)
+        return {"units": "h",
+                "title_bands": bands, "cards": cards,
+                "reroll": [(0 - sw * 0.06) / sh, reroll_y,
+                           sw * 0.12 / sh, 0.05]}

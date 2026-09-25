@@ -91,6 +91,7 @@ class GameSession:
             self.first_augment = None
             self._my_gold = 0.0
             self._last_sig = None         # 快照签名（定时 diff 用）
+            self._suppress_recheck = False  # 事件帧刚发过建议，本次 diff 跳过
             self._sug_serial = 0          # 建议序号（AI 精修防旧覆新）
             self._card_serial = 0         # 海克斯时刻评级序号
             self.card_ranks = []          # 当前海克斯三卡片评级 [{name,grade,reason}]
@@ -202,6 +203,11 @@ class GameSession:
         if sig == self._last_sig:
             return
         self._last_sig = sig
+        # 死亡等事件帧刚发过建议（同签名内 event 分支已刷），本次例行跳过，
+        # 防同帧 event+periodic 双发白烧 AI 预算
+        if self._suppress_recheck:
+            self._suppress_recheck = False
+            return
         # 出门装等待期（首海克斯已记、未购装备）不推下一件
         if self.opening_state == "offered":
             if not self.my_items:
@@ -232,15 +238,24 @@ class GameSession:
             return True
 
     def revoke_augment(self, name: str):
-        """台账纠错（主窗口点击区调用）"""
+        """台账纠错（主窗口点击区调用）；撤销首海克斯时联动状态一并回退"""
         with self._lock:
             before = len(self.augments)
             self.augments = [a for a in self.augments if a["name"] != name]
-            if len(self.augments) != before:
-                self._log("augment_revoked", name)
-                self._recompute_path()
-                return True
-            return False
+            if len(self.augments) == before:
+                return False
+            self._log("augment_revoked", name)
+            if self.first_augment == name:
+                self.first_augment = (self.augments[0]["name"]
+                                      if self.augments else None)
+                if self.opening_state == "offered":
+                    # 出门装建议基于已撤销的海克斯，回退等待重新决策
+                    self.opening_state = ("wait_first_augment"
+                                          if not self.my_items else "bypassed")
+                    self.suggestion = None
+                    self._log("opening_rollback", "首海克斯被撤销")
+            self._recompute_path()
+            return True
 
     def set_hero_manual(self, query: str):
         """LCU 断连兜底：拼音/中文模糊匹配手动设英雄（main_window 输入框调用）"""
@@ -395,6 +410,7 @@ class GameSession:
             self._log("my_death", f"respawn={snap.my_respawn_timer:.0f}s")
             if self.first_augment or self.my_items:
                 self._suggest_next_items(reason="event")
+                self._suppress_recheck = True  # 同帧签名 diff 不再重复发
         self._prev_dead = snap.my_is_dead
 
         # 2. 敌方关键装备完成（集合 diff）→ 克制提示
@@ -444,7 +460,9 @@ class GameSession:
             out_dir = BASE_DIR / "log" / "games"
             out_dir.mkdir(parents=True, exist_ok=True)
             ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._game_t0))
-            hero = (self.my_hero or "unknown").replace("/", "_")
+            safe_hero = "".join(
+                ch for ch in (self.my_hero or "unknown")
+                if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "unknown"
             stats = {}
             try:
                 stats = self.engine.stats()
@@ -468,7 +486,7 @@ class GameSession:
                     {"ts": round(t, 1), "event": e, "detail": d}
                     for t, e, d in self.timeline[-200:]],
             }
-            path = out_dir / f"{ts}_{hero}.json"
+            path = out_dir / f"{ts}_{safe_hero}.json"
             path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
                             encoding="utf-8")
             print(f"[SESSION] 复盘日志已写入 {path.name}")

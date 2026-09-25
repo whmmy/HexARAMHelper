@@ -26,6 +26,41 @@ SLOT_FIELDS = [
 ]
 
 
+class _ProbeSettings:
+    """探针 settings：读穿透到真实配置，写只落内存（测试连接不污染 settings.json）。
+
+    语义：先查本窗口表单值 → 再查真实 settings → resolve_api_key 同源环境变量。
+    """
+
+    def __init__(self, real):
+        self.real = real
+        self._tmp = {}
+
+    def get(self, *keys, default=None):
+        node = self._tmp
+        for k in keys:
+            if not isinstance(node, dict) or k not in node:
+                return self.real.get(*keys, default=default)
+            node = node[k]
+        return node
+
+    def set(self, *keys_and_value):
+        *keys, value = keys_and_value
+        node = self._tmp
+        for k in keys[:-1]:
+            node = node.setdefault(k, {})
+        node[keys[-1]] = value
+
+    def resolve_api_key(self, slot: str):
+        """与 Settings.resolve_api_key 同语义，但读探针值（表单优先）"""
+        import os
+        key = self.get(slot, "api_key", default="") or ""
+        if key.strip():
+            return key.strip()
+        env_name = self.get(slot, "api_key_env", default="DASHSCOPE_API_KEY")
+        return (os.environ.get(env_name) or "").strip()
+
+
 class SettingsWindow(tk.Toplevel):
     def __init__(self, root: tk.Tk, settings, kb, engine_stats_fn,
                  rebuild_engine_fn):
@@ -199,30 +234,38 @@ class SettingsWindow(tk.Toplevel):
         except (TypeError, ValueError):
             return default
 
-    # ── 测试连接 ──────────────────────────────────────────────────
+    # ── 测试连接（后台线程，绝不阻塞 Tk 主线程） ──────────────────
 
     def _test(self, slot):
         self.vars[f"{slot}._test"].set("测试中…")
-        # 先把当前表单值写进 settings（不落盘），测试用真实配置
-        backup = {k: self.settings.get(slot, k) for k in
-                  ("model", "base_url", "api_key", "api_key_env")}
-        self._apply_slot_to_settings(slot)
-        from hexa.ai.client import LLMClient
-        result = LLMClient(self.settings, slot).test_connection()
-        for k, v in backup.items():
-            self.settings.set(slot, k, v if v is not None else "")
-        if result.get("ok"):
-            self.vars[f"{slot}._test"].set(
-                f"✅ {result['latency']}s ({result['model']})")
-        else:
-            self.vars[f"{slot}._test"].set(f"❌ {result.get('error', '失败')[:40]}")
+        import threading
+        threading.Thread(target=self._test_bg, args=(slot,),
+                         daemon=True, name=f"Test-{slot}").start()
 
-    def _apply_slot_to_settings(self, slot):
-        self.settings.set(slot, "model", self.vars[f"{slot}.model"].get().strip())
-        self.settings.set(slot, "base_url", self.vars[f"{slot}.base_url"].get().strip())
-        self.settings.set(slot, "api_key", self.vars[f"{slot}.api_key"].get().strip())
-        self.settings.set(slot, "api_key_env",
-                          self.vars[f"{slot}.api_key_env"].get().strip())
+    def _test_bg(self, slot):
+        """表单当前值写入探针 settings（不落盘），后台发起真实请求"""
+        probe = _ProbeSettings(self.settings)
+        self._apply_slot_to(probe, slot)
+        from hexa.ai.client import LLMClient
+        result = LLMClient(probe, slot).test_connection()
+        def done():
+            try:
+                if result.get("ok"):
+                    self.vars[f"{slot}._test"].set(
+                        f"✅ {result['latency']}s ({result['model']})")
+                else:
+                    self.vars[f"{slot}._test"].set(
+                        f"❌ {result.get('error', '失败')[:40]}")
+            except tk.TclError:
+                pass  # 窗口已关闭
+        try:
+            self.after(0, done)
+        except tk.TclError:
+            pass
+
+    def _apply_slot_to(self, target, slot):
+        for key in ("model", "base_url", "api_key", "api_key_env"):
+            target.set(slot, key, self.vars[f"{slot}.{key}"].get().strip())
 
     # ── 仪表轮询 ──────────────────────────────────────────────────
 
@@ -233,9 +276,14 @@ class SettingsWindow(tk.Toplevel):
                 f"本局: {st.get('calls', 0)} 次调用 / ¥{st.get('cost_game', 0):.4f}   "
                 f"累计: ¥{st.get('cost_total', 0):.4f}   "
                 f"上下文: {st.get('ctx_source', '-')}   模式: {st.get('mode', '-')}"))
+        except tk.TclError:
+            return  # 窗口已销毁，终止轮询链
         except Exception:
             pass
-        self.after(2000, self._poll_stats)
+        try:
+            self.after(2000, self._poll_stats)
+        except tk.TclError:
+            pass
 
     def _render_data_panel(self):
         kb = self.kb

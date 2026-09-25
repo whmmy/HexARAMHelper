@@ -19,7 +19,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from hexa.ai import engine as engine_mod
 from hexa.ai.client import UsageStats
 from hexa.ai.engine import (AIDecisionEngine, KIND_NEXT, KIND_OPENING,
                             RuleDecisionEngine)
@@ -27,7 +26,7 @@ from hexa.core.game_state import GameSession
 from hexa.core.live_api import LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
 from hexa.core.mouse_ledger import CardLedger
-from hexa.core.rules_engine import RulesEngine, ThreatProfile, KEY_ENEMY_ITEMS
+from hexa.core.rules_engine import RulesEngine, ThreatProfile
 from hexa.core.screen_detect import (DEFAULT_LAYOUT_169, DetectorCore, Layout,
                                      point_in_rect)
 from hexa.knowledge.kb import KnowledgeBase
@@ -661,6 +660,161 @@ def test_session_ai_serial():
               and doc.get("suggestions"), str(doc.get("hero")))
 
 
+# ── 7. Review 修复回归（P0 闩锁 / epoch 代际 / 双触发 / 排序 / 单位） ──
+
+def test_review_fixes():
+    print("\n[7] Review 修复回归")
+    hero = "暗裔剑魔"
+    import json as _json
+
+    def ctx_json_for(h):
+        top = kb.top_augments(h, 8)
+        pool = kb.core_item_pool(h) or ["长剑"]
+        return _json.dumps({
+            "augment_affinity": [{"name": n, "bias": "ad", "note": "t"} for n in top],
+            "opening_items": [{"combo": pool[:1], "when": "标准"},
+                              {"combo": ["多兰之刃"], "when": "进攻"},
+                              {"combo": ["红水晶"], "when": "防守"}],
+            "build_paths": {"ad": {"items": pool[:3], "skill_order": "主Q副E",
+                                   "note": "主线"}},
+            "component_rules": [],
+            "augment_item_links": []})
+
+    # -- P0：稳定内容闩锁——同内容不重复发射 on_cards（防烧穿 AI 预算） --
+    core = DetectorCore()
+    core.feed_titles(2); core.feed_titles(2)
+    cards = ["贪欲束缚", None, "秘术射击"]
+    emissions = 0
+    for _ in range(12):  # 12 帧稳定内容
+        core.feed_cards(cards)
+        if core.consume_cards():
+            emissions += 1
+    check("闩锁：稳定内容只发一次", emissions == 1, f"emissions={emissions}")
+    # reroll 闩锁清零后可再次发射
+    core.reset_round()
+    core.feed_cards(cards); core.feed_cards(cards)
+    check("闩锁：reroll 后可重发", core.consume_cards() is not None)
+
+    # -- P1：epoch 代际——旧局在途结果整包丢弃 --
+    eng, c1, _c2 = build_ai_engine(script_s2=[ctx_json_for(hero),
+                                              ctx_json_for("黑暗之女")])
+    results = []
+    eng.bind(lambda kind, payload, serial: results.append((kind, payload, serial)))
+    eng.start_game(hero, [], [])
+    eng.start_game("黑暗之女", [], [])   # 秒退重开：代际 +1，game1 在途作废
+    deadline = time.time() + 6
+    while time.time() < deadline and (eng.cache.get() is None
+                                      or eng.cache.pending):
+        time.sleep(0.02)
+    ctx = eng.cache.get()
+    check("epoch：缓存英雄=新局", ctx is not None and ctx.hero == "黑暗之女",
+          str(ctx.hero if ctx else None))
+    eng.rank_cards("黑暗之女", kb.top_augments("黑暗之女", 3), [], [],
+                   ThreatProfile(), serial=1)
+    deadline = time.time() + 6
+    while time.time() < deadline and not any(k == "augment_ranks"
+                                             for k, _p, _s in results):
+        time.sleep(0.02)
+    check("epoch：新局结果正常回调",
+          any(k == "augment_ranks" for k, _p, _s in results))
+
+    # -- P2：死亡同帧不双发（event 发出后 periodic 跳过） --
+    st = FakeSettings()
+    sess = GameSession(kb, rules, settings=st,
+                       engine=build_ai_engine(
+                           script_s2=[ctx_json_for(hero)],
+                           script_s1=[_json.dumps({"picks": [
+                               {"name": "星蚀", "reason": "r"}]})])[0])
+    sess.on_game_start({"ally": [hero], "enemy": ["黑暗之女"],
+                        "my_hero": hero, "source": "test"})
+    sess.on_in_progress()
+    sess.record_augment(REAL_AUG)
+    fake_eng, fc1, _ = build_ai_engine(
+        script_s2=[ctx_json_for(hero)],
+        script_s1=[_json.dumps({"picks": [{"name": "星蚀", "reason": "r"}]}),
+                   _json.dumps({"picks": [{"name": "焚天", "reason": "r"}]})])
+    sess.engine = fake_eng
+    sess.engine.bind(sess._on_engine_result)
+    sess.engine.start_game(hero, [hero], ["黑暗之女"])
+    deadline = time.time() + 6
+    while sess.engine.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    sess.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                               my_gold=1000))
+    deadline = time.time() + 6
+    while time.time() < deadline and len(fc1.calls) < 1:
+        time.sleep(0.02)  # 首次 periodic 精修
+    n_before_death = len(fc1.calls)
+    sess.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                               my_gold=1000, dead=True))
+    time.sleep(1.0)
+    check("死亡同帧不双发", len(fc1.calls) == n_before_death + 1,
+          f"before={n_before_death} after={len(fc1.calls)}")
+
+    # -- P2：suggest_opening 保留模型排序 --
+    from hexa.ai import system1
+    from hexa.ai import system2 as system2_mod
+    class _C:
+        configured = True
+        usage = UsageStats()
+        def chat(self, *a, **k):
+            return (_json.dumps({"picks": [
+                {"name": "红水晶", "reason": "b"},
+                {"name": "多兰之刃", "reason": "c"},
+                {"name": "长剑", "reason": "a"}]}), {})
+    ctx_o = system2_mod.ChampionContext(
+        {"augment_affinity": [], "opening_items": [
+            {"combo": ["长剑"], "when": "1"}, {"combo": ["多兰之刃"], "when": "2"},
+            {"combo": ["红水晶"], "when": "3"}],
+         "build_paths": {}, "component_rules": [], "augment_item_links": []},
+        hero)
+    out = system1.suggest_opening(_C(), ctx_o, hero, "", "", [])
+    check("opening 保留模型排序", [o["name"] for o in out] ==
+          ["红水晶", "多兰之刃", "长剑"], str([o["name"] for o in out]))
+
+    # -- P2：Layout units:"h" 往返零漂移（任意宽高比） --
+    h_regions = {"units": "h",
+                 "title_bands": [[-0.3, 0.42, 0.32, 0.05],
+                                 [0.0, 0.42, 0.32, 0.05],
+                                 [0.3, 0.42, 0.32, 0.05]],
+                 "cards": [[-0.35, 0.46, 0.35, 0.4],
+                           [0.0, 0.46, 0.35, 0.4],
+                           [0.35, 0.46, 0.35, 0.4]],
+                 "reroll": [0.0, 0.9, 0.2, 0.05]}
+    for w, hgt in ((1920, 1080), (3440, 1440), (2560, 1600), (1600, 1200)):
+        lay = Layout(dict(h_regions))
+        px = lay.to_pixels(w, hgt)
+        # 逐矩形比对独立公式（H 单位：x=W/2+xu*H，宽高/纵向均为 *H）
+        ok = True
+        for got, (xu, y, wu, hh) in zip(
+                px["cards"] + [px["reroll"]],
+                h_regions["cards"] + [h_regions["reroll"]]):
+            exp = [int(w / 2 + xu * hgt), int(y * hgt),
+                   int(wu * hgt), int(hh * hgt)]
+            if got != exp:
+                ok = False
+                check(f"units:h {w}x{hgt} 零漂移", False,
+                      f"{got} != {exp}")
+                break
+        if not ok:
+            break
+    else:
+        check("units:h 4 种分辨率零漂移", True)
+
+    # -- P2：预算原子占位（budget=1 顺序+并发提交只打 1 次） --
+    eng_b, c1b, _ = build_ai_engine(script_s2=[ctx_json_for(hero)], budget=1)
+    eng_b.bind(lambda *a: None)
+    eng_b.start_game(hero, [], [])
+    deadline = time.time() + 6
+    while eng_b.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    for s in range(5):  # 连发 5 个请求，只有第 1 个应占位成功
+        eng_b.next_candidates(["多兰之刃"], 0, "ad", ThreatProfile(),
+                              serial=100 + s, reason="event")
+    time.sleep(1.0)
+    check("预算原子占位", len(c1b.calls) == 1, f"calls={len(c1b.calls)}")
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -671,6 +825,7 @@ if __name__ == "__main__":
     test_detect_and_layout()
     test_ai_engine()
     test_session_ai_serial()
+    test_review_fixes()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

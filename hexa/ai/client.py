@@ -107,10 +107,9 @@ class LLMClient:
             self.settings.get(self.slot, "max_tokens", default=800))
         temperature = float(
             self.settings.get(self.slot, "temperature", default=0.3))
-        attempts = [self.model]
+        model = self.model
         fb = self.settings.get(self.slot, "fallback_model", default="")
-        if fb and fb != self.model:
-            attempts.append(fb)
+        attempts = [model, fb] if (fb and fb != model) else [model, model]
         last_err = None
         for i, model in enumerate(attempts):
             try:
