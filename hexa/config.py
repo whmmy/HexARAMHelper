@@ -57,6 +57,7 @@ DEFAULTS = {
         "api_key_env": "DASHSCOPE_API_KEY",
         "temperature": 0.3,
         "max_tokens": 1500,
+        "thinking": "off",            # off/low/medium/high/auto（auto=跟随服务商默认）
         "timeout": 60,
         "price_in": 2.4,              # ¥/百万 token（费用仪表）
         "price_out": 9.6,
@@ -69,6 +70,7 @@ DEFAULTS = {
         "api_key_env": "DASHSCOPE_API_KEY",
         "temperature": 0.3,
         "max_tokens": 800,
+        "thinking": "off",            # deepseek 系默认深度思考，显式关掉才快（也不烧穿配额）
         "timeout": 30,
         "price_in": 0.8,
         "price_out": 2.7,

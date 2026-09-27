@@ -180,19 +180,39 @@ class KnowledgeBase:
         data = json.loads(path.read_text(encoding="utf-8"))
         self.dd_version = data.get("version", self.dd_version)
         # 同名装备在 DD 里有多份模式条目（峡谷 3xxx/8xxx、大乱斗 22xxxx、
-        # KIWI 模式 77xxxx，价格各异）；商店实测按峡谷价出售，故同名去重
-        # 优先保留 id 最短（峡谷正价）条目，避免价格随机错+合成链指向
-        # 模式专属名导致建议与商店对不上。仅模式存在的名字照常保留。
+        # 斗魂竞技场 44xxxx、KIWI 77xxxx，价格各异）；商店实测按峡谷价出售。
+        # 去重优先级：峡谷可买 > 大乱斗可买 > 其它，同级内取最短 id——
+        # 同长度不同 id 时小 id 未必是峡谷条目（放血者的诅咒 4010 乱斗
+        # 2500 vs 8010 峡谷 2900），必须先按地图分层再比 id。
         best = {}
+        buy_maps = {}   # 名字 -> 在 11/12 哪些图有可买条目
         for _iid, it in data.get("data", {}).items():
             name = (it.get("name") or "").strip()
             if not name:
                 continue
+            maps = it.get("maps") or {}
+            non77 = not _iid.startswith("77")
+            # KIWI 模式条目(77xxxx)不参与 11/12 可买性判定：DD 给它们标了
+            # map12/453，但真机海克斯大乱斗商店没有（麦瑞德裂血手套案
+            # 2026-09-27）；同名装备以峡谷/大乱斗正价条目为准
+            if non77 and (it.get("gold") or {}).get("purchasable"):
+                for m in ("11", "12"):
+                    if maps.get(m):
+                        buy_maps.setdefault(name, set()).add(m)
+            # 入库看地图标记（魔切/炽天使之拥等商店不可直购的自动升级件
+            # 保留在库里供台账/路线推断，可推荐性由 buy_maps/item_available 管）
+            tier = 0 if (non77 and maps.get("11")) else (
+                1 if (non77 and maps.get("12")) else 2)
+            key = (tier, len(_iid), int(_iid or 0))
             cur = best.get(name)
-            if cur is None or len(_iid) < len(cur[0]) or (
-                    len(_iid) == len(cur[0]) and int(_iid or 0) < int(cur[0] or 0)):
-                best[name] = (_iid, it)
-        for name, (_iid, it) in best.items():
+            if cur is None or key < cur[0]:
+                best[name] = (key, _iid, it)
+        # 峡谷+大乱斗都不可买 = 斗魂竞技场/KIWI 专属（飞升护符、黑洞护手、
+        # 麦瑞德裂血手套等），本作商店里根本没有，推荐出去等于幻觉，
+        # 直接不入库（幻觉校验随之收紧）；id→名全量映射保留供合成链换算。
+        for name, (key, _iid, it) in best.items():
+            if key[0] >= 2:
+                continue
             self.items[name] = {
                 "id": _iid,
                 "tags": it.get("tags", []),
@@ -200,6 +220,9 @@ class KnowledgeBase:
                 "plaintext": it.get("plaintext", ""),
                 "from": it.get("from", []) or [],   # 组件 item id 列表
                 "into": it.get("into", []) or [],   # 升级目标 item id 列表
+                # 可买地图：名字任一非 KIWI 条目在 11/12 可买即算，
+                # 供 item_available 按当前对局地图过滤
+                "maps": sorted(buy_maps.get(name, set())),
             }
         # id -> name 索引（组件/升级链换算用）：全量 id 都映射到规范名，
         # 任一模式条目的 from/into 引用都能落到同一装备
@@ -279,6 +302,20 @@ class KnowledgeBase:
     def valid_item(self, name: str) -> bool:
         return name in self.items
 
+    def item_available(self, name: str, map_id: str = "") -> bool:
+        """装备在指定地图商店是否可买（"11"=召唤师峡谷 / "12"=极地大乱斗）。
+
+        map_id 缺失/未知时退化为"任一支持地图可买"（宽松兜底，行为同
+        未按图过滤）；竞技场/KIWI 专属件已不入库，任一图都查不到。
+        """
+        info = self.items.get(name)
+        if not info:
+            return False
+        maps = info.get("maps") or []
+        if map_id in ("11", "12"):
+            return map_id in maps
+        return bool(maps)
+
     def valid_augment(self, name: str) -> bool:
         return name in self.augment_names
 
@@ -302,6 +339,27 @@ class KnowledgeBase:
                     seen.add(name)
                     pool.append(name)
         return pool
+
+    def core_build_line(self, hero_cn: str, current_path: str = "") -> list:
+        """英雄核心套装线（v4.3 主推逻辑，用户验收口径 2026-09-27：
+        "先出自己流派的核心三件套，敌情是后续调整"）。
+
+        按当前路线选最匹配的组合：小丑 ad→收集者线 / ap→黯炎火炬·面具线，
+        剑魔 爆杀流→星蚀·焚天·死亡之舞。匹配票数 = 组合内与路线同 bias 的
+        件数，同票取 OP.GG 登场序靠前；无路线（对局早期）退回首组。
+        返回展平装备名列表（组合内顺序），组合不合法（含库外名）整组跳过。
+        """
+        combos = self.builds.get(hero_cn, {}).get("core_builds") or []
+        best, best_key = None, None
+        for i, combo in enumerate(combos):
+            if not combo or not all(self.valid_item(n) for n in combo):
+                continue
+            votes = sum(1 for n in combo
+                        if current_path and self.item_path_bias(n) == current_path)
+            key = (votes, -i)
+            if best_key is None or key > best_key:
+                best, best_key = list(combo), key
+        return best or []
 
     def starter_combos(self, hero_cn: str) -> list:
         """出门装方案（[[...], ...]，全部组件过 DD 校验）"""

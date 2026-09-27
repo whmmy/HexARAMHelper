@@ -31,6 +31,21 @@ from hexa.core.screen_detect import (DEFAULT_LAYOUT_169, DetectorCore, Layout,
                                      point_in_rect)
 from hexa.knowledge.kb import KnowledgeBase
 
+# 复盘日志隔离：GameSession 局终落盘按 BASE_DIR 定位 log/games/，
+# 测试进程统一指到临时目录（测试结束自动清理），不再污染真实日志。
+# 两处都要改：落盘读 game_state 的模块副本，[6b] 断言读 hexa.config。
+import atexit
+import shutil
+import tempfile
+
+import hexa.config as _config
+import hexa.core.game_state as _game_state
+
+_SMOKE_BASE = Path(tempfile.mkdtemp(prefix="hexaram_smoke_"))
+_config.BASE_DIR = _SMOKE_BASE
+_game_state.BASE_DIR = _SMOKE_BASE
+atexit.register(shutil.rmtree, _SMOKE_BASE, ignore_errors=True)
+
 PASS, FAIL = [], []
 
 
@@ -79,8 +94,28 @@ def test_kb():
     print("\n[1] KnowledgeBase")
     check("173 英雄先验", len(kb.hero_augments) == 173, f"got {len(kb.hero_augments)}")
     check("229 海克斯名单", len(kb.augment_names) == 229, f"got {len(kb.augment_names)}")
-    check("装备库加载", len(kb.items) > 500, f"got {len(kb.items)}")
+    check("装备库加载", len(kb.items) > 250, f"got {len(kb.items)}")
     check("DD 版本号", kb.dd_version.startswith("16."), kb.dd_version)
+    # 峡谷/大乱斗商店买不到的模式专属件不入库（推荐出去 = 幻觉）
+    check("竞技场专属装备已剔除",
+          all(n not in kb.items for n in
+              ("飞升护符", "黑洞护手", "兰德里的苦楚", "传说级战士装备")),
+          str([n for n in ("飞升护符", "黑洞护手", "兰德里的苦楚")
+               if n in kb.items]))
+    check("乱斗同名条目不压峡谷价",
+          kb.items.get("放血者的诅咒", {}).get("gold") == 2900,
+          str(kb.items.get("放血者的诅咒", {}).get("gold")))
+    # 按图可买性（"11"=峡谷 / "12"=大乱斗；KIWI 件(77xxx)虽被 DD 标 map12，
+    # 真机商店没有 → 不入库，麦瑞德裂血手套 即此类）
+    check("按图可买性接口",
+          not kb.valid_item("麦瑞德裂血手套")
+          and kb.item_available("无尽之刃", "11")
+          and kb.item_available("无尽之刃", "12")
+          and not kb.item_available("麦瑞德裂血手套", "")
+          and not kb.item_available("不存在的装备", "11")
+          and kb.item_available("无尽之刃", "")  # 空图=宽松兜底
+          and not kb.item_available("魔切", "11"),  # 自动升级件不可直购，不推荐
+          "")
     check("拼音搜索", kb.search_hero("ayjm") == (["暗裔剑魔"], True))
     check("英中转换", kb.champion_cn("Aatrox") == "暗裔剑魔")
     check("英雄校验模糊", kb.validate_hero("剑魔") == "暗裔剑魔")
@@ -112,7 +147,7 @@ def test_rules():
     check("空输入路线未定", rules.infer_current_path([], []) == "")
     check("AD 装备推断", rules.infer_current_path(["无尽之刃"], []) == "ad")
     check("AP 装备推断", rules.infer_current_path(["灭世者的死亡之帽", "爆裂魔杖"], []) == "ap")
-    check("坦克装备推断", rules.infer_current_path(["日炎斗篷"], []) == "tank")
+    check("坦克装备推断", rules.infer_current_path(["日炎圣盾"], []) == "tank")
     check("海克斯偏移(心之刚示例)",
           rules.infer_current_path(["巨人腰带"], ["心之刚"]) == "tank")
 
@@ -145,18 +180,80 @@ def test_rules():
     bad = [c.name for c in ad_cands
            if kb.item_path_bias(c.name) not in ("ad", "tank", None)]
     check("AD 候选不串 AP 主线", not bad, str(bad))
-    # 抗性件跨路线放行（女妖面纱 bias=tank 但 ap 路线可拿）
+    # 抗性件语义（真机回归 20260927：AD 小丑被"对面物伤多"推护甲装）
+    # 输出位（ap/ad）：候选只来自 OP.GG 池，敌方构成不再往里塞抗性件，
+    # 带抗性的输出件（如中娅）理由也不挂"补护甲/补魔抗"误导文案
     tp = ThreatProfile(ap_count=3)
     cands2 = rules.next_item_candidates(["爆裂魔杖"], "ap", tp, hero="黑暗之女",
                                         limit=20)
-    check("抗性件跨路线放行",
-          any("SpellBlock" in kb.items[c.name]["tags"] for c in cands2 if c.name in kb.items),
-          "ap 路线候选中无任何魔抗件")
+    misleading = [c.name for c in cands2
+                  if "补魔抗" in c.reason or "补护甲" in c.reason]
+    check("输出位不推抗性装不挂误导文案",
+          not misleading and all(kb.item_available(c.name, "12")
+                                 for c in cands2), str(misleading))
+    # 坦克位：敌方物伤多 → 抗性件池照常开放且加权
+    opgg_pool_t = set(kb.core_item_pool("暗裔剑魔"))
+    cands3 = rules.next_item_candidates(["巨人腰带"], "tank",
+                                        ThreatProfile(ad_count=4),
+                                        hero="暗裔剑魔", limit=10)
+    check("坦克位对抗物伤推护甲",
+          any("Armor" in kb.items.get(c.name, {}).get("tags", [])
+              for c in cands3), str([c.name for c in cands3][:5]))
+
+    # v4.3 核心线优先（用户验收 20260927：先出自己流派的核心三件套，
+    # 敌方阵容是后续调整；小丑 ad=收集者线 / ap=黯炎火炬·面具线）
+    seq = rules.build_sequence([], "ad", ThreatProfile(), hero="恶魔小丑")
+    check("小丑AD核心线置顶",
+          [c.name for c in seq] == ["收集者", "电震涡流剑", "无尽之刃"]
+          and all("核心装" in c.reason for c in seq),
+          str([(c.name, c.reason) for c in seq]))
+    seq_ap = rules.build_sequence([], "ap", ThreatProfile(), hero="恶魔小丑")
+    check("小丑AP切法系核心线",
+          seq_ap and seq_ap[0].name == "黯炎火炬"
+          and "兰德里的折磨" in [c.name for c in seq_ap],
+          str([c.name for c in seq_ap]))
+    seq_j = rules.build_sequence([], "ad", ThreatProfile(), hero="暗裔剑魔")
+    check("剑魔爆杀流核心线", seq_j and seq_j[0].name == "星蚀",
+          str([c.name for c in seq_j]))
+    seq2 = rules.build_sequence(["收集者"], "ad", ThreatProfile(),
+                                hero="恶魔小丑")
+    check("核心线跳过已拥有", seq2 and seq2[0].name == "电震涡流剑",
+          str([c.name for c in seq2]))
+    # 按当前地图过滤（真机回归：峡谷局曾推出 KIWI 专属 麦瑞德裂血手套）
+    tp_ad = ThreatProfile(ad_count=4)
+    got11 = {c.name for c in rules.next_item_candidates(
+        ["多兰之刃"], "ad", tp_ad, hero="恶魔小丑", limit=30, game_map="11")}
+    got12 = {c.name for c in rules.next_item_candidates(
+        ["多兰之刃"], "ad", tp_ad, hero="恶魔小丑", limit=30, game_map="12")}
+    check("峡谷局不推乱斗/KIWI 专属件",
+          "麦瑞德裂血手套" not in got11
+          and all(kb.item_available(n, "11") for n in got11),
+          str(sorted(got11)[:8]))
+    check("大乱斗局不推峡谷专属件",
+          all(kb.item_available(n, "12") for n in got12),
+          str(sorted(got12 - got11)[:8]))
 
     # 小件合成：爆裂魔杖 → 某个 AP 传说件
     target, note = rules.component_advice(["爆裂魔杖"], "ap")
     check("小件合成建议存在", target is not None, note)
     check("合成目标路线一致", target and kb.item_path_bias(target) == "ap", str(target))
+
+    # 回归 2026-09-27 真机：心之钢已买出、身上第二件巨人腰带——旧版按 into
+    # 数据序把已拥有的心之钢又顶回推荐①位；现在目标排除已拥有且优先对齐
+    # 推荐序列（腰带往正在攒的坦克核心件合）
+    mine_t = ["心之钢", "巨人腰带"]
+    seq_t = rules.build_sequence(mine_t, "tank", ThreatProfile(), hero="曙光女神")
+    check("坦克核心线排除已拥有心之钢",
+          "心之钢" not in [c.name for c in seq_t], str([c.name for c in seq_t]))
+    target_t, note_t = rules.component_advice(mine_t, "tank", game_map="12",
+                                              prefer=[c.name for c in seq_t])
+    check("腰带不再往已拥有的心之钢合",
+          target_t and target_t != "心之钢", note_t)
+    check("腰带目标对齐推荐序列",
+          target_t in [c.name for c in seq_t], str(target_t))
+    target_f, _ = rules.component_advice(mine_t, "tank", game_map="12")
+    check("数据序兜底同样排除已拥有",
+          target_f and target_f != "心之钢", str(target_f))
 
     # 威胁画像：敌方英雄 + 装备扫描
     tp = rules.threat_profile(
@@ -165,6 +262,21 @@ def test_rules():
     check("AP 数统计", tp.ap_count == 3, str(tp.ap_count))
     check("治疗识别", tp.healers == ["众星之子"])
     check("敌方关键装扫描", tp.key_items and tp.key_items[0]["item"] == "荆棘之甲")
+
+    # 伤害类型按实际出装推断（装备覆盖英雄默认）：女枪默认 AD，出 AP 传说件按法伤计
+    tp_ap = rules.threat_profile(
+        ["赏金猎人"],
+        [PlayerInfo(champion="赏金猎人",
+                    items=[{"name": "灭世者的死亡之帽", "count": 1},
+                           {"name": "虚空之杖", "count": 1}])])
+    check("女枪 AP 出装按法伤计",
+          tp_ap.ap_count == 1 and tp_ap.ad_count == 0, tp_ap.summary())
+    # 单小件证据不足，仍按英雄默认（防早期误翻转）
+    tp_early = rules.threat_profile(
+        ["赏金猎人"],
+        [PlayerInfo(champion="赏金猎人", items=[{"name": "增幅典籍", "count": 1}])])
+    check("单小件不推翻默认路线",
+          tp_early.ad_count == 1 and tp_early.ap_count == 0, tp_early.summary())
 
     # 海克斯时刻评级（S/A/B 合成评分）
     top3 = kb.top_augments("暗裔剑魔", 3)
@@ -268,6 +380,34 @@ def test_session():
     before = len(session.augments)
     check("台账防重复", session.record_augment(REAL_AUG) is False)
     check("结束前台账非空", len(session.augments) == max(before, 1))
+
+    # 海克斯识别状态标识（overlay 状态流转数据源）
+    session.on_hex_ui(True)
+    st = session.ui_state()
+    check("hex 界面在屏未识别", st["hex_active"] and not st["hex_recognized"]
+          and st["hex_last"] == "" and st["hex_picked"] is None)
+    session.rank_augment_cards([REAL_AUG] * 3)
+    st = session.ui_state()
+    check("hex 识别成功标记", st["hex_active"] and st["hex_recognized"]
+          and len(st["card_ranks"]) == 3, str(st["hex_recognized"]))
+    other = sorted(kb.augment_names)[1]
+    session.record_augment(other, card_idx=1)
+    st = session.ui_state()
+    check("hex 点选卡标记", st["hex_picked"] == [1, other], str(st["hex_picked"]))
+    session.on_hex_reroll()
+    st = session.ui_state()
+    check("hex reroll 回识别中", st["hex_active"] and not st["hex_recognized"]
+          and st["hex_picked"] is None and st["card_ranks"])
+    session.rank_augment_cards([REAL_AUG] * 3)
+    session.on_hex_ui(False)
+    st = session.ui_state()
+    check("hex 关闭留成功摘要", not st["hex_active"] and "✓" in st["hex_last"],
+          st["hex_last"])
+    session.on_hex_ui(True)
+    session.on_hex_ui(False)
+    st = session.ui_state()
+    check("hex 关闭留失败摘要", "✗" in st["hex_last"], st["hex_last"])
+    session.on_hex_ui(True)   # 复位（下面 end_of_game reset 也会清）
 
     # 结束 → 重置
     session.on_end_of_game("EndOfGame")
@@ -434,6 +574,24 @@ def test_detect_and_layout():
     check("内容变化重置", core.stable_cards is None)
     core.feed_cards(["秘术射击", "贪欲束缚", None])
     check("重扫后稳定", core.stable_cards == ["秘术射击", "贪欲束缚", None])
+    # 瞬时漏读容忍（真机 2026-09-27 复盘：流光动画下整帧/部分漏读逐帧交替
+    # → 内容永不稳定 → last_cards 空 → 点击记账被静默丢弃、台账空白）
+    core3 = DetectorCore()
+    core3.feed_titles(2)
+    core3.feed_titles(2)
+    core3.feed_cards(["贪欲束缚", None, "秘术射击"])
+    core3.feed_cards([None, None, None])   # 整帧漏读 = 上帧"子集"
+    check("整帧漏读不重置稳定", core3.stable_cards == ["贪欲束缚", None, "秘术射击"])
+    core3.consume_cards()
+    core3.feed_cards([None, None, None])
+    check("漏读帧不重发（闩锁保持）", core3.stable_cards is None)
+    check("last_content 含补齐读数", core3.last_content
+          == ("贪欲束缚", None, "秘术射击"))
+    core3.feed_cards(["秘术射击", "贪欲束缚", None])   # 有槽位读出不同名 = 真变化
+    check("真变化不被补齐吞掉", core3.stable_cards is None
+          and core3.last_content == ("秘术射击", "贪欲束缚", None))
+    core3.feed_cards(["秘术射击", "贪欲束缚", None])
+    check("真变化后重新稳定", core3.stable_cards == ["秘术射击", "贪欲束缚", None])
     # 消失迟滞：连续 3 帧无命中
     core.feed_titles(0)
     check("1 帧无命中仍活跃", core.state == "active")
@@ -452,13 +610,100 @@ def test_detect_and_layout():
     check("卡片像素在屏内", all(0 <= r[0] and r[0] + r[2] <= 1920 and
                                 0 <= r[1] and r[1] + r[3] <= 1080 for r in cards))
     check("三卡片水平有序", cards[0][0] < cards[1][0] < cards[2][0])
+    # 默认布局卡片必须覆盖卡名行（真值 y≈0.398~0.427H）——历史缺陷：cards
+    # 从名行下方开始导致游戏内永不识别
+    check("卡片含名行带", all(r[1] <= 0.396 * 1080 and r[1] + r[3] >= 0.43 * 1080
+                              for r in cards), str(cards))
+    # rerolls ×3：默认布局 3 个刷新按钮，屏内、有序、且在卡片下方（不交叠）
+    rrs = px["rerolls"]
+    check("rerolls 三个且屏内", len(rrs) == 3 and
+          all(0 <= r[0] and r[0] + r[2] <= 1920 and r[1] + r[3] <= 1080
+              for r in rrs), str(rrs))
+    check("rerolls 有序且低于卡片", rrs[0][0] < rrs[1][0] < rrs[2][0]
+          and all(r[1] >= c[1] + c[3] for r, c in zip(rrs, cards)))
     wide = lay.to_pixels(3440, 1440)  # 21:9
     wcx = wide["cards"][1][0] + wide["cards"][1][2] / 2
     check("21:9 中心锚定", abs(wcx - 3440 / 2) < 120, f"cx={wcx}")
     # 往返一致性（H 单位换算无损）
     lay2 = Layout(lay.as_169())
     check("Layout 往返一致", lay2.title_bands == lay.title_bands
-          and lay2.cards == lay.cards and lay2.reroll == lay.reroll)
+          and lay2.cards == lay.cards and lay2.rerolls == lay.rerolls)
+
+    # 旧标定兼容：单 reroll 文件可读取（复制三份），其余区域照常
+    legacy = {"units": "h",
+              "title_bands": lay.title_bands, "cards": lay.cards,
+              "reroll": lay.rerolls[0]}
+    lay_old = Layout(legacy)
+    check("旧单 reroll 兼容读取", len(lay_old.rerolls) == 3
+          and all(r == lay.rerolls[0] for r in lay_old.rerolls))
+
+    # _regions_valid：卡片交叠的垃圾推导必须被拒（默认布局须通过）
+    from hexa.core.screen_detect import ScreenDetector
+    det_v = ScreenDetector(kb, type("StubOcr", (), {"available": True})())
+    check("默认布局过区域校验", det_v._regions_valid(lay.as_169()))
+    overlapping = {"title_bands": lay.as_169()["title_bands"],
+                   "cards": [[0.20, 0.18, 0.20, 0.49],
+                             [0.35, 0.18, 0.20, 0.49],
+                             [0.60, 0.18, 0.20, 0.49]],
+                   "rerolls": lay.as_169()["rerolls"]}
+    check("卡片交叠拒绝落盘", not det_v._regions_valid(overlapping))
+
+    # 回归：活跃期自愈标定分支曾误写 self.MIN_TITLE_HITS（常量定义在
+    # DetectorCore 上），每帧 AttributeError 被线程兜底吞掉 → 活跃期卡片
+    # 识别整体失效且日志刷屏。桩掉截屏/OCR 后跑两帧全帧识别，on_cards 必须触发
+    import numpy as _np
+    det_a = ScreenDetector(kb, type("StubOcr", (), {"available": True})(),
+                           layout=Layout(lay.as_169()))
+    det_a._screen_size = lambda: (1920, 1080)
+    det_a._grab = lambda: _np.zeros((1080, 1920, 3), dtype=_np.uint8)
+    _cards3 = ["有始有终", "黎明使者的坚决", "鲨鱼诱饵"]
+    det_a._ocr_title_strips = lambda strips: (3, list(_cards3))
+    det_a._ocr_cards = lambda frame, rects, prev_texts=None: (list(_cards3), True)
+    det_a._auto_calibrate_frame = lambda frame: None
+    det_a.core.state = "active"
+    _got = []
+    det_a.on_cards = lambda cards, rid: _got.append((list(cards), rid))
+    _aerr = ""
+    try:
+        det_a._tick()
+        det_a._tick()
+    except Exception as e:  # noqa: BLE001
+        _aerr = repr(e)
+    check("活跃期全帧识别不抛 MIN_TITLE_HITS",
+          bool(_got) and _got[0][0] == _cards3, _aerr)
+
+    # save_layout 并发原子性（检测线程自愈 × 手动标定线程两写者回归）：
+    # 交错写后文件必须仍是完整 JSON，且无 .tmp 残留
+    import tempfile as _tempfile
+    import threading as _threading
+    from pathlib import Path as _Path
+    import json as _json
+    from hexa.core import screen_detect as _sd
+    regions_ok = lay.as_169()
+    with _tempfile.TemporaryDirectory() as td:
+        old_dir, _sd.CALIB_DIR = _sd.CALIB_DIR, _Path(td)
+        try:
+            errs = []
+
+            def _writer(tag):
+                try:
+                    for _ in range(30):
+                        _sd.save_layout(1234, 567, regions_ok, 0.9)
+                except Exception as e:  # noqa: BLE001
+                    errs.append(e)
+            ts = [_threading.Thread(target=_writer, args=(i,)) for i in range(2)]
+            for t in ts:
+                t.start()
+            for t in ts:
+                t.join()
+            doc = _json.loads((_Path(td) / "1234x567.json").read_text(
+                encoding="utf-8"))
+            leftovers = list(_Path(td).glob("*.tmp"))
+        finally:
+            _sd.CALIB_DIR = old_dir
+        check("并发 save_layout 不损坏", not errs and
+              doc["regions"]["cards"] == regions_ok["cards"], str(errs))
+        check("并发写无 .tmp 残留", not leftovers, str(leftovers))
 
     # 鼠标落点 → 卡片序号
     rects = [tuple(r) for r in px["cards"]]
@@ -468,6 +713,22 @@ def test_detect_and_layout():
     check("空白处无映射", cl.card_at(5, 5) is None)
     check("point_in_rect", point_in_rect(10, 10, [5, 5, 10, 10])
           and not point_in_rect(16, 10, [5, 5, 10, 10]))
+
+    # MouseLedger 矩形归一化：单矩形/列表/None
+    from hexa.core.mouse_ledger import MouseLedger
+    check("归一化单矩形", MouseLedger._as_rect_list([1, 2, 3, 4]) == [[1, 2, 3, 4]])
+    check("归一化矩形列表", MouseLedger._as_rect_list(
+        [[1, 2, 3, 4], [5, 6, 7, 8]]) == [[1, 2, 3, 4], [5, 6, 7, 8]])
+    check("归一化空值", MouseLedger._as_rect_list(None) == []
+          and MouseLedger._as_rect_list([]) == [])
+
+    # on_cards 发射门：≥2 个有效库名才上报（复用上面 det_v 实例）
+    check("发射门：全有效名 3", det_v.count_valid_cards(
+        [REAL_AUG, REAL_AUG, REAL_AUG]) == 3)
+    check("发射门：单名+垃圾 1（拒发）", det_v.count_valid_cards(
+        [REAL_AUG, "幻觉卡名文本", None]) == 1)
+    check("发射门：两个真名过门", det_v.count_valid_cards(
+        ["贪欲束缚", REAL_AUG, None]) >= 2)
 
 
 # ── 6. AI 引擎（FakeClient，不联网） ─────────────────────────────
@@ -708,6 +969,19 @@ def test_session_ai_serial():
     session._on_engine_result(KIND_NEXT, [Candidate("X", "y")], serial_at_opening)
     check("类型不匹配不覆盖", session.suggestion.candidates[0].name == "星蚀")
 
+    # 回归 2026-09-27 真机：已拥有成品不回推荐 + 可买性按身上小件抵扣
+    # （腰带 1000G 在手，推荐件不该按全价报"还差"）
+    session.on_snapshot(make_snap(my_hero_en="Aatrox",
+                                  my_items=["心之钢", "巨人腰带"], my_gold=846))
+    cands = session.suggestion.candidates
+    check("已拥有心之钢不出现在推荐",
+          "心之钢" not in [c.name for c in cands],
+          str([(c.name, c.afford_note) for c in cands]))
+    c0 = cands[0]
+    exp = c0.price - 846 - kb.items["巨人腰带"]["gold"]
+    check("可买性按身上小件抵扣", exp > 0 and c0.afford_note == f"还差{exp:.0f}",
+          f"{c0.name} {c0.afford_note}")
+
     # 复盘日志（结束触发写盘到 log/games/）
     import json as _json2
     from hexa.config import BASE_DIR
@@ -843,15 +1117,17 @@ def test_review_fixes():
                  "cards": [[-0.35, 0.46, 0.35, 0.4],
                            [0.0, 0.46, 0.35, 0.4],
                            [0.35, 0.46, 0.35, 0.4]],
-                 "reroll": [0.0, 0.9, 0.2, 0.05]}
+                 "rerolls": [[-0.35, 0.88, 0.10, 0.06],
+                             [0.0, 0.88, 0.10, 0.06],
+                             [0.35, 0.88, 0.10, 0.06]]}
     for w, hgt in ((1920, 1080), (3440, 1440), (2560, 1600), (1600, 1200)):
         lay = Layout(dict(h_regions))
         px = lay.to_pixels(w, hgt)
         # 逐矩形比对独立公式（H 单位：x=W/2+xu*H，宽高/纵向均为 *H）
         ok = True
         for got, (xu, y, wu, hh) in zip(
-                px["cards"] + [px["reroll"]],
-                h_regions["cards"] + [h_regions["reroll"]]):
+                px["cards"] + px["rerolls"],
+                h_regions["cards"] + h_regions["rerolls"]):
             exp = [int(w / 2 + xu * hgt), int(y * hgt),
                    int(wu * hgt), int(hh * hgt)]
             if got != exp:
@@ -909,6 +1185,138 @@ def test_review_fixes():
               s.get_float("system2", "price_in", default=0) == 2.4)
 
 
+def test_thinking_params():
+    """思考强度设置 → 服务商参数映射（off/low/high/auto × deepseek/qwen3/glm）"""
+    print("\n[10] LLM 思考强度参数")
+    from hexa.ai.client import LLMClient as _LC
+
+    class _S:
+        def __init__(self, thinking):
+            self.t = thinking
+
+        def get(self, *keys, default=None):
+            return self.t if keys[-1] == "thinking" else default
+
+        def get_float(self, *keys, default=0.0):
+            return default
+
+        def resolve_api_key(self, _slot):
+            return "sk-test"
+
+    def params(model, thinking):
+        return _LC(_S(thinking), "system1")._thinking_params(model, 800)
+
+    # 默认 off：deepseek 显式关闭（修默认思考烧穿 max_tokens → 慢 + 静默降级）
+    body, mt, on = params("deepseek-v4.1-flash", "off")
+    check("off→deepseek 显式关",
+          body == {"enable_thinking": False} and mt == 800 and not on)
+    # high：开启 + 预算档 + max_tokens 加思考配额
+    body, mt, on = params("deepseek-v4.1-flash", "high")
+    check("high→开+预算+配额",
+          on and body.get("enable_thinking") is True
+          and body.get("thinking_budget") == 16384 and mt == 800 + 16384)
+    # auto：跟随服务商默认（不发参数）
+    body, mt, on = params("deepseek-v4.1-flash", "auto")
+    check("auto→不发参数", body is None and mt == 800 and not on)
+    # qwen3 历史行为：auto 也强制关（P0.5 非流式长输入深度思考必超时）
+    body, mt, on = params("qwen3.8-max", "auto")
+    check("qwen3 auto→强制关",
+          body == {"enable_thinking": False} and not on)
+    body, mt, on = params("qwen3.8-max", "low")
+    check("qwen3 low→开+预算",
+          on and body.get("enable_thinking") is True
+          and body.get("thinking_budget") == 1024)
+    # GLM 走 thinking.type（无预算档）
+    body, _mt, on = params("glm-5.3", "off")
+    check("glm off→disabled",
+          body == {"thinking": {"type": "disabled"}} and not on)
+    body, _mt, on = params("glm-5.3", "medium")
+    check("glm medium→enabled",
+          body == {"thinking": {"type": "enabled"}} and on)
+
+    # _call_once 端到端：思考开启去 temperature / max_tokens 放大 / extra_body 下发
+    class _Msg:
+        content = '{"ok": 1}'
+
+    class _Choice:
+        message = _Msg()
+
+    class _Usage:
+        prompt_tokens = 10
+        completion_tokens = 20
+
+    class _Resp:
+        choices = [_Choice()]
+        usage = _Usage()
+
+    seen = {}
+
+    class _API:
+        @staticmethod
+        def create(**kw):
+            seen.update(kw)
+            return _Resp()
+
+    class _SDK:
+        chat = type("_Chat", (), {"completions": _API()})()
+
+    lc = _LC(_S("high"), "system1")
+    lc._sdk_client = lambda: _SDK()
+    lc.chat("sys", "user")
+    check("思考开启去 temperature", "temperature" not in seen)
+    check("生效 max_tokens 加配额", seen.get("max_tokens") == 800 + 16384)
+    check("extra_body 下发",
+          (seen.get("extra_body") or {}).get("enable_thinking") is True)
+
+
+def test_ai_inflight():
+    """AI 在途生成计数（浮窗"⟳ AI 生成中…"标识数据源）：
+    提交后 inflight≥1，完成/降级后归零。用门闩客户端确定性捕捉中间态。"""
+    print("\n[11] AI 在途计数")
+    import threading
+
+    hero = "暗裔剑魔"
+
+    class SlowClient(FakeClient):
+        def __init__(self, script):
+            super().__init__(script)
+            self.gate = threading.Event()
+
+        def chat(self, *a, **kw):
+            self.gate.wait(timeout=5)
+            return super().chat(*a, **kw)
+
+    def wait_inflight(eng, want, timeout=5.0):
+        deadline = time.time() + timeout
+        while eng.stats()["inflight"] != want and time.time() < deadline:
+            time.sleep(0.01)
+        return eng.stats()["inflight"]
+
+    eng, _c1, _c2 = build_ai_engine()      # "{}" 脚本 → 安全降级仍走完整流程
+    eng.client_s2 = SlowClient(["{}"])
+    eng.client_s1 = SlowClient(["{}"])
+    got = []
+    eng.bind(lambda kind, payload, serial: got.append(kind))
+
+    eng.start_game(hero, [], ["黑暗之女"])
+    check("System2 生成中 inflight=1", wait_inflight(eng, 1) == 1)
+    check("ctx_source 生成中", eng.stats()["ctx_source"] == "生成中")
+    eng.client_s2.gate.set()
+    check("System2 完成 inflight 归零", wait_inflight(eng, 0) == 0)
+    check("ctx 回调已发", "ctx" in got, str(got))
+
+    # System1 精修（ctx 已就绪 + 预算内 → _submit 计数）
+    eng.client_s1.gate.clear()
+    eng.rank_cards(hero, [REAL_AUG] * 3, [], [], None, 1)
+    check("System1 精修中 inflight=1", wait_inflight(eng, 1) == 1)
+    eng.client_s1.gate.set()
+    check("System1 完成 inflight 归零", wait_inflight(eng, 0) == 0)
+    deadline = time.time() + 5
+    while "augment_ranks" not in got and time.time() < deadline:
+        time.sleep(0.01)
+    check("评级回调已发", "augment_ranks" in got, str(got))
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -919,8 +1327,10 @@ if __name__ == "__main__":
     test_live_me_match()
     test_detect_and_layout()
     test_ai_engine()
+    test_ai_inflight()
     test_session_ai_serial()
     test_review_fixes()
+    test_thinking_params()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

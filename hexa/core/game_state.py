@@ -75,6 +75,7 @@ class GameSession:
             self.my_hero = None
             self.ally = []
             self.enemy = []
+            self.game_map = ""            # 当前地图（"11"=峡谷/"12"=大乱斗）
             # 海克斯台账（记账 + 纠错的数据源）
             self.augments = []            # [{"name","tier","ts"}]
             # 我的实时态（live 快照维护）
@@ -95,6 +96,11 @@ class GameSession:
             self._sug_serial = 0          # 建议序号（AI 精修防旧覆新）
             self._card_serial = 0         # 海克斯时刻评级序号
             self.card_ranks = []          # 当前海克斯三卡片评级 [{name,grade,reason}]
+            # 海克斯识别状态（overlay 状态标识数据源：多局零识别成功曾无从判断）
+            self.hex_active = False       # 三选一界面在屏（detector 回调）
+            self.hex_recognized = False   # 本轮三卡已稳定识别（on_cards 已发射）
+            self.hex_picked = None        # 本轮点击选中的卡 (idx, name)
+            self.hex_last = ""            # 上一轮识别结果（界面关闭后保留展示）
             self.history = []             # 建议历史（复盘日志）
             self._game_t0 = time.time()
             self._log("session_reset")
@@ -113,6 +119,8 @@ class GameSession:
                 # 骰子换人 / 异常回退：重置会话重新跟随
                 self.reset()
             self.stage = "champ_select"
+            # gameflow session 缺地图字段时保留旧值（拿得到为准）
+            self.game_map = str(teams.get("map_id") or self.game_map)
             if my_hero and my_hero != self.my_hero:
                 self.my_hero = my_hero
                 self._log("hero_selected", my_hero)
@@ -126,8 +134,10 @@ class GameSession:
             self.my_hero = self.kb.validate_hero(teams.get("my_hero") or "") or self.my_hero
             self.ally = [c for c in teams.get("ally", []) if self.kb.validate_hero(c)]
             self.enemy = [c for c in teams.get("enemy", []) if self.kb.validate_hero(c)]
+            self.game_map = str(teams.get("map_id") or self.game_map)
             self._log("game_start",
-                      f"me={self.my_hero} ally={len(self.ally)} enemy={len(self.enemy)}")
+                      f"me={self.my_hero} ally={len(self.ally)} "
+                      f"enemy={len(self.enemy)} map={self.game_map or '?'}")
             # 敌方威胁画像（英雄粒度，装备实时部分随快照补）
             self.threat = self.rules.threat_profile(self.enemy)
             if self.dumper:
@@ -135,14 +145,16 @@ class GameSession:
                 self.dumper.dump_lcu("/lol-gameflow/v1/session", teams)
             # System2 ChampionContext（AI 引擎后台生成；规则引擎空操作）
             hero, ally, enemy = self.my_hero, list(self.ally), list(self.enemy)
+            game_map = self.game_map
 
         # 引擎回调在锁外启动（内部再起线程，避免持锁起线程）
-        self.engine.start_game(hero or "", ally, enemy)
+        self.engine.start_game(hero or "", ally, enemy, game_map=game_map)
 
     def replace_engine(self, new_engine):
         """设置保存后热切换引擎（重建 AI 客户端/预算态；规则↔AI 即时生效）"""
         with self._lock:
             self.engine = new_engine
+            new_engine.game_map = self.game_map  # 换引擎不丢当前地图上下文
             self.engine.bind(self._on_engine_result)
         print(f"[SESSION] 引擎已切换: {new_engine.mode}")
 
@@ -185,7 +197,8 @@ class GameSession:
                               f"me={validated} ally={len(self.ally)} "
                               f"enemy={len(self.enemy)}")
                     late_start = (self.engine, validated,
-                                  list(self.ally), list(self.enemy))
+                                  list(self.ally), list(self.enemy),
+                                  self.game_map)
             self.my_items = [it["name"] for it in snap.my_items if it.get("name")]
             self._my_gold = float(snap.my_current_gold or 0)
             enemies = snap.enemies()
@@ -202,8 +215,8 @@ class GameSession:
             self._periodic_recheck(enemies, snap)
         # 锁外补 start_game（同 on_game_start 规矩：不持锁起线程）
         if late_start:
-            engine, hero, ally, enemy = late_start
-            engine.start_game(hero, ally, enemy)
+            engine, hero, ally, enemy, game_map = late_start
+            engine.start_game(hero, ally, enemy, game_map=game_map)
 
     def _periodic_recheck(self, enemies, snap):
         """定时快照 diff（v4.2）：状态签名变化即重算建议，不再只靠死亡触发。
@@ -245,10 +258,13 @@ class GameSession:
 
     # ── 海克斯记账（P1 mouse_ledger 调用入口；冒烟测试直接调用） ───
 
-    def record_augment(self, name: str, tier: str = ""):
+    def record_augment(self, name: str, tier: str = "", card_idx=None):
+        """记账入口。card_idx：点击的卡片序号（0-2），供 overlay"✓已选"标记。"""
         with self._lock:
             if not name:
                 return False
+            if card_idx is not None:
+                self.hex_picked = (card_idx, name)
             if any(a["name"] == name for a in self.augments):
                 return False  # 防重复记账
             self.augments.append({"name": name, "tier": tier, "ts": time.time()})
@@ -313,12 +329,39 @@ class GameSession:
         with self._lock:
             if serial == self._card_serial:
                 self.card_ranks = ranks
+                # 能到这里的调用方（detector on_cards）已保证 ≥2 张有效库名
+                self.hex_active = True
+                self.hex_recognized = True
+                self.hex_last = ""
         return ranks
 
     def clear_card_ranks(self):
         """海克斯界面消失后清除时刻评级（overlay 时刻块随之隐藏）"""
         with self._lock:
             self.card_ranks = []
+
+    # ── 海克斯界面识别状态（detector on_state / reroll 回调） ──────
+
+    def on_hex_ui(self, active: bool):
+        """三选一界面出现/消失（检测线程调用）。消失时把本轮识别成败
+        摘要留在 hex_last，供 overlay 在界面关闭后仍展示结果。"""
+        with self._lock:
+            if active:
+                self.hex_active = True
+                self.hex_recognized = False
+                self.hex_picked = None
+                self.hex_last = ""
+            else:
+                self.hex_active = False
+                self.hex_last = ("上轮: 识别成功 ✓" if self.hex_recognized
+                                 else "上轮: 未识别成功 ✗")
+
+    def on_hex_reroll(self):
+        """点击刷新按钮：本轮内容作废，回识别中状态（新内容稳定后重标记）"""
+        with self._lock:
+            if self.hex_active:
+                self.hex_recognized = False
+                self.hex_picked = None
 
     # ── 出门装两分支状态机（v4.1 §2：先海克斯后出门装） ────────────
 
@@ -354,20 +397,22 @@ class GameSession:
                                           self.current_path, threat, serial,
                                           reason=reason,
                                           augments=list(self.augments))
-        target, note = self.rules.component_advice(self.my_items, self.current_path)
-        if target and (not seq or seq[0].name != target):
-            tprice = self.kb.items.get(target, {}).get("gold", 0)
-            seq = [Candidate(target, note, price=tprice)] + [
-                c for c in seq if c.name != target][:2]
+        target, note = self.rules.component_advice(self.my_items,
+                                                   self.current_path,
+                                                   game_map=self.game_map,
+                                                   prefer=[c.name for c in seq])
+        if target:
+            if seq and seq[0].name == target:
+                # 目标本就是主线第一件：合成提示并入理由，不重排不重复占位
+                # （旧写法直接跳过，提示整个丢失）
+                if note and note not in seq[0].reason:
+                    seq[0].reason = f"{note}；{seq[0].reason}"
+            else:
+                tprice = self.kb.items.get(target, {}).get("gold", 0)
+                seq = [Candidate(target, note, price=tprice)] + [
+                    c for c in seq if c.name != target][:2]
         # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
-        remaining = self._my_gold
-        for c in seq:
-            if self._my_gold > 0 and c.price:
-                if remaining >= c.price:
-                    c.afford_note = "可购买"
-                    remaining -= c.price
-                else:
-                    c.afford_note = f"还差{c.price - remaining:.0f}"
+        self._apply_afford(seq)
         self._set_suggestion(Suggestion("next_items", seq, gold=self._my_gold,
                                         serial=serial))
 
@@ -377,6 +422,32 @@ class GameSession:
         with self._lock:
             self._sug_serial += 1
             return self._sug_serial
+
+    def _apply_afford(self, seq):
+        """金币按序累计填 afford_note；身上组件能合成该件时按价抵扣
+        （腰带 1000G 抵千变者贾修），已被前面候选消耗的组件不重复抵。
+        金币未知（0）时不标注。"""
+        if self._my_gold <= 0:
+            return
+        remaining = self._my_gold
+        pool = {n: self.kb.items.get(n, {}).get("gold", 0)
+                for n in self.my_items}
+        pool = {n: g for n, g in pool.items() if g}
+        for c in seq:
+            if not c.price:
+                continue
+            frm = {self.kb.item_id_to_name.get(f)
+                   for f in self.kb.items.get(c.name, {}).get("from", [])}
+            discount = 0
+            for comp in list(pool):
+                if comp in frm:
+                    discount += pool.pop(comp)
+            if remaining + discount >= c.price:
+                c.afford_note = "可购买"
+                # 商店不透支：组件价值只在合成时兑现，剩余按实际现金计
+                remaining = max(0.0, remaining + discount - c.price)
+            else:
+                c.afford_note = f"还差{c.price - remaining - discount:.0f}"
 
     def _set_suggestion(self, sugg: Suggestion, serial: int = None):
         with self._lock:
@@ -412,14 +483,7 @@ class GameSession:
                     cur.source = "ai"
                     cur.ts = time.time()
                     # AI 重排后需按当前金币重算可买性（保序累计）
-                    remaining = self._my_gold
-                    for c in cur.candidates:
-                        if self._my_gold > 0 and c.price:
-                            if remaining >= c.price:
-                                c.afford_note = "可购买"
-                                remaining -= c.price
-                            else:
-                                c.afford_note = f"还差{c.price - remaining:.0f}"
+                    self._apply_afford(cur.candidates)
                     self._log("next_items_ai", f"{len(payload)} 项")
 
     # ── 触发器评估（死亡 / 敌方关键装备 / KDA 起飞） ───────────────
@@ -555,6 +619,11 @@ class GameSession:
                 "suggestion_kind": self.suggestion.kind if self.suggestion else "",
                 "suggestion_source": self.suggestion.source if self.suggestion else "",
                 "card_ranks": [dict(r) for r in self.card_ranks],
+                "hex_active": self.hex_active,
+                "hex_recognized": self.hex_recognized,
+                "hex_picked": (list(self.hex_picked)
+                               if self.hex_picked else None),
+                "hex_last": self.hex_last,
                 "skill_order": skill,
                 "dd_version": self.kb.dd_version,
                 "engine": engine_stats,

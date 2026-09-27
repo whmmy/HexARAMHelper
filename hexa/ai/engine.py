@@ -31,8 +31,12 @@ class DecisionEngine(ABC):
         self.on_result = on_result
 
     @abstractmethod
-    def start_game(self, hero: str, ally: list, enemy: list):
-        """新局开始：重置预算/缓存；AI 实现此后台生成 ChampionContext"""
+    def start_game(self, hero: str, ally: list, enemy: list,
+                   game_map: str = ""):
+        """新局开始：重置预算/缓存；AI 实现此后台生成 ChampionContext。
+
+        game_map: "11"=召唤师峡谷 / "12"=极地大乱斗（装备按图可买性过滤）
+        """
 
     @abstractmethod
     def opening_candidates(self, first_augment, threat, serial: int) -> list:
@@ -66,17 +70,21 @@ class RuleDecisionEngine(DecisionEngine):
         self.rules = rules
         self.on_result = None
         self._hero = ""  # start_game 前（如中途启动）快照回调仍会读取
+        self.game_map = ""  # 当前对局地图（"11"/"12"），按图过滤可买装备
 
-    def start_game(self, hero, ally, enemy):
+    def start_game(self, hero, ally, enemy, game_map=""):
         self._hero = hero
+        self.game_map = game_map or ""
 
     def opening_candidates(self, first_augment, threat, serial):
-        return self.rules.opening_candidates(self._hero, first_augment, threat)
+        return self.rules.opening_candidates(self._hero, first_augment,
+                                             threat, game_map=self.game_map)
 
     def next_candidates(self, my_items, gold, current_path, threat,
                         serial, reason="event", augments=None):
         return self.rules.build_sequence(my_items, current_path, threat,
-                                         hero=self._hero)
+                                         hero=self._hero,
+                                         game_map=self.game_map)
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
         return self.rules.rank_augments(hero, card_names, taken)
@@ -86,7 +94,8 @@ class RuleDecisionEngine(DecisionEngine):
 
     def stats(self):
         return {"mode": self.mode, "calls": 0, "budget": 0,
-                "cost_game": 0.0, "cost_total": 0.0, "ctx_source": "-"}
+                "cost_game": 0.0, "cost_total": 0.0, "ctx_source": "-",
+                "inflight": 0}
 
 
 class AIDecisionEngine(DecisionEngine):
@@ -110,7 +119,9 @@ class AIDecisionEngine(DecisionEngine):
         self._last_refine = {"opening": 0.0, "next_items": 0.0,
                              "augment_ranks": 0.0}
         self._hero = ""
+        self.game_map = ""         # 当前对局地图（"11"/"12"）
         self._tasks = []           # 后台线程引用（防 GC）
+        self._inflight = 0         # 在途 AI 生成数（浮窗"生成中"标识）
 
     # ── 守门 ──────────────────────────────────────────────────────
 
@@ -136,6 +147,7 @@ class AIDecisionEngine(DecisionEngine):
         """
         with self._lock:
             epoch = self._epoch
+            self._inflight += 1
 
         def run():
             try:
@@ -150,6 +162,9 @@ class AIDecisionEngine(DecisionEngine):
                     self.on_result(kind, payload, serial)
             except Exception as e:  # noqa: BLE001 —— 精修失败保留规则底线
                 print(f"[WARN] AI 精修 {kind} 失败（保留规则建议）: {e}")
+            finally:
+                with self._lock:
+                    self._inflight -= 1
         t = threading.Thread(target=run, daemon=True, name=f"AI-{kind}")
         t.start()
         self._tasks.append(t)
@@ -157,8 +172,9 @@ class AIDecisionEngine(DecisionEngine):
 
     # ── 生命周期 ──────────────────────────────────────────────────
 
-    def start_game(self, hero, ally, enemy):
+    def start_game(self, hero, ally, enemy, game_map=""):
         self._hero = hero
+        self.game_map = game_map or ""
         with self._lock:
             self._epoch += 1
             epoch = self._epoch
@@ -169,6 +185,7 @@ class AIDecisionEngine(DecisionEngine):
         if usage:
             usage.new_game()
         self.delegate._hero = hero
+        self.delegate.game_map = self.game_map
         if not hero:
             print("[AI] 英雄未知，跳过 System2 上下文生成（可手动设英雄后重开局）")
             return
@@ -180,22 +197,28 @@ class AIDecisionEngine(DecisionEngine):
         rules = self.delegate.rules
 
         def gen():
-            ctx = self.s2.generate(kb, rules, self.client_s2, hero, ally, enemy,
-                                   data_version=kb.builds_patch)
             with self._lock:
-                stale = epoch != self._epoch
-            if stale:
-                print(f"[AI] 丢弃旧局 ChampionContext（{ctx.hero}，代际过期）")
-                return
-            if ctx.hero != hero:
-                print(f"[AI] Context 英雄不符（{ctx.hero} != {hero}），丢弃")
-                return
-            self.cache.set(ctx)
-            src = "AI 上下文已生成" if ctx.source == "ai" else "AI 失败，规则版上下文"
-            print(f"[AI] System2 完成（{ctx.source}）：亲和{len(ctx.augment_affinity)}"
-                  f" 出门{len(ctx.opening_items)} 路线{len(ctx.build_paths)} — {src}")
-            if self.on_result:
-                self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+                self._inflight += 1
+            try:
+                ctx = self.s2.generate(kb, rules, self.client_s2, hero, ally,
+                                       enemy, data_version=kb.builds_patch)
+                with self._lock:
+                    stale = epoch != self._epoch
+                if stale:
+                    print(f"[AI] 丢弃旧局 ChampionContext（{ctx.hero}，代际过期）")
+                    return
+                if ctx.hero != hero:
+                    print(f"[AI] Context 英雄不符（{ctx.hero} != {hero}），丢弃")
+                    return
+                self.cache.set(ctx)
+                src = "AI 上下文已生成" if ctx.source == "ai" else "AI 失败，规则版上下文"
+                print(f"[AI] System2 完成（{ctx.source}）：亲和{len(ctx.augment_affinity)}"
+                      f" 出门{len(ctx.opening_items)} 路线{len(ctx.build_paths)} — {src}")
+                if self.on_result:
+                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+            finally:
+                with self._lock:
+                    self._inflight -= 1
         t = threading.Thread(target=gen, daemon=True, name="AI-System2")
         t.start()
         self._tasks.append(t)
@@ -211,6 +234,7 @@ class AIDecisionEngine(DecisionEngine):
             return base
         ctx = self.cache.get()
         kb = self.delegate.kb
+        gm = self.game_map
         summary = threat.summary() if threat else ""
         taken = [first_augment] if first_augment else []
 
@@ -219,7 +243,8 @@ class AIDecisionEngine(DecisionEngine):
                 self.client_s1, ctx, self._hero, first_augment, summary, base)
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
-                    for p in picks]
+                    for p in picks
+                    if kb.item_available(p["name"], gm)]
         self._submit(KIND_OPENING, serial, fn)
         return base
 
@@ -232,6 +257,7 @@ class AIDecisionEngine(DecisionEngine):
             return base
         ctx = self.cache.get()
         kb = self.delegate.kb
+        gm = self.game_map
         summary = threat.summary() if threat else ""
         taken = [a["name"] for a in (augments or [])]
 
@@ -241,7 +267,8 @@ class AIDecisionEngine(DecisionEngine):
                 taken, base)
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
-                    for p in picks]
+                    for p in picks
+                    if kb.item_available(p["name"], gm)]
         self._submit(KIND_NEXT, serial, fn)
         return base
 
@@ -290,6 +317,7 @@ class AIDecisionEngine(DecisionEngine):
                 "budget": int(self.settings.get("ai", "budget_per_game", default=15)),
                 "cost_game": round(cost_game, 4),
                 "cost_total": round(cost_total, 4),
+                "inflight": self._inflight,
                 "ctx_source": (ctx.source if ctx else
                                ("生成中" if self.cache.pending else "-"))}
 
@@ -305,10 +333,12 @@ class JevEngine(DecisionEngine):
     def __init__(self, delegate: RuleDecisionEngine):
         self.delegate = delegate
         self.on_result = None
+        self.game_map = ""
 
-    def start_game(self, hero, ally, enemy):
+    def start_game(self, hero, ally, enemy, game_map=""):
         print("[Jev] 占位后端：行为等同规则模式（P3 接入）")
-        self.delegate.start_game(hero, ally, enemy)
+        self.game_map = game_map or ""
+        self.delegate.start_game(hero, ally, enemy, game_map)
 
     def opening_candidates(self, first_augment, threat, serial):
         return self.delegate.opening_candidates(first_augment, threat, serial)

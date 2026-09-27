@@ -35,7 +35,7 @@ def main():
     from hexa.core.mouse_ledger import CardLedger, MouseLedger
     from hexa.core.ocr_engine import OcrEngine
     from hexa.core.rules_engine import RulesEngine
-    from hexa.core.screen_detect import ScreenDetector, load_layout
+    from hexa.core.screen_detect import ScreenDetector, load_layout, point_in_rect
     from hexa.knowledge.kb import KnowledgeBase
     from hexa.ui.main_window import MainWindow
     from hexa.ui.overlay import Overlay
@@ -97,11 +97,14 @@ def main():
 
     def _on_state(active, round_id):
         if active:
+            session.on_hex_ui(True)
             ui(lambda: print(f"[DETECT] 海克斯界面活跃（第 {round_id} 轮）"))
         else:
             ui(lambda: print("[DETECT] 海克斯界面结束"))
             detector.last_cards = None
+            detector.last_cards_raw = None
             session.clear_card_ranks()   # 时刻块随界面消失（台账仍在）
+            session.on_hex_ui(False)     # 识别成败摘要留在浮窗
 
     def _on_cards(stable_cards, round_id):
         detector.last_cards = list(stable_cards)  # 含 None 占位（保证卡片序对齐）
@@ -112,8 +115,9 @@ def main():
                          ", ".join(f"{r['name']}[{r['grade']}]" for r in ranks)))
 
     def _on_calibrate_hint():
-        ui(lambda: print("[WARN] 海克斯识别连续失配——界面可能改版/漂移，"
-                         "请到设置重新标定（海克斯界面出现时点击主窗口\"开始标定\"）"))
+        ui(lambda: print("[WARN] 海克斯卡片识别连续失配——下次海克斯界面出现时"
+                         "保持不动 5 秒会自动完成标定；或趁界面在屏时到主窗口"
+                         "点\"开始标定\"（有 10 秒倒计时切窗口）"))
 
     detector.on_state = _on_state
     detector.on_cards = _on_cards
@@ -123,28 +127,46 @@ def main():
         detector.layout.to_pixels(screen_w, screen_h)["cards"]
         if detector.layout else None))
 
+    def _reroll_rects():
+        px = detector.layout.to_pixels(screen_w, screen_h) if detector.layout \
+            else None
+        return px["rerolls"] if px else None
+
     def _on_click(x, y):
+        # 双保险：MouseLedger 已把刷新按钮命中独占路由给 on_reroll，正常
+        # 走不到这里；留着防御路由/矩形来源将来变更时误把刷新记账成选卡
+        for rr in _reroll_rects() or []:
+            if point_in_rect(x, y, rr):
+                return
         idx = card_ledger.card_at(x, y)
-        if idx is None or not detector.last_cards or idx >= len(detector.last_cards):
+        if idx is None:
+            ui(lambda: print(f"[LEDGER] 点击 ({x}, {y}) 不在卡片区域，忽略"))
             return
-        name = detector.last_cards[idx]
+        # 稳定结果优先；识别尚未稳定时用最近一帧读数兜底（历史缺陷：
+        # OCR 逐帧抖动导致永不稳定 → last_cards 空 → 点击被静默丢弃）
+        cards = detector.last_cards or detector.last_cards_raw
+        name = cards[idx] if cards and idx < len(cards) else None
         if not name or not kb.valid_augment(name):
+            ui(lambda: print(f"[LEDGER] 卡片{idx + 1} 点击被忽略："
+                             "识别尚未稳定（界面出现后等几秒再点）"))
             return
-        if session.record_augment(name):
+        if session.record_augment(name, card_idx=idx):
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
+        else:
+            ui(lambda n=name: print(f"[LEDGER] {n} 已在台账，忽略重复记录"))
 
     def _on_reroll():
         detector.force_rescan()
         detector.last_cards = None  # 重扫稳定前点击不记账（防按旧卡片名记录）
+        detector.last_cards_raw = None
+        session.on_hex_reroll()     # 浮窗回"识别中"，选中标记作废
         ui(lambda: print("[LEDGER] reroll → 已触发重扫"))
 
     ledger = MouseLedger(
         on_click=_on_click,
         gate=lambda: detector.core.state == "active",
         on_reroll=_on_reroll,
-        reroll_rect_provider=lambda: (
-            detector.layout.to_pixels(screen_w, screen_h)["reroll"]
-            if detector.layout else None),
+        reroll_rect_provider=_reroll_rects,
     )
 
     # ── UI ────────────────────────────────────────────────────────
@@ -167,15 +189,19 @@ def main():
     _settings_win = None
 
     def _start_calibrate():
+        """倒计时标定：给用户 10 秒把海克斯三选一界面切到前台（历史问题：
+        点按钮的瞬间界面往往已切回战斗画面，立即截图必失败）。"""
         def run():
             try:
-                ok = detector.auto_calibrate()
+                ok = detector.auto_calibrate(delay=10.0, attempts=5, interval=2.0)
             except Exception as e:  # noqa: BLE001 —— 标定失败要反馈而非静默
                 ok = False
                 print(f"[CALIB] 标定异常: {e}")
             ui(lambda: print("[CALIB] 标定成功，区域已按本机分辨率保存"
-                             if ok else "[CALIB] 标定失败（确认海克斯界面在屏幕上后重试）"))
-        ui(lambda: print("[CALIB] 标定中…（保持海克斯界面在屏幕上）"))
+                             if ok else
+                             "[CALIB] 标定失败（倒计时内需让海克斯三选一界面"
+                             "在前台且卡面稳定；也可等界面出现时保持不动自动标定）"))
+        ui(lambda: print("[CALIB] 标定中…（10 秒内把海克斯三选一界面切到前台）"))
         threading.Thread(target=run, daemon=True, name="Calibrate").start()
 
     main_win = MainWindow(root, session, ui_queue, log_queue,

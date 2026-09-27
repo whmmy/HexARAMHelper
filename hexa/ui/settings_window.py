@@ -1,7 +1,7 @@
 """设置窗口（计划 §4 模型双槽位 + §7 settings_window.py）
 
 布局：AI 总开关 → System2/System1 两组槽位（模型下拉+自定义 / Key / base_url /
-温度 / max_tokens / 价格 / 测试连接）→ 全局（预算 / 精修间隔）→ 触发器开关 →
+温度 / max_tokens / 思考强度 / 价格 / 测试连接）→ 全局（预算 / 精修间隔）→ 触发器开关 →
 数据面板（DD 版本 / builds 版本与抓取日期，>7 天黄标）。
 保存即写 settings.json 并回调 rebuild_engine（热切换规则/AI 模式）。
 """
@@ -13,6 +13,12 @@ from hexa.ui.theme import Theme
 
 MODEL_PRESETS = ["qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash",
                  "deepseek-v4-pro", "deepseek-v4.1-flash", "kimi-k3", "glm-5.3"]
+
+# (界面标签, settings 值)；off=显式关闭（deepseek 默认思考烧配额，速度优先）
+THINKING_OPTIONS = [("关闭", "off"), ("低", "low"), ("中", "medium"),
+                    ("高", "high"), ("跟随模型默认", "auto")]
+THINKING_LABELS = [label for label, _v in THINKING_OPTIONS]
+_THINKING_BY_LABEL = dict(THINKING_OPTIONS)
 
 SLOT_FIELDS = [
     # (key, label, width, is_number)  数值字段空/非法保存时回落 DEFAULTS
@@ -187,6 +193,15 @@ class SettingsWindow(tk.Toplevel):
             if key == "api_key":
                 ent.config(show="*")
             ent.grid(row=r, column=c * 2 + 1, sticky=tk.W, padx=(0, 18), pady=2)
+        # 思考强度（紧跟字段网格下一格；off=关闭 low/medium/high=思考档 auto=跟默认）
+        r, c = divmod(len(SLOT_FIELDS), 2)
+        ttk.Label(grid, text="思考强度:").grid(row=r, column=c * 2,
+                                               sticky=tk.W, padx=(0, 4), pady=2)
+        self.vars[f"{slot}.thinking"] = tk.StringVar()
+        ttk.Combobox(grid, textvariable=self.vars[f"{slot}.thinking"],
+                     values=THINKING_LABELS, width=14,
+                     state="readonly").grid(row=r, column=c * 2 + 1,
+                                            sticky=tk.W, padx=(0, 18), pady=2)
         grid.columnconfigure(1, weight=1)
         grid.columnconfigure(3, weight=1)
 
@@ -213,6 +228,9 @@ class SettingsWindow(tk.Toplevel):
             self.vars[f"{slot}.model"].set(str(s.get(slot, "model", default="")))
             self.vars[f"{slot}.fallback_model"].set(
                 str(s.get(slot, "fallback_model", default="")))
+            thinking = (s.get(slot, "thinking", default="off") or "off").strip().lower()
+            label = dict((v, k) for k, v in THINKING_OPTIONS).get(thinking, "关闭")
+            self.vars[f"{slot}.thinking"].set(label)
         self._render_data_panel()
 
     def _save(self):
@@ -229,6 +247,9 @@ class SettingsWindow(tk.Toplevel):
             s.set(slot, "model", self.vars[f"{slot}.model"].get().strip())
             s.set(slot, "fallback_model",
                   self.vars[f"{slot}.fallback_model"].get().strip())
+            s.set(slot, "thinking",
+                  _THINKING_BY_LABEL.get(self.vars[f"{slot}.thinking"].get(),
+                                         "off"))
             for key, _label, _w, is_num in SLOT_FIELDS:
                 if is_num:
                     s.set(slot, key, self._num(
@@ -277,6 +298,9 @@ class SettingsWindow(tk.Toplevel):
     def _apply_slot_to(self, target, slot):
         for key in ("model", "base_url", "api_key", "api_key_env"):
             target.set(slot, key, self.vars[f"{slot}.{key}"].get().strip())
+        target.set(slot, "thinking",
+                   _THINKING_BY_LABEL.get(self.vars[f"{slot}.thinking"].get(),
+                                          "off"))
 
     # ── 仪表轮询 ──────────────────────────────────────────────────
 

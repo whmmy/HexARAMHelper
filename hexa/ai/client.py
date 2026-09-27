@@ -3,11 +3,15 @@
 - System 2：ChampionContext 生成（每局 1 次，智能档）
 - System 1：快照建议器（每局 8~11 次，性价比档）
 OpenAI 兼容协议（openai SDK），任意平台可换（百炼/deepseek/kimi/GLM…）。
-qwen3 系必须 enable_thinking=False（P0.5 实测：长输入非流式默认深度思考会超时）。
+思考强度 per-slot 可配：off/low/medium/high/auto（auto=跟随服务商默认；
+qwen3 系例外——auto 也强制关，非流式长输入默认深度思考必超时，P0.5 实测）。
 """
 import json
 import threading
 import time
+
+# 档位 → 思考 token 预算（dashscope thinking_budget）
+THINKING_BUDGET = {"low": 1024, "medium": 4096, "high": 16384}
 
 
 class LLMError(Exception):
@@ -122,6 +126,29 @@ class LLMClient:
                 time.sleep(0.5)
         raise LLMError(f"{self.slot} 调用失败（{len(attempts)} 次）: {last_err}")
 
+    def _thinking_params(self, model: str, max_tokens: int):
+        """思考强度设置 → (extra_body 或 None, 生效 max_tokens, 是否开启思考)
+
+        off=显式下发关闭；low/medium/high=开启+预算档；auto=不发参数跟随服务商
+        默认（仅 qwen3 系例外，见模块注释）。思考 token 计入输出配额，故开启时
+        max_tokens 需加上预算，防思考把正文配额烧穿（deepseek 默认思考的教训）。
+        """
+        effort = (self.settings.get(self.slot, "thinking", default="off")
+                  or "off").strip().lower()
+        if effort == "auto":
+            if model.lower().startswith("qwen3"):
+                return {"enable_thinking": False}, max_tokens, False
+            return None, max_tokens, False
+        on = effort in THINKING_BUDGET
+        budget = THINKING_BUDGET.get(effort, 0)
+        if model.lower().startswith("glm"):
+            body = {"thinking": {"type": "enabled" if on else "disabled"}}
+        else:
+            body = {"enable_thinking": on}
+            if on and budget:
+                body["thinking_budget"] = budget
+        return body, max_tokens + budget, on
+
     def _call_once(self, model, system, user, max_tokens, temperature,
                    json_mode) -> tuple[str, dict]:
         client = self._sdk_client()
@@ -136,9 +163,13 @@ class LLMClient:
         }
         if json_mode:
             kwargs["response_format"] = {"type": "json_object"}
-        # qwen3 系（qwen3.x）默认深度思考，长输入非流式必超时（P0.5 实测）
-        if model.lower().startswith("qwen3"):
-            kwargs["extra_body"] = {"enable_thinking": False}
+        body, max_tokens, thinking_on = self._thinking_params(model, max_tokens)
+        kwargs["max_tokens"] = max_tokens
+        if thinking_on:
+            # 思考档位下部分平台禁自定义温度，交服务商默认
+            kwargs.pop("temperature", None)
+        if body:
+            kwargs["extra_body"] = body
         t0 = time.time()
         resp = client.chat.completions.create(**kwargs)
         content = resp.choices[0].message.content or ""

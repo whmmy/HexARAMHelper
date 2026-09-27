@@ -43,6 +43,9 @@ hexa/ui/calibrations/*.json
 hexa/ui/calibrations/samples/*.png
 !hexa/ui/calibrations/samples/.gitkeep
 media/
+# 用户屏幕专属标定（按分辨率生成，他人屏幕不可复用，不入库）
+calibrations/
+experiments/*.png
 
 # ── 本地会话工具数据 ──────────────────────
 .zcode/

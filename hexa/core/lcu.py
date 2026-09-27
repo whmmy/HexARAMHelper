@@ -250,16 +250,29 @@ class LCUConnector:
 
     # ── 扩展：双方阵容 ────────────────────────────────────────────
 
+    @staticmethod
+    def _session_map_id(data) -> str:
+        """gameflow session → 地图 id 字符串（"11"=峡谷 / "12"=大乱斗；
+        缺字段返回 ""，调用方按未知地图宽松兜底）"""
+        game = (data or {}).get('gameData') or {}
+        mid = ((data or {}).get('map') or {}).get('id') \
+            or (game.get('queue') or {}).get('mapId')
+        return str(mid) if mid else ""
+
     def get_both_teams(self):
         """双方 10 人阵容（中文英雄名）。
 
-        返回 {"ally": [...], "enemy": [...], "my_hero": str|None, "source": str}
+        返回 {"ally": [...], "enemy": [...], "my_hero": str|None,
+        "map_id": "11"/"12"/"", "source": str}
         ChampSelect 阶段：myTeam + enemyTeam（大乱斗双方同时选，敌方缺失时为空，
         由 GameStart 阶段的 gameflow 数据补全）。
         """
         phase = self.get_gameflow_phase()
         if phase == "ChampSelect":
             data = self._get_json('/lol-champ-select/v1/session') or {}
+            # 选人阶段 gameflow session 一般已带地图信息（拿不到留空兜底）
+            map_id = self._session_map_id(
+                self._get_json('/lol-gameflow/v1/session'))
             local_cell = data.get('localPlayerCellId')
             ally, enemy, my_hero = [], [], None
             for player in data.get('myTeam', []):
@@ -279,7 +292,7 @@ class LCUConnector:
                 if cn:
                     enemy.append(cn)
             return {"ally": ally, "enemy": enemy, "my_hero": my_hero,
-                    "source": "ChampSelect"}
+                    "map_id": map_id, "source": "ChampSelect"}
 
         if phase in ("InProgress", "GameStart"):
             data = self._get_json('/lol-gameflow/v1/session') or {}
@@ -311,9 +324,11 @@ class LCUConnector:
                     (team_one if my_side == 0 else team_two)[0].get('championId')
                 ) if ally else None)
             return {"ally": ally, "enemy": enemy, "my_hero": my_hero,
+                    "map_id": self._session_map_id(data),
                     "source": "GameFlow"}
 
-        return {"ally": [], "enemy": [], "my_hero": None, "source": phase or ""}
+        return {"ally": [], "enemy": [], "my_hero": None, "map_id": "",
+                "source": phase or ""}
 
     def _get_json(self, endpoint):
         resp = self._request('GET', endpoint)

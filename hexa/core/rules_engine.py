@@ -161,18 +161,47 @@ class RulesEngine:
 
     # ── 2. 敌方威胁画像 ───────────────────────────────────────────
 
+    def _item_damage_vote(self, items: list):
+        """身上装备 → (伤害路线, 最高票重)；票重规则同 infer_current_path"""
+        votes = {"ap": 0.0, "ad": 0.0, "tank": 0.0}
+        for item in items:
+            bias = self.kb.item_path_bias(item)
+            if not bias:
+                continue
+            weight = 2.0 if self.kb.items.get(item, {}).get("gold", 0) >= LEGENDARY_GOLD else 1.0
+            votes[bias] += weight
+        best = max(votes, key=votes.get)
+        return best, votes[best]
+
     def threat_profile(self, enemy_champions: list, enemy_players: list = None) -> ThreatProfile:
         """enemy_champions: 敌方英雄中文名列表；
         enemy_players: [PlayerInfo]（Live 快照敌方，可为空 = 游戏早期/无数据）
         """
         tp = ThreatProfile()
+        # 敌方英雄 → 身上装备（伤害类型按实际出装推断，英雄默认类型兜底：
+        # 女枪/辛德拉下路常规外，AP 女枪、AD 卡尔玛等非常规出装以装备为准）
+        items_by_champ = {}
+        for p in (enemy_players or []):
+            cn = p.champion or self.kb.champion_cn(p.champion_en) or ""
+            if cn and cn not in items_by_champ:
+                items_by_champ[cn] = [it.get("name", "") for it in p.items
+                                      if it.get("name")]
         for cn in enemy_champions:
             prof = self.kb.champ_profile.get(cn, {})
-            if prof.get("damage") == "ap":
+            damage = prof.get("damage", "")
+            is_tank = bool(prof.get("is_tank"))
+            vote, weight = self._item_damage_vote(items_by_champ.get(cn) or [])
+            # 一件传说件或两件小件即认定实际路线；单小件证据不足以推翻默认
+            if weight >= 2.0 or (vote and not damage):
+                if vote == "tank":
+                    is_tank = True
+                elif vote:
+                    damage = vote
+            if damage == "ap":
                 tp.ap_count += 1
-            elif prof.get("damage") == "ad":
+            elif damage == "ad":
                 tp.ad_count += 1
-            if prof.get("is_tank"):
+            if is_tank:
                 tp.tank_count += 1
             if cn in HEALERS:
                 tp.healers.append(cn)
@@ -202,10 +231,12 @@ class RulesEngine:
     }
 
     def opening_candidates(self, my_hero: str, first_augment: str = None,
-                           threat: ThreatProfile = None) -> list:
+                           threat: ThreatProfile = None,
+                           game_map: str = "") -> list:
         """出门装三选（P1：OP.GG 高频 starter 组合优先 + 海克斯联动置顶）。
 
         P2 由 ChampionContext.opening_items 接管；本函数为规则版/离线兜底。
+        game_map: "11"=峡谷 / "12"=大乱斗，候选须在当前地图可买。
         """
         cands = []
         # 1. 海克斯联动置顶（计划验收场景：心之刚 → 巨人腰带）
@@ -236,6 +267,9 @@ class RulesEngine:
             for c in cands:
                 if "poke" in c.reason:
                     c.reason = "对面法伤多，血量装更稳"
+        # 当前地图买不到的（乱斗专属件混进峡谷 OP.GG 池等）不占三选名额
+        cands = [c for c in cands
+                 if self.kb.item_available(c.name, game_map)]
         for c in cands:  # 统一补价格（含手工池/联动项）
             if not c.price:
                 c.price = self.kb.items.get(c.name, {}).get("gold", 0)
@@ -245,12 +279,13 @@ class RulesEngine:
 
     def next_item_candidates(self, my_items: list, current_path: str,
                              threat: ThreatProfile, hero: str = "",
-                             limit: int = 3) -> list:
+                             limit: int = 3, game_map: str = "") -> list:
         """在 current_path 内、排除已拥有、按敌方构成加权的传说件候选。
 
-        P1 候选池 = 英雄 OP.GG 高频核心装（顺序即登场率）∪ DD 抗性功能件；
-        无 builds 数据的英雄退化为全库扫描。分数 = OP.GG 高频(3→0) +
-        路线匹配(2) + 敌方抗性方向(2) + 正在合成(3)。
+        P1 候选池 = 英雄 OP.GG 高频核心装（顺序即登场率），坦克路线另开放
+        DD 抗性件全库扫描（输出位不因敌方构成推抗性装）。分数 = OP.GG 高频
+        (3→0) + 路线匹配(2) + 敌方抗性方向(2) + 正在合成(3)。
+        game_map: "11"/"12"，当前地图不可买的名字直接出局。
         """
         owned = set(my_items)
         # 我已有装备的升级目标（优先：正在攒的合成线）
@@ -264,9 +299,11 @@ class RulesEngine:
         advice = threat.resist_advice()
         opgg_pool = self.kb.core_item_pool(hero)
         opgg_rank = {name: i for i, name in enumerate(opgg_pool)}
-        # 抗性功能件跨路线放行池（DD 全库中带抗性 tag 的传说件，上限控制扫描量）
+        # 抗性件池：仅坦克路线开放全库扫描。输出位（ad/ap）对抗敌方构成的
+        # 方式是继续出伤害装/走位，OP.GG 池自带的顺带抗性件（如中娅）足够；
+        # 真机反馈 2026-09-27：AD 小丑被"对面物伤多"推护甲装，方向反了
         resist_pool = set()
-        if current_path:
+        if current_path == "tank":
             for name, info in self.kb.items.items():
                 if info["gold"] >= LEGENDARY_GOLD and (
                         {"SpellBlock", "Armor"} & set(info["tags"])):
@@ -280,6 +317,8 @@ class RulesEngine:
             info = self.kb.items.get(name)
             if not info or info["gold"] < LEGENDARY_GOLD:
                 continue
+            if not self.kb.item_available(name, game_map):
+                continue  # 当前地图商店没有（模式专属件），推了也买不了
             seen.add(name)
             bias = self.kb.item_path_bias(name)
             is_resist = bool({"SpellBlock", "Armor"} & set(info["tags"]))
@@ -306,9 +345,12 @@ class RulesEngine:
             reason_bits = []
             info = self.kb.items.get(name, {})
             tags = set(info.get("tags", []))
-            if advice == "魔抗优先" and "SpellBlock" in tags:
+            bias = self.kb.item_path_bias(name)
+            # "补抗性"文案只挂真防守件（bias=tank）：中娅/血手这类带抗性的
+            # 输出件按输出件描述，不误导（复盘文档遗留待办）
+            if advice == "魔抗优先" and "SpellBlock" in tags and bias == "tank":
                 reason_bits.append("对面法伤多，补魔抗")
-            elif advice == "护甲优先" and "Armor" in tags:
+            elif advice == "护甲优先" and "Armor" in tags and bias == "tank":
                 reason_bits.append("对面物伤多，补护甲")
             elif advice == "重伤考虑" and self.is_antiheal_item(name):
                 reason_bits.append("对面治疗多，考虑重伤")
@@ -316,26 +358,49 @@ class RulesEngine:
                 reason_bits.insert(0, "身上小件正在往它合")
             if name in opgg_rank:
                 reason_bits.append(f"OP.GG 高频（第{opgg_rank[name] + 1}位）")
-            else:
-                bias = self.kb.item_path_bias(name)
-                if bias == current_path:
-                    reason_bits.append(f"当前{current_path.upper()}路线")
+            elif bias == current_path:
+                reason_bits.append(f"当前{current_path.upper()}路线")
             out.append(Candidate(name, "；".join(reason_bits) or "通用推荐"))
         return out
 
     def build_sequence(self, my_items: list, current_path: str,
                        threat: ThreatProfile, hero: str = "",
-                       limit: int = 3) -> list:
-        """出装主线序列（v4.2）：按优先级给后续 2~3 件，而非一次只推一件。
+                       limit: int = 3, game_map: str = "") -> list:
+        """出装主线序列（v4.3）：英雄核心套装线优先，敌情评分补位。
 
-        玩家金币可能足够连买两件——序列让玩家能连续执行；
-        每件带价格，可买性由 GameSession 按金币累计填写（afford_note）。
+        v4.2 按"敌情加权评分"直接排会出"还没出核心就被阵容带偏"的序列；
+        v4.3 改为：①按当前路线选英雄的核心组合（kb.core_build_line，
+        爆杀流/半肉/法系线由路线决定），未拥有的核心件按登场序占满前排；
+        ②核心出完或不足 limit 再用 next_item_candidates（敌情/合成线/其余
+        高频件）补位。每件带价格，可买性由 GameSession 按金币累计填写。
         """
-        seq = []
+        owned = set(my_items)
+        seq, seen = [], set()
+        line = self.kb.core_build_line(hero, current_path)
+        for idx, name in enumerate(line, 1):
+            if name in owned or name in seen:
+                continue
+            if not self.kb.item_available(name, game_map):
+                continue
+            seen.add(name)
+            seq.append(Candidate(
+                name,
+                f"核心装（{current_path.upper()}线第{idx}件）"
+                if current_path else f"核心装（OP.GG 主线第{idx}件）",
+                price=self.kb.items.get(name, {}).get("gold", 0)))
+            if len(seq) >= limit:
+                return seq
         for c in self.next_item_candidates(my_items, current_path, threat,
-                                           hero=hero, limit=limit):
-            price = self.kb.items.get(c.name, {}).get("gold", 0)
-            seq.append(Candidate(c.name, c.reason, price=price))
+                                           hero=hero, limit=limit * 2,
+                                           game_map=game_map):
+            if c.name in seen:
+                continue
+            seen.add(c.name)
+            if not c.price:
+                c.price = self.kb.items.get(c.name, {}).get("gold", 0)
+            seq.append(c)
+            if len(seq) >= limit:
+                break
         return seq
 
     # ── 3d. 海克斯时刻规则评级（S/A/B 合成评分，非胜率分桶） ────────
@@ -379,17 +444,41 @@ class RulesEngine:
 
     # ── 3c. 小件合成判断 ─────────────────────────────────────────
 
-    def component_advice(self, my_items: list, current_path: str):
-        """身上组件 → (建议合成目标 | None, 提示语)"""
-        for item in my_items:
+    def component_advice(self, my_items: list, current_path: str,
+                         game_map: str = "", prefer: list = None):
+        """身上组件 → (建议合成目标 | None, 提示语)
+
+        目标不能是已拥有的装备（真机 2026-09-27：心之钢已买出、身上是
+        第二件巨人腰带，按 into 数据序把心之钢又顶回第①位）。prefer 给
+        当前推荐序列时优先从中选（腰带往正在攒的坦克核心件合），否则按
+        合成链数据序兜底。
+        """
+        owned = set(my_items)
+
+        def _targets(item):
             info = self.kb.items.get(item)
             if not info or info["gold"] >= LEGENDARY_GOLD:
-                continue
+                return []
+            out = []
             for tid in info.get("into", []):
                 target = self.kb.item_id_to_name.get(tid)
-                if not target:
-                    continue
-                tbias = self.kb.item_path_bias(target)
-                if not current_path or tbias == current_path:
-                    return target, f"身上【{item}】可合成【{target}】，与当前路线一致"
+                if (target and target not in owned
+                        and self.kb.item_available(target, game_map)
+                        and (not current_path
+                             or self.kb.item_path_bias(target) == current_path)):
+                    out.append(target)
+            return out
+
+        by_item = {item: _targets(item) for item in my_items}
+        if prefer:
+            for target in prefer:
+                for item in my_items:
+                    if target in by_item[item]:
+                        return target, (f"身上【{item}】可合成【{target}】，"
+                                        f"与当前路线一致")
+        for item in my_items:
+            if by_item[item]:
+                target = by_item[item][0]
+                return target, (f"身上【{item}】可合成【{target}】，"
+                                f"与当前路线一致")
         return None, "无待合成小件，攒钱即可"

@@ -24,6 +24,8 @@ class MouseLedger(threading.Thread):
     调用方在回调里自行判断坐标是否落在卡片/reroll 矩形内（gate 属性控制
     是否消费——非海克斯活跃期置 gate=False 时回调仍触发但消费方忽略，
     这里直接不回调更省事：gate 关闭时静默丢弃）。
+    reroll_rect_provider 可返回单矩形或矩形列表（2026-09 起：每卡下方
+    各一个刷新按钮，共 3 个）。
     """
 
     POLL_INTERVAL = 0.05
@@ -34,7 +36,7 @@ class MouseLedger(threading.Thread):
         self.on_click = on_click            # fn(x, y)
         self.gate = gate                    # fn() -> bool（海克斯界面活跃?）
         self.on_reroll = on_reroll          # fn() —— reroll 矩形命中
-        self.reroll_rect_provider = reroll_rect_provider  # fn() -> 屏幕矩形|None
+        self.reroll_rect_provider = reroll_rect_provider  # fn() -> 矩形|列表|None
         self._running = False
         self._prev_down = False
         self._user32 = ctypes.windll.user32
@@ -53,6 +55,15 @@ class MouseLedger(threading.Thread):
         # GetAsyncKeyState：返回值最高位=当前按下；取 SHORT 后判断符号位
         return bool(ctypes.windll.user32.GetAsyncKeyState(VK_LBUTTON) & 0x8000)
 
+    @staticmethod
+    def _as_rect_list(rr) -> list:
+        """单矩形 [x,y,w,h] → [rect]；矩形列表原样；None/垃圾 → []"""
+        if not rr:
+            return []
+        if rr and isinstance(rr[0], (int, float)):
+            return [rr]
+        return list(rr)
+
     def run(self):
         self._running = True
         while self._running:
@@ -61,7 +72,7 @@ class MouseLedger(threading.Thread):
                 if down and not self._prev_down and self.gate():
                     x, y = self.cursor_pos()
                     rr = self.reroll_rect_provider() if self.reroll_rect_provider else None
-                    if rr and point_in_rect(x, y, rr):
+                    if any(point_in_rect(x, y, r) for r in self._as_rect_list(rr)):
                         if self.on_reroll:
                             self.on_reroll()
                     elif self.on_click:

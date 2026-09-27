@@ -9,11 +9,13 @@
 OCR 连续失配 = UI 漂移/改版 → on_calibrate_hint 提示重标定，不默默推错。
 模板匹配（cv2.matchTemplate）退为预热加速与 OCR 异常兜底。
 
-区域坐标（Layout）：默认层 = 16:9 百分比常量（占位，真机标定校准）；
-加载时把横向偏移换算为「高度基准 + 屏幕中心锚定」单位（H 相对量），
-16:10/21:9/32:9 兜得住；标定结果按分辨率存 calibrations/{W}x{H}.json
-（gitignore 排除，用户屏幕专属）；自动标定 = 中央横带全量 OCR 找
-三组海克斯标题聚类 + reroll 特征文本。
+区域坐标（Layout）：默认层 = 16:9 百分比常量（2560x1440 真机实测值，
+media/analysis/ 可复现）；加载时把横向偏移换算为「高度基准 + 屏幕中心
+锚定」单位（H 相对量），16:10/21:9/32:9 兜得住；标定结果按分辨率存
+calibrations/{W}x{H}.json（gitignore 排除，用户屏幕专属）；自动标定 =
+中央横带全量 OCR 找三组海克斯标题聚类 → 几何校验 → 按实测锚点推导
+（cards 覆盖含卡名的完整卡框；刷新按钮每卡一个共 3 个）。
+界面活跃期还会自愈：未标定直接落标定，已标定检测到名行漂移自动重标。
 """
 import json
 import threading
@@ -26,19 +28,28 @@ from hexa.config import BASE_DIR
 # gitignore 排除 *.json，用户屏幕专属不入库）
 CALIB_DIR = BASE_DIR / "calibrations"
 
-# ── 默认布局（16:9 百分比占位；auto_calibrate 一次后即按真机生效） ──
-# title_bands: 三个卡片标题条 (x, y, w, h)；cards: 三张卡片矩形（点击热区，
-# 严禁交叠）；reroll: 刷新按钮矩形。均为屏幕比例。
+# ── 默认布局（16:9 比例；2026-09-25 由 2560x1440 真机海克斯界面整帧
+# OCR + 金框扫描线实测，10 个录像关键帧几何一致，见 media/analysis/） ──
+# title_bands: 三个卡名文本带 (x, y, w, h)；cards: 三张卡片全框（OCR 区 +
+# 点击热区，严禁交叠）；rerolls: 每卡下方各一个刷新按钮（共 3 个）。
+# 均为 16:9 屏幕比例；卡名行真值 y 0.398~0.427，卡框 y 0.176~0.665，
+# 刷新按钮 y 0.685~0.727（中心 x 与三卡中心一一对齐）。
 DEFAULT_LAYOUT_169 = {
-    "title_bands": [[0.245, 0.418, 0.170, 0.055],
-                    [0.415, 0.418, 0.170, 0.055],
-                    [0.585, 0.418, 0.170, 0.055]],
-    "cards":       [[0.225, 0.455, 0.170, 0.420],
-                    [0.415, 0.455, 0.170, 0.420],
-                    [0.605, 0.455, 0.170, 0.420]],
-    "reroll":      [0.445, 0.900, 0.110, 0.055],
+    "title_bands": [[0.2285, 0.3910, 0.1656, 0.0445],
+                    [0.4199, 0.3910, 0.1656, 0.0445],
+                    [0.6113, 0.3910, 0.1664, 0.0445]],
+    "cards":       [[0.2285, 0.1757, 0.1656, 0.4890],
+                    [0.4199, 0.1757, 0.1656, 0.4890],
+                    [0.6113, 0.1757, 0.1664, 0.4890]],
+    "rerolls":     [[0.2915, 0.6770, 0.0440, 0.0550],
+                    [0.4831, 0.6770, 0.0440, 0.0550],
+                    [0.6739, 0.6770, 0.0440, 0.0550]],
 }
 ASPECT_169 = 16 / 9
+
+# 标定/模板落盘互斥（写者：检测线程自愈标定 + 手动标定线程；
+# save_layout 与 _save_templates 共用，防两个线程交错写坏同一文件）
+_SAVE_LOCK = threading.Lock()
 
 
 class Layout:
@@ -52,15 +63,29 @@ class Layout:
     def __init__(self, data: dict = None, source: str = "default"):
         d = data or DEFAULT_LAYOUT_169
         self.source = source
+        rerolls = self._rerolls_of(d)
         if d.get("units") == "h":
             # 自动标定按真实分辨率直接换算的 H 单位（任意宽高比精确）
             self.title_bands = [list(r) for r in d["title_bands"]]
             self.cards = [list(r) for r in d["cards"]]
-            self.reroll = list(d["reroll"])
+            self.rerolls = [list(r) for r in rerolls]
         else:
             self.title_bands = [self._to_h_units(r) for r in d["title_bands"]]
             self.cards = [self._to_h_units(r) for r in d["cards"]]
-            self.reroll = self._to_h_units(d["reroll"])
+            self.rerolls = [self._to_h_units(r) for r in rerolls]
+
+    @staticmethod
+    def _rerolls_of(d: dict) -> list:
+        """刷新按钮矩形 ×3；旧标定只存单 reroll → 复制三份兜底读取
+        （旧公式推导的矩形本身已坏、常在屏幕外，复制仅为兼容不崩）。"""
+        rr = d.get("rerolls")
+        if not rr and "reroll" in d:
+            rr = [d["reroll"]]
+        if not rr:
+            rr = DEFAULT_LAYOUT_169["rerolls"]
+        if len(rr) != 3:
+            rr = (list(rr) * 3)[:3]
+        return rr
 
     @staticmethod
     def _to_h_units(r):
@@ -80,12 +105,12 @@ class Layout:
             return [x, yy, int(wu * screen_h), int(h * screen_h)]
         return {"title_bands": [conv(r) for r in self.title_bands],
                 "cards": [conv(r) for r in self.cards],
-                "reroll": conv(self.reroll)}
+                "rerolls": [conv(r) for r in self.rerolls]}
 
     def as_169(self) -> dict:
         return {"title_bands": [self._from_h_units(r) for r in self.title_bands],
                 "cards": [self._from_h_units(r) for r in self.cards],
-                "reroll": self._from_h_units(self.reroll)}
+                "rerolls": [self._from_h_units(r) for r in self.rerolls]}
 
 
 def load_layout(screen_w: int, screen_h: int) -> Layout:
@@ -101,11 +126,18 @@ def load_layout(screen_w: int, screen_h: int) -> Layout:
 
 
 def save_layout(screen_w: int, screen_h: int, regions: dict, confidence: float):
+    """标定落盘。写者可能有两个（检测线程自愈标定 + 手动标定线程），
+    全部经 _SAVE_LOCK 串行 + tmp→replace 原子替换，防止交错写损坏 JSON
+    （读侧 load_layout 借 replace 原子性永远读到完整旧版或完整新版）。"""
     CALIB_DIR.mkdir(parents=True, exist_ok=True)
     path = CALIB_DIR / f"{screen_w}x{screen_h}.json"
     doc = {"screen": [screen_w, screen_h], "confidence": confidence,
            "saved_at": time.strftime("%Y-%m-%d %H:%M:%S"), "regions": regions}
-    path.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    with _SAVE_LOCK:
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
+                       encoding="utf-8")
+        tmp.replace(path)
     print(f"[CALIB] 已保存标定 {path.name}（置信度 {confidence:.2f}）")
 
 
@@ -171,26 +203,41 @@ class DetectorCore:
                 self._miss_run = 0
 
     def feed_cards(self, card_texts: list):
-        """active 状态下每帧喂卡片识别结果（list[str|None]，长度 3）"""
+        """active 状态下每帧喂卡片识别结果（list[str|None]，长度 3）。
+
+        卡面流光动画下 OCR 逐帧抖动（真机 2026-09-27 复盘：整帧漏读与
+        部分漏读交替 → 内容永不稳定 → last_cards 空 → 点击记账被静默
+        丢弃）。容错：本帧读数是上帧的"子集"（None 槽 + 其余槽位同名）
+        → 视为上帧内容的噪声重复继续计数；任一槽位读出不同的名字则按
+        本帧原样处理（真实变化不被旧值污染）。"""
         if self.state != "active":
             return
         content = tuple(card_texts)
+        if self._last_content is not None and all(
+                n is None or n == p
+                for n, p in zip(content, self._last_content)):
+            content = self._last_content
         if content != self._last_content:
             self._last_content = content
             self._content_run = 1
             self.stable_cards = None
-            if any(card_texts):
-                print(f"[DETECT] 卡片内容变化: {card_texts}")
+            if any(content):
+                print(f"[DETECT] 卡片内容变化: {list(content)}")
         else:
             self._content_run += 1
             # 发射后闩锁：稳定 2 帧且该内容未发射过才置位（防每帧重发烧预算）
-            if (self._content_run >= self.STABLE_FRAMES and any(card_texts)
+            if (self._content_run >= self.STABLE_FRAMES and any(content)
                     and self.stable_cards is None
                     and self._emitted_content != content):
-                self.stable_cards = list(card_texts)
+                self.stable_cards = list(content)
                 self.stable_round = self.round_id
                 self._emitted_content = content
-                print(f"[DETECT] 卡片内容稳定: {card_texts}")
+                print(f"[DETECT] 卡片内容稳定: {list(content)}")
+
+    @property
+    def last_content(self):
+        """最近一帧（漏读补齐后）的卡片读数 tuple——OCR 迟滞与点击兜底用"""
+        return self._last_content
 
     def consume_cards(self):
         out = self.stable_cards
@@ -227,6 +274,8 @@ class ScreenDetector(threading.Thread):
     MISMATCH_LIMIT = 5     # 连续 N 轮"标题命中但卡片全失配" → 提示重标定
     BLIND_OCR_EVERY = 3    # 非活跃期每 N 帧强制 OCR 一次（防模板漏检）
     TPL_HIT = 0.60         # matchTemplate 命中阈值（卡框美术恒定，文字占比小）
+    AUTO_CALIB_TRIES = 3   # 每活跃期自愈标定最大尝试次数
+    AUTO_CALIB_DRIFT = 40  # 已标定者：聚类中心均偏超过该像素数才重建（防抖动）
 
     def __init__(self, kb, ocr, layout: Layout = None):
         super().__init__(daemon=True, name="ScreenDetector")
@@ -243,9 +292,12 @@ class ScreenDetector(threading.Thread):
         self._mismatch_run = 0
         self._screen = None
         self.last_active = False
+        self.last_cards_raw = None        # 最近一帧卡片读数（app 记账兜底）
         self._tick_count = 0
         self._tpl = None                  # [灰度标题条 ndarray ×3] 模板预筛
         self._tpl_loaded = False          # 懒加载一次
+        self._auto_calib_tries = 0        # 本活跃期自愈标定尝试次数（≤3）
+        self._auto_calib_done = False     # 本活跃期自愈标定已成功
 
     # ── 控制 ──────────────────────────────────────────────────────
 
@@ -327,8 +379,8 @@ class ScreenDetector(threading.Thread):
             return
         try:
             import numpy
-            data = numpy.load(path)
-            tpls = [data[f"t{i}"] for i in range(3)]
+            with numpy.load(path) as data:   # 及时关句柄，不妨碍原子替换
+                tpls = [data[f"t{i}"] for i in range(3)]
             if len(tpls) == 3 and all(t.size for t in tpls):
                 self._tpl = tpls
                 print(f"[DETECT] 模板预筛已加载: {path.name}")
@@ -351,7 +403,13 @@ class ScreenDetector(threading.Thread):
                     tpls.append(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY))
             if len(tpls) == 3:
                 CALIB_DIR.mkdir(parents=True, exist_ok=True)
-                numpy.savez_compressed(path, t0=tpls[0], t1=tpls[1], t2=tpls[2])
+                with _SAVE_LOCK:
+                    # tmp 名必须以 .npz 结尾——numpy.savez_compressed 会对
+                    # 非 .npz 文件名自动补 .npz，导致 replace 找不到文件
+                    tmp = path.with_name(path.stem + ".tmp.npz")
+                    numpy.savez_compressed(tmp, t0=tpls[0], t1=tpls[1],
+                                           t2=tpls[2])
+                    tmp.replace(path)
                 self._tpl = tpls
         except Exception as e:
             print(f"[WARN] 模板保存失败（不影响检测）: {e}")
@@ -428,7 +486,16 @@ class ScreenDetector(threading.Thread):
         self.core.feed_titles(hits)
         self._fire_state_change()
 
-        card_texts, any_text = self._ocr_cards(frame, regions["cards"])
+        # 活跃期自愈标定（未标定/标定漂移；每活跃期最多 3 次尝试）——
+        # 成功后区域可能更新，卡片 OCR 用刷新后的区域
+        if hits >= self.core.MIN_TITLE_HITS and not self._auto_calib_done \
+                and self._auto_calib_tries < self.AUTO_CALIB_TRIES:
+            self._auto_calib_tries += 1
+            self._auto_calibrate_frame(frame)
+            regions = self.layout.to_pixels(sw, sh)
+
+        card_texts, any_text = self._ocr_cards(frame, regions["cards"],
+                                               prev_texts=self.core.last_content)
         if not any_text:
             self._mismatch_run += 1
             if self._mismatch_run == self.MISMATCH_LIMIT and self.on_calibrate_hint:
@@ -436,9 +503,17 @@ class ScreenDetector(threading.Thread):
         else:
             self._mismatch_run = 0
         self.core.feed_cards(card_texts)
+        # 最近一帧读数（含 None 占位）：识别未及稳定时的点击记账兜底
+        self.last_cards_raw = (list(self.core.last_content)
+                               if self.core.last_content else None)
         stable = self.core.consume_cards()
         if stable and self.on_cards:
-            self.on_cards(stable, self.core.round_id)
+            # 误发射防护：≥2 张为有效库名才上报（防 tooltip 漂入邻卡矩形
+            # 的伪命中触发错误建议）；台账序对齐仍保留 None 占位
+            if self.count_valid_cards(stable) >= 2:
+                self.on_cards(stable, self.core.round_id)
+            else:
+                print(f"[DETECT] 忽略可疑卡片内容（有效名 <2）: {stable}")
 
     def _crop(self, frame, rect):
         x, y, w, h = rect
@@ -450,6 +525,8 @@ class ScreenDetector(threading.Thread):
             self.last_active = active
             if active:
                 # 首次激活：截当前帧存模板（后续非活跃期走预筛）
+                self._auto_calib_tries = 0
+                self._auto_calib_done = False
                 try:
                     frame = self._grab()
                     regions = self.layout.to_pixels(*self._screen_size())
@@ -461,41 +538,104 @@ class ScreenDetector(threading.Thread):
             if self.on_state:
                 self.on_state(active, self.core.round_id)
 
-    def _ocr_cards(self, frame, card_rects) -> tuple:
+    # 卡名行在卡片全框内的纵向位置带（真值：名行 0.398~0.427H / 卡框
+    # 0.176~0.665H → 相对 0.45~0.51；带留边后取 0.30~0.62，用于排除卡面
+    # 描述文字里提及的其他海克斯名干扰）
+    NAME_ZONE = (0.30, 0.62)
+
+    def count_valid_cards(self, cards: list) -> int:
+        """三卡中有效库名的个数（on_cards 发射门：≥2 才上报）"""
+        return sum(1 for n in cards if n and self.kb.valid_augment(n))
+
+    def _ocr_cards(self, frame, card_rects, prev_texts=None) -> tuple:
         card_texts, any_text = [], False
-        for rect in card_rects:
-            found = self.ocr.match_augments_in(
-                self.ocr.recognize(self._crop(frame, rect)))
-            if found:
-                any_text = True
-                card_texts.append(found[0][0])
-            else:
+        for i, rect in enumerate(card_rects):
+            crop = self._crop(frame, rect)
+            found = self.ocr.match_augments_in(self.ocr.recognize(crop))
+            if not found:
                 card_texts.append(None)
+                continue
+            any_text = True
+            # 单卡迟滞：上帧读数在本帧命中里仍存在 → 保持（同一张卡的两个
+            # 竞争命中随流光动画逐帧翻转，会让内容永不稳定）
+            prev = prev_texts[i] if prev_texts and i < len(prev_texts) else None
+            if prev and any(h[0] == prev for h in found):
+                card_texts.append(prev)
+                continue
+            # 优先取名行纵向带内的命中（描述文字提及的库名得分通常更低，
+            # 但悬浮 tooltip 漂入时可能反超——按位置带过滤最稳）
+            ch = crop.shape[0] or 1
+            in_zone = [h for h in found
+                       if self.NAME_ZONE[0] * ch <= h[2][1] + h[2][3] / 2
+                       <= self.NAME_ZONE[1] * ch]
+            card_texts.append((in_zone or found)[0][0])
         return card_texts, any_text
 
-    # ── 自动标定（主窗口"开始标定"触发，阻塞 ~2s） ────────────────
+    # ── 自动标定（主窗口"开始标定"触发；活跃期也会自愈式触发） ─────
 
-    def auto_calibrate(self, attempts: int = 3) -> bool:
-        """中央横带全量 OCR 找三组海克斯标题聚类 → 推导区域 → 保存。
+    def auto_calibrate(self, delay: float = 0.0, attempts: int = 5,
+                       interval: float = 2.0) -> bool:
+        """延迟 delay 秒（给用户时间把海克斯界面切到前台）后，中央横带
+        全量 OCR 找三组海克斯标题聚类 → 推导区域 → 几何校验 → 保存。
 
-        需要海克斯界面正在屏幕上。成功返回 True（layout 已更新）。
+        需要海克斯界面正在屏幕上（翻牌/刷新动画中名行被遮挡会失败，
+        多次尝试兜底）。成功返回 True（layout 已更新）。
         截屏用独立 mss 实例（与检测线程隔离，mss 非线程安全）。
         """
         import mss
+        if delay > 0:
+            print(f"[CALIB] {delay:.0f} 秒后开始识别——请立刻把海克斯三选一"
+                  "界面切到前台并保持不动（等卡面翻好，勿点刷新）")
+            time.sleep(delay)
         for i in range(attempts):
             frame = self._grab(screen=mss.mss())
-            sh, sw = frame.shape[:2]
-            bands = self._find_title_clusters(frame)
-            if bands and len(bands) == 3:
-                regions = self._regions_from_bands(bands, sw, sh)
-                save_layout(sw, sh, regions, confidence=0.9)
-                self.set_layout(Layout(regions, source="auto_calib"))
-                self._save_templates(frame, self.layout.to_pixels(sw, sh))
+            if self._calibrate_from_frame(frame):
                 return True
             if i < attempts - 1:
-                time.sleep(1.5)
-        print("[CALIB] 自动标定失败：未找到三组海克斯标题（确认界面在屏后重试/手动标定）")
+                time.sleep(interval)
+        print("[CALIB] 自动标定失败：未找到三组海克斯标题"
+              "（需要当前屏幕正是海克斯三选一界面且卡面稳定；"
+              "也可等下次界面出现时保持不动 5 秒自动完成）")
         return False
+
+    def _calibrate_from_frame(self, frame) -> bool:
+        """单帧推导 + 几何校验 + 保存（失败返回 False，不落盘）"""
+        sh, sw = frame.shape[:2]
+        clusters = self._find_title_clusters(frame)
+        if not clusters or len(clusters) != 3:
+            return False
+        if not self._clusters_plausible(clusters, sw, sh):
+            print("[CALIB] 标题聚类几何异常（三卡应均布等距、同一水平线），拒绝保存")
+            return False
+        regions = self._regions_from_bands(clusters, sw, sh)
+        if not self._regions_valid(regions):
+            print("[CALIB] 推导区域越界（cards/rerolls 超出屏幕），拒绝保存")
+            return False
+        save_layout(sw, sh, regions, confidence=0.9)
+        self.set_layout(Layout(regions, source="auto_calib"))
+        self._save_templates(frame, self.layout.to_pixels(sw, sh))
+        print("[CALIB] 几何校验通过，标定已保存")
+        return True
+
+    def _auto_calibrate_frame(self, frame):
+        """活跃期自愈标定（免手动，_tick 调用，每活跃期 ≤AUTO_CALIB_TRIES 次）：
+        - 未标定（source=default，如首次使用/换分辨率）→ 直接按本帧落标定；
+        - 已标定 → 名行聚类中心与现标定均偏 >AUTO_CALIB_DRIFT 像素
+          （UI 漂移/坏标定滞留）才重建，防好标定被反复重写。"""
+        sh, sw = frame.shape[:2]
+        clusters = self._find_title_clusters(frame)
+        if not clusters or len(clusters) != 3 \
+                or not self._clusters_plausible(clusters, sw, sh):
+            return
+        if self.layout.source != "default":
+            cur = sorted(sw / 2 + (b[0] + b[2] / 2) * sh
+                         for b in self.layout.title_bands)
+            got = sorted(sum(h[1] for h in cl) / len(cl) for cl in clusters)
+            drift = sum(abs(a - b) for a, b in zip(got, cur)) / 3
+            if drift <= self.AUTO_CALIB_DRIFT:
+                return
+            print(f"[CALIB] 检测到标题条漂移 ~{drift:.0f}px，自动重标定")
+        self._auto_calib_done = self._calibrate_from_frame(frame)
 
     def _find_title_clusters(self, frame):
         """中央横带 OCR → 海克斯命中文本按 x 聚类为 ≤3 组，返回屏幕像素 bbox"""
@@ -520,22 +660,70 @@ class ScreenDetector(threading.Thread):
         clusters = [c for c in clusters if len(c) >= 1][:3]
         return clusters if len(clusters) == 3 else None
 
+    @staticmethod
+    def _clusters_plausible(clusters, sw, sh) -> bool:
+        """保存前几何校验：三簇均布等距、同一水平线、左右对称于屏幕中心。
+        （历史教训：标定保存于战斗画面时聚类出垃圾也照存 confidence=0.9，
+        坏标定长期滞留 → 必须校验后才落盘。）"""
+        cxs = [sum(h[1] for h in cl) / len(cl) for cl in clusters]
+        tops = [min(h[2] for h in cl) for cl in clusters]
+        gaps = [cxs[1] - cxs[0], cxs[2] - cxs[1]]
+        # 真值：卡距 ≈0.19 屏宽（491px @2560），容差放得下非 16:9 居中布局
+        if not all(0.14 * sw < g < 0.24 * sw for g in gaps):
+            return False
+        if abs(gaps[0] - gaps[1]) > 0.03 * sw:
+            return False
+        if max(tops) - min(tops) > 0.03 * sh:
+            return False
+        if abs((cxs[0] + cxs[2]) / 2 - sw / 2) > 0.08 * sw:
+            return False
+        return True
+
+    @staticmethod
+    def _regions_valid(regions: dict) -> bool:
+        """推导区域整体合法性：全部矩形在屏内、卡片有序且互不交叠"""
+        rects = regions["title_bands"] + regions["cards"] + regions["rerolls"]
+        for xu, y, wu, h in rects:
+            if not (0 <= y < 1 and 0 < h and y + h <= 1.0):
+                return False
+            if abs(xu) > ASPECT_169:   # x 偏移出屏（H 单位 |xu| ≤ 16/9）
+                return False
+        cx = [r[0] + r[2] / 2 for r in regions["cards"]]
+        if not cx[0] < cx[1] < cx[2]:
+            return False
+        # 不交叠：按 x 排序后相邻卡左缘不得越过前一卡右缘
+        # （容差 0.01H≈14px@1440 吸收换算舍入；真值卡间隙 ≈0.046H）
+        cs = sorted(regions["cards"], key=lambda r: r[0])
+        return all(a[0] + a[2] - b[0] <= 0.01 for a, b in zip(cs, cs[1:]))
+
     def _regions_from_bands(self, clusters, sw, sh):
         """由标题聚类推导区域，直接输出 H 单位（units:"h"）——
-        按真实分辨率换算，任意宽高比回读零漂移。"""
-        bands, cards = [], []
+        按真实分辨率换算，任意宽高比回读零漂移。
+
+        几何锚点取自 2560x1440 真机实测（10 关键帧一致）：
+        卡框顶 ≈ 名行顶 - 0.222H、卡框高 0.489H、卡宽 0.2951H（=0.166 屏宽）；
+        刷新按钮在名行下方 0.279H 处、每卡中心各一个（共 3 个）。
+        旧公式 cards 从名行下方开始（永远框不到卡名）、
+        reroll_y=min+max-0.02 恒 >1 落屏幕外——均已废弃。
+        """
+        bands, cards, rerolls = [], [], []
         for cl in clusters:
-            cx_px = sum(h[1] for h in cl) / len(cl)
-            w_px = max(h[3] for h in cl) * 2.2
-            h_px = max(h[4] for h in cl) * 1.9
-            y_px = min(h[2] for h in cl)
-            bands.append([(cx_px - sw / 2) / sh, y_px / sh, w_px / sh, h_px / sh])
-            cw_px = w_px * 1.25
-            cards.append([(cx_px - cw_px / 2 - sw / 2) / sh,
-                          (y_px + h_px * 0.9) / sh, cw_px / sh, 0.40])
-        reroll_y = (min(b[1] + b[3] for b in bands)
-                    + max(c[1] + c[3] for c in cards) - 0.02)
+            cx = sum(h[1] for h in cl) / len(cl)
+            top = min(h[2] for h in cl)
+            name_h = max(h[4] for h in cl)
+            # 卡片全框（OCR 区 + 点击热区）
+            cw = sh * 0.2951
+            cy = top - sh * 0.222
+            ch = sh * 0.489
+            cards.append([(cx - cw / 2 - sw / 2) / sh, cy / sh, cw / sh, ch / sh])
+            # 标题条：与卡同宽，名行上下各留少量余量
+            by = top - sh * 0.007
+            bh = max(name_h * 1.5, sh * 0.040)
+            bands.append([(cx - cw / 2 - sw / 2) / sh, by / sh, cw / sh, bh / sh])
+            # 刷新按钮 ×3：中心对齐卡片中心
+            rw = sh * 0.072
+            ry = top + sh * 0.279
+            rh = sh * 0.056
+            rerolls.append([(cx - rw / 2 - sw / 2) / sh, ry / sh, rw / sh, rh / sh])
         return {"units": "h",
-                "title_bands": bands, "cards": cards,
-                "reroll": [(0 - sw * 0.06) / sh, reroll_y,
-                           sw * 0.12 / sh, 0.05]}
+                "title_bands": bands, "cards": cards, "rerolls": rerolls}
