@@ -6,7 +6,7 @@
 说明：
 - 数据资产（data/、hexa/knowledge/、界面默认模板）随包分发
 - settings.json / .env / calibrations 不打包（用户本地生成）
-- keyboard/psutil 等全局钩子在杀软可能误报 → README 有说明
+- mss 截图 / psutil 进程扫描在杀软可能误报 → 见 README「杀软误报预案」一节
 """
 import shutil
 import subprocess
@@ -24,7 +24,7 @@ DATA_ARGS = [
 ]
 
 HIDDEN_IMPORTS = [
-    "keyboard", "psutil", "mss", "pystray", "PIL",
+    "psutil", "mss", "pystray", "PIL",
     "rapidocr_onnxruntime", "opencv-python-headless:cv2",
     "thefuzz", "pypinyin", "openai",
 ]

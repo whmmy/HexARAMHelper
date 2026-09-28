@@ -6,7 +6,8 @@
 承载：双方阵容 / 我的装备与死亡态 / 海克斯台账 / current_path / 时间线 /
      出门装两分支状态机（v4.1 §2）/ 触发器评估（死亡·敌方关键装·KDA）/
      DecisionEngine 编排（同步规则底线 + AI 异步精修，serial 防旧覆新）/
-     建议历史与复盘日志（P3）。
+     建议历史与复盘日志（P3）/ 己方阵容缺口 gap + 军师提示滚动列表
+     （v4.5：阵容缺口/敌方缺口反向/顺逆风/攒钱与替换提醒，去重节流）。
 """
 import json
 import threading
@@ -16,15 +17,21 @@ from dataclasses import dataclass, field
 from hexa.ai import engine as engine_mod
 from hexa.ai.engine import KIND_CTX, KIND_NEXT, KIND_OPENING, KIND_RANKS
 from hexa.config import BASE_DIR
-from hexa.core.rules_engine import Candidate
+from hexa.core.rules_engine import LEGENDARY_GOLD, Candidate, SwapCandidate
+
+# ── 军师提示（v4.5）口径常量 ─────────────────────────────────────
+COACH_MAX_NOTES = 3            # 滚动保留最近 3 条（任务口径）
+COACH_REPEAT_COOLDOWN = 60.0   # 同 key 提示最小重复间隔：5s 轮询下防状态回摆刷屏
+WIND_EDGE = 6.0                # 顺/逆风判定分界（动量差 + 权重×人均传说件差）
+WIND_ITEM_WEIGHT = 4.0         # 装备成型度差权重：一件传说件差 ≈ 4 分动量差
 
 
 @dataclass
 class Suggestion:
-    kind: str                    # opening / next_items / augment / event_note
-    candidates: list = field(default_factory=list)  # [Candidate]
+    kind: str                    # opening / next_items / swap_items / augment / event_note
+    candidates: list = field(default_factory=list)  # [Candidate]（swap_items 为 [SwapCandidate]）
     note: str = ""
-    gold: float = 0.0            # 生成建议时的我方金币（next_items 展示用）
+    gold: float = 0.0            # 生成建议时的我方金币（next_items/swap_items 展示用）
     source: str = "rule"         # rule / ai（AI 精修覆盖后标记）
     serial: int = 0              # 建议序号（AI 精修防旧覆新）
     ts: float = field(default_factory=time.time)
@@ -33,6 +40,29 @@ class Suggestion:
         if not self.candidates:
             return self.note
         tag = " ·AI" if self.source == "ai" else ""
+        if self.kind == "swap_items":
+            # 满六神装替换建议（v4.4）：🔄 卖X → 买Y（差价N金），与
+            # "下一件"视觉区分（UI 层另以琥珀色标识）
+            head = "满六神装 · 替换建议" + tag
+            if self.gold > 0:
+                head += f"（金币 {self.gold:.0f}）"
+            lines = [head]
+            for i, c in enumerate(self.candidates[:3], 1):
+                if not isinstance(c, SwapCandidate):
+                    continue
+                diff = c.price - c.sell_price
+                # net_cost=None（金币未知，_apply_afford 同口径）不标注可买性，
+                # 防"还差X金"假信息
+                if c.net_cost is None:
+                    aff = ""
+                else:
+                    aff = "现金足够" if c.net_cost <= 0 else f"还差{c.net_cost}金"
+                tail = f"，{aff}" if aff else ""
+                lines.append(f"{'①②③'[i-1]} 🔄 卖{c.sell} → 买{c.buy}"
+                             f"（差价{diff}G{tail}）—— {c.reason}")
+            if self.note:
+                lines.append(f"({self.note})")
+            return "\n".join(lines)
         if self.kind == "next_items":
             head = "出装主线" + tag
             if self.gold > 0:
@@ -43,6 +73,9 @@ class Suggestion:
                 extra = f"，{c.afford_note}" if c.afford_note else ""
                 tag_i = f"（{price}{extra}）" if price else ""
                 lines.append(f"{'①②③'[i-1]} {c.name}{tag_i} —— {c.reason}")
+            # 攒钱决策附注（v4.5）：这波回城攒大件 vs 先买小件
+            if self.note:
+                lines.append(self.note)
             return "\n".join(lines)
         lines = []
         for i, c in enumerate(self.candidates[:3], 1):
@@ -88,6 +121,13 @@ class GameSession:
             self.timeline = []
             self.suggestion = None        # 当前 overlay 展示的建议
             self.threat = None            # ThreatProfile
+            self.gap = None               # AllyGap 己方阵容缺口（军师/流派倾向）
+            self.build_progress = None    # 成型度对比 {"ally":[行],"enemy":[行]}
+                                           # （快照 playerlist 六神装进度，UI 面板数据源）
+            self.coach_notes = []         # 军师提示滚动列表 [{"ts","key","text"}]
+            self._coach_keys = {}         # 军师 key → 上次推送时间（冷却节流）
+            self._coach_ctx_key = ""      # 最近一次实际发给模型的军师 key（AI 精修定向回填）
+            self.swap_forecast = ""       # 替换预告（威胁 vs 已有装备错配，提示级）
             self.opening_state = "wait_first_augment"  # wait/offered/bypassed
             self.first_augment = None
             self._my_gold = 0.0
@@ -140,6 +180,11 @@ class GameSession:
                       f"enemy={len(self.enemy)} map={self.game_map or '?'}")
             # 敌方威胁画像（英雄粒度，装备实时部分随快照补）
             self.threat = self.rules.threat_profile(self.enemy)
+            # 己方阵容缺口（v4.5 军师/流派倾向数据源；快照阶段每帧重算补全）
+            self.gap = self.rules.ally_gap(self._ally_five(),
+                                           self.my_hero or "")
+            # 旧局军师上下文清空（System1 模块态桥接，防跨局残留）
+            self._set_coach_context(clear=True)
             if self.dumper:
                 self.dumper.start_session(self.my_hero or "unknown")
                 self.dumper.dump_lcu("/lol-gameflow/v1/session", teams)
@@ -208,15 +253,60 @@ class GameSession:
                 self.enemy = [p.champion for p in enemies if p.champion]
                 self.ally = [p.champion for p in snap.allies()
                              if p.champion and p.champion != self.my_hero]
+            # 成型度对比（v4.6）：playerlist 全员六神装进度（传说件 x/6 +
+            # 装备总价值），敌我分组供主窗口面板；放阵容回填之后保证分组完整
+            self.build_progress = {
+                "ally": self._build_progress_rows(snap.allies()),
+                "enemy": self._build_progress_rows(enemies),
+            }
             # 敌方威胁画像实时补全（含敌方装备扫描）
             self.threat = self.rules.threat_profile(self.enemy, enemies)
+            # 己方缺口重算（上方已回填阵容时随之更新），并挂到威胁对象上：
+            # engine 层接口不透传 gap，借 threat 穿透到 build_sequence
+            # （"缺前排 → tank 加分"链路，见 rules_engine.tank_lean）
+            self.gap = self.rules.ally_gap(self._ally_five(),
+                                           self.my_hero or "")
+            self.threat.ally_gap = self.gap
             self._evaluate_triggers(snap, enemies)
             self._recompute_path()
+            # 替换预告（v4.4，提示级不改主建议）：威胁画像每次快照全量
+            # 重算，装备明显错配（敌 AP 成型而我无魔抗等）时提前预告；
+            # 放 _recompute_path 之后，保证用的是本帧路线
+            forecast = self.rules.swap_forecast(self.my_items,
+                                                self.current_path, self.threat)
+            if forecast != self.swap_forecast:
+                self.swap_forecast = forecast
+                if forecast:
+                    self._log("swap_forecast", forecast)
+            # 军师提示滚动维护（阵容缺口/敌方缺口反向/顺逆风；按 key 去重，
+            # 5s 轮询下不重复刷）
+            self._update_coach(snap)
             self._periodic_recheck(enemies, snap)
         # 锁外补 start_game（同 on_game_start 规矩：不持锁起线程）
         if late_start:
             engine, hero, ally, enemy, game_map = late_start
             engine.start_game(hero, ally, enemy, game_map=game_map)
+
+    def _build_progress_rows(self, players: list) -> list:
+        """一组玩家的成型度行：传说件计数（x/6）+ 装备总价值（DD gold）。
+
+        传说件沿用 LEGENDARY_GOLD 粗分口径（与顺逆风/满装判定同一把尺）；
+        先过 permanent_items 剔除药水等消耗品——临时占格不该计入成型，
+        估值也只算占格件（喝掉的药水不是战力）。行按传说件数 → 装备
+        价值降序，面板上一眼看出谁先成型。
+        """
+        rows = []
+        for p in players:
+            names = [it.get("name", "") for it in p.items if it.get("name")]
+            perms = self.kb.permanent_items(names)
+            legendary = sum(1 for n in perms
+                            if self.kb.items.get(n, {}).get("gold", 0)
+                            >= LEGENDARY_GOLD)
+            gold = sum(self.kb.items.get(n, {}).get("gold", 0) for n in perms)
+            rows.append({"name": p.champion or p.champion_en or "?",
+                         "legendary": legendary, "gold": gold})
+        rows.sort(key=lambda r: (r["legendary"], r["gold"]), reverse=True)
+        return rows
 
     def _periodic_recheck(self, enemies, snap):
         """定时快照 diff（v4.2）：状态签名变化即重算建议，不再只靠死亡触发。
@@ -294,6 +384,20 @@ class GameSession:
                     self._log("opening_rollback", "首海克斯被撤销")
             self._recompute_path()
             return True
+
+    def revoke_latest_augment(self):
+        """撤销最近一条海克斯记账（app.py F9 热键入口）。
+
+        末条读取与撤销同在锁内完成（RLock 可重入），防"读到的末条"
+        与点击记账线程并发错位；只做规则级重算（路径/出门装回退），
+        无重活，可在任意线程直接调用。返回被撤销的名字，台账为空
+        或撤销失败返回 None。
+        """
+        with self._lock:
+            if not self.augments:
+                return None
+            name = self.augments[-1]["name"]
+            return name if self.revoke_augment(name) else None
 
     def set_hero_manual(self, query: str):
         """LCU 断连兜底：拼音/中文模糊匹配手动设英雄（main_window 输入框调用）"""
@@ -390,31 +494,130 @@ class GameSession:
         兑现"钱够就连买两件"的场景；小件合成线有目标时置顶。
 
         reason: event（死亡/首海克斯后，不受 AI 间隔守门）| periodic（快照 diff）
+        军师提示先行（v4.5 时序修正）：本帧攒钱/满装替换提示先推送、写
+        上下文，再派发精修——后台线程组装 prompt 即读取军师模块态，顺序
+        反了模型永远看不到它本该"修正"的那条。UI/日志推送行为不变，仅
+        时序提前。规则底线取自引擎的规则实现（同一 delegate 同一组实参，
+        与派发内部重算确定性一致）。
         """
         threat = self.threat or self.rules.threat_profile(self.enemy)
         serial = self._new_serial()
-        seq = self.engine.next_candidates(self.my_items, self._my_gold,
+        # 规则底线预演：与引擎派发走同一规则实现，序列确定性一致
+        rule_engine = getattr(self.engine, "delegate", self.engine)
+        seq = rule_engine.next_candidates(self.my_items, self._my_gold,
                                           self.current_path, threat, serial,
                                           reason=reason,
                                           augments=list(self.augments))
-        target, note = self.rules.component_advice(self.my_items,
-                                                   self.current_path,
-                                                   game_map=self.game_map,
-                                                   prefer=[c.name for c in seq])
-        if target:
-            if seq and seq[0].name == target:
-                # 目标本就是主线第一件：合成提示并入理由，不重排不重复占位
-                # （旧写法直接跳过，提示整个丢失）
-                if note and note not in seq[0].reason:
-                    seq[0].reason = f"{note}；{seq[0].reason}"
-            else:
-                tprice = self.kb.items.get(target, {}).get("gold", 0)
-                seq = [Candidate(target, note, price=tprice)] + [
-                    c for c in seq if c.name != target][:2]
+        full_build = self._is_full_build()
+        save_note = ""
+        if full_build:
+            if not (seq and isinstance(seq[0], SwapCandidate)):
+                # 引擎底线非替换对（sell 池空等罕见情形）→ 直接规则版兜底
+                seq = self.rules.replacement_candidates(
+                    self.my_items, int(self._my_gold), self.current_path,
+                    threat, augments=[a["name"] for a in self.augments],
+                    hero=self.my_hero or "", game_map=self.game_map)
+            if seq:
+                # 净差补记 + 台账联动重排（与 _suggest_swap 同一套，先备好
+                # 供军师文案取首对）；金币未知不按 0 计（同 _apply_afford 口径）
+                for sw in seq:
+                    sw.net_cost = (None if self._my_gold <= 0
+                                   else sw.price - sw.sell_price
+                                   - int(self._my_gold))
+                seq = self.rules.swap_augment_rank(
+                    seq, [a["name"] for a in self.augments])
+                c0 = seq[0]
+                if c0.net_cost is None:
+                    aff_txt = ""     # 金币未知：不标注可买性
+                else:
+                    aff = ("现金足够" if c0.net_cost <= 0
+                           else f"还差{c0.net_cost}金")
+                    aff_txt = f"（{aff}）"
+                # 满装替换提醒（v4.5 军师）：复用替换建议产出，key 按买件名
+                # ——局势演化推出更优换装对时允许再提醒一次
+                self._push_coach(f"fullswap:{c0.buy}",
+                                 f"满六神装：可卖{c0.sell}换{c0.buy}{aff_txt}")
+        else:
+            target, note = self.rules.component_advice(
+                self.my_items, self.current_path, game_map=self.game_map,
+                prefer=[c.name for c in seq])
+            if target:
+                if seq and seq[0].name == target:
+                    # 目标本就是主线第一件：合成提示并入理由，不重排不重复占位
+                    # （旧写法直接跳过，提示整个丢失）
+                    if note and note not in seq[0].reason:
+                        seq[0].reason = f"{note}；{seq[0].reason}"
+                else:
+                    tprice = self.kb.items.get(target, {}).get("gold", 0)
+                    seq = [Candidate(target, note, price=tprice)] + [
+                        c for c in seq if c.name != target][:2]
+            # 攒钱决策附注（v4.5）：这波回城攒大件直购 vs 先买小件；
+            # 同时入军师滚动列表（攒钱提醒），key 按目标件名去重防刷
+            save_note = self.rules.saving_advice(self.my_items, self._my_gold,
+                                                 seq, game_map=self.game_map)
+            if save_note and seq:
+                self._push_coach(f"save:{seq[0].name}", save_note)
+        # AI 模式：把军师提示（阵容缺口/顺逆风/攒钱/满装替换等，含本帧
+        # 刚生成的）喂给 System1 作上下文——必须先于派发写入
+        self._set_coach_context()
+        # 精修派发（AI 模式在 next_candidates 内发起，后台线程组装 prompt
+        # 读取上方写入的军师上下文）：内部重算的规则底线与上方预演同源
+        # 同参、确定性一致，建议统一沿用上方已备好的 seq
+        if self.engine.mode != "rule":
+            self.engine.next_candidates(self.my_items, self._my_gold,
+                                        self.current_path, threat, serial,
+                                        reason=reason,
+                                        augments=list(self.augments))
+        # 满六神装（v4.4）：格满后"下一件"买不进格，切到替换建议流；
+        # 未满装行为完全不变（build_sequence 内按占格装备数分流）
+        if full_build:
+            if not seq:
+                self._set_suggestion(Suggestion(
+                    "swap_items", [], note="六神装成型，暂无更优替换（保持现装）",
+                    gold=self._my_gold, serial=serial))
+                self._log("swap_mode", "满装无替换候选")
+                return
+            self._suggest_swap(seq, serial, reason)
+            return
         # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
         self._apply_afford(seq)
-        self._set_suggestion(Suggestion("next_items", seq, gold=self._my_gold,
-                                        serial=serial))
+        self._set_suggestion(Suggestion("next_items", seq, note=save_note,
+                                        gold=self._my_gold, serial=serial))
+
+    # ── 满六神装替换建议（v4.4） ─────────────────────────────────
+
+    def _is_full_build(self) -> bool:
+        """占格装备（扣除药水等消耗品/饰品）满 6 件。
+        大乱斗无饰品位，以 Live API 物品格实数为准。"""
+        return len(self.kb.permanent_items(self.my_items)) >= 6
+
+    def _suggest_swap(self, swaps: list, serial: int, reason: str = "event"):
+        """替换建议落位：补记金币净差 + 台账联动重排。
+
+        引擎接口不透传 gold/augments（规则层 net_cost 先按价差计），
+        这里补减身上金币；海克斯联动度补排（只定序不减员，AI 精修按
+        买件名映射不受影响）。满装但身上还有小件时，合成不占格、比
+        卖装更优先，作为 note 附在替换建议下。满装替换军师提醒改在
+        _suggest_next_items 军师先行段推送（先于 prompt 组装，模型可见）。
+        """
+        for sw in swaps:
+            # 金币未知（0）不按 0 计净差：置 None 不标注，与 _apply_afford
+            # 口径一致，防 UI/军师报"还差X金"假信息
+            sw.net_cost = (None if self._my_gold <= 0
+                           else sw.price - sw.sell_price - int(self._my_gold))
+        aug_names = [a["name"] for a in self.augments]
+        swaps = self.rules.swap_augment_rank(swaps, aug_names)
+        note = ""
+        target, cnote = self.rules.component_advice(
+            self.my_items, self.current_path, game_map=self.game_map,
+            prefer=[c.buy for c in swaps])
+        if target:
+            note = f"先合成：{cnote}"
+        self._set_suggestion(Suggestion("swap_items", swaps, note=note,
+                                        gold=self._my_gold, serial=serial))
+        self._log("swap_mode",
+                  f"{len(swaps)} 对（{reason}）"
+                  f"{'; '.join(f'卖{c.sell}换{c.buy}' for c in swaps[:3])}")
 
     # ── 建议落位（serial 管理 + 历史） ─────────────────────────────
 
@@ -484,7 +687,32 @@ class GameSession:
                     cur.ts = time.time()
                     # AI 重排后需按当前金币重算可买性（保序累计）
                     self._apply_afford(cur.candidates)
+                    # System1 可选 coach 字段 → 覆盖最新一条军师文案
+                    self._apply_ai_coach()
                     self._log("next_items_ai", f"{len(payload)} 项")
+            elif kind == KIND_NEXT and cur.kind == "swap_items":
+                # 替换模式 AI 精修：payload 是 Candidate(买件名, AI理由)，
+                # 映射回当前替换对（按 buy 名，集合内），重排 + 换理由；
+                # 差价/净差等事实字段保持规则版（数据出事实，模型出判断）
+                if payload:
+                    by_buy = {c.buy: c for c in cur.candidates
+                              if isinstance(c, SwapCandidate)}
+                    merged, seen = [], set()
+                    for pc in payload:
+                        m = by_buy.get(pc.name)
+                        if m is not None and m.buy not in seen:
+                            if pc.reason:
+                                m.reason = pc.reason
+                            merged.append(m)
+                            seen.add(m.buy)
+                    merged += [m for b, m in by_buy.items() if b not in seen]
+                    if merged:
+                        cur.candidates = merged[:3]
+                        cur.source = "ai"
+                        cur.ts = time.time()
+                        # System1 可选 coach 字段 → 覆盖最新一条军师文案
+                        self._apply_ai_coach()
+                        self._log("swap_ai", f"{len(merged)} 对")
 
     # ── 触发器评估（死亡 / 敌方关键装备 / KDA 起飞） ───────────────
 
@@ -513,6 +741,9 @@ class GameSession:
                         "event_note", [Candidate(f"敌方 {champ} 出了 {item}", note)])
                     self.history.append(
                         (time.time(), "event_note", self.suggestion.render()))
+                    # 克制提示同步入军师滚动列表（军师格式，v4.5）
+                    self._push_coach(f"ekey:{champ}:{item}",
+                                     f"敌方{champ}出了{item}：{note}")
                     self._log("enemy_key_item", f"{champ} {item}")
 
         # 3. 敌方 KDA 起飞（每局限 2 次）
@@ -527,14 +758,168 @@ class GameSession:
                                    "考虑针对性装备（抗性/重伤/金身类）")])
                     self.history.append(
                         (time.time(), "event_note", self.suggestion.render()))
+                    # 敌方威胁变化入军师（v4.5）
+                    self._push_coach(f"kda:{p.champion}",
+                                     f"敌方{p.champion}已起飞"
+                                     f"（{p.kills}/{p.deaths}/{p.assists}），"
+                                     "考虑针对性装备")
                     self._log("enemy_kda_alert", f"{p.champion} {p.kills}/{p.deaths}")
                     break
+
+    # ── 军师提示（v4.5：滚动列表 + 去重节流 + System1 上下文桥接） ──
+
+    def _ally_five(self) -> list:
+        """己方五人名单。self.ally 来源不一（LCU teams 含我 / Live 回填不含
+        我），统一合并去重，保证缺口统计按 5 人编制。"""
+        names = [c for c in self.ally if c]
+        if self.my_hero and self.my_hero not in names:
+            names.append(self.my_hero)
+        return names
+
+    def _push_coach(self, key: str, text: str):
+        """入列一条军师提示（带时间戳；key 去重 + 冷却节流；最多保留
+        COACH_MAX_NOTES 条）。5s 轮询下同一提示只进一次列表；被挤出后
+        60s 内不回灌（状态回摆不重复轰炸）。"""
+        text = str(text).strip()
+        if not text:
+            return
+        now = time.time()
+        if any(c["key"] == key for c in self.coach_notes):
+            return
+        if now - self._coach_keys.get(key, 0.0) < COACH_REPEAT_COOLDOWN:
+            return
+        self._coach_keys[key] = now
+        self.coach_notes.append({"ts": now, "key": key, "text": text})
+        self.coach_notes = self.coach_notes[-COACH_MAX_NOTES:]
+        self._log("coach", text)
+
+    def _update_coach(self, snap):
+        """每次快照重估三类状态型军师提示（事件型在触发器/建议流内推送）：
+        ①己方阵容缺口（缺口标签变化 = 新 key）；②敌方缺口反向利用
+        （敌方缺 AP → 你可偏护甲）；③顺逆风（数据不足不出声）。"""
+        # ① 己方阵容缺口
+        if self.gap and self.gap.gaps:
+            tag = "、".join(self.gap.gaps)
+            tail = ""
+            if self.gap.need_tank and self.rules.tank_lean(
+                    self.my_hero or "", self.gap):
+                tail = "，你的坦装价值放大"
+            self._push_coach(f"gap:{tag}", f"己方阵容{tag}{tail}")
+        # ② 敌方阵容缺口反向利用：敌方无法伤 → 护甲更值；无物伤 → 魔抗更值
+        egap = self.rules.ally_gap(self.enemy)
+        if egap.need_ap:
+            self._push_coach("egap:ap", "敌方缺法伤（全AD），护甲收益更高")
+        if egap.need_ad:
+            self._push_coach("egap:ad", "敌方缺物伤（全AP），魔抗收益更高")
+        # ③ 顺逆风
+        wind = self._wind_state(snap)
+        if wind:
+            self._push_coach(f"wind:{wind[0]}", wind[1])
+
+    def _wind_state(self, snap):
+        """顺逆风估算：playerlist 双方 KDA 动量差 + 装备成型度差。
+
+        Live API 无 per-player 金币，经济差用 KDA 近似：动量 =
+        kills*2 + assists − deaths*1.5（人均）；成型度 = 人均传说件数
+        （≥LEGENDARY_GOLD 占格件）。合计击杀+死亡 < 6（开局噪音）不出声。
+        返回 (状态, 文案) 或 None。
+        """
+        allies, foes = snap.allies(), snap.enemies()
+        if not allies or not foes:
+            return None
+        if sum(p.kills + p.deaths for p in allies + foes) < 6:
+            return None
+
+        def momentum(players):
+            return sum(p.kills * 2 + p.assists - p.deaths * 1.5
+                       for p in players) / len(players)
+
+        def build_avg(players):
+            n = sum(1 for p in players for it in p.items
+                    if self.kb.items.get(it.get("name", ""),
+                                         {}).get("gold", 0) >= LEGENDARY_GOLD)
+            return n / len(players)
+
+        score = ((momentum(allies) - momentum(foes))
+                 + WIND_ITEM_WEIGHT * (build_avg(allies) - build_avg(foes)))
+        if score >= WIND_EDGE:
+            return ("顺风", "顺风：经济领先，可提前补输出扩大优势")
+        if score <= -WIND_EDGE:
+            return ("逆风", "逆风优先保命装，放弃第四件输出")
+        return ("均势", "均势：按主线补装，别单带过深")
+
+    def _set_coach_context(self, clear: bool = False):
+        """AI 模式：把军师提示写入 System1 模块上下文。
+
+        engine 层接口（next_candidates）不透传军师数据（本期未改 engine），
+        以 system1 模块态桥接：写入发生在精修派发前（锁内同步，军师提示
+        已先行推送，见 _suggest_next_items），读取在后台线程 prompt 组装
+        时。规则模式零开销跳过。
+        AI 精修文案（src="ai"）不回注 prompt——否则模型把自己的旧话当
+        规则层事实，形成自反馈回路。
+        同时记录本次实际发给模型的最新一条提示 key（_coach_ctx_key）：
+        AI 精修回填只定向覆盖这条，窗口期内新推的、模型没见过的提示不动。
+        """
+        if self.engine.mode == "rule":
+            return
+        notes = [] if clear else [c for c in self.coach_notes
+                                  if c.get("src") != "ai"]
+        self._coach_ctx_key = notes[-1]["key"] if notes else ""
+        try:
+            from hexa.ai import system1
+            system1.set_coach_context([c["text"] for c in notes])
+        except Exception as e:  # noqa: BLE001 —— 上下文缺失不阻断建议生成
+            self._coach_ctx_key = ""   # 没发出去就不允许回填覆盖
+            print(f"[WARN] 军师上下文写入失败: {e}")
+
+    def _apply_ai_coach(self):
+        """System1 可选输出字段 coach（≤30字）→ 定向覆盖发给模型的那条军师文案。
+
+        规则版文案独立完整，AI 版只是判断层面的精修；读取 system1 模块态
+        （suggest_next/suggest_swap 解析时写入），消费后清空防陈值复用。
+        打 src="ai" 标记：UI 照常展示，但 _set_coach_context 不再回注 prompt。
+        只覆盖 _set_coach_context 记录的、确实发给模型的最新一条（按 key
+        定位）——上下文写入与 AI 结果返回之间新推的提示模型没见过，不动
+        它们（原"覆盖最新一条"会在 60s 冷却内错杀正确文案）；那条已被
+        挤出或本次没发过提示时，不覆盖任何现有提示。
+        """
+        if self.engine.mode == "rule":
+            return
+        try:
+            from hexa.ai import system1
+            text = system1.last_coach()
+            system1.clear_coach()
+        except Exception:
+            return
+        if not text:
+            return
+        key = self._coach_ctx_key
+        self._coach_ctx_key = ""
+        for i, c in enumerate(self.coach_notes):
+            if c["key"] == key:
+                entry = dict(c)
+                entry["text"] = text
+                entry["src"] = "ai"
+                self.coach_notes[i] = entry
+                self._log("coach_ai", text)
+                return
+        if not self.coach_notes:
+            # 上下文阶段就没有规则提示可发：AI 文案自行入列展示（原行为保留）
+            self.coach_notes.append({"ts": time.time(), "key": "ai",
+                                     "src": "ai", "text": text})
+            self.coach_notes = self.coach_notes[-COACH_MAX_NOTES:]
+            self._log("coach_ai", text)
+            return
+        # 发给模型的那条已被挤出/本次没发过：不覆盖任何现有提示（宁缺毋滥）
+        self._log("coach_ai_skip", text)
 
     # ── current_path 重估（层 0 确定性） ──────────────────────────
 
     def _recompute_path(self):
         aug_names = [a["name"] for a in self.augments]
-        new_path = self.rules.infer_current_path(self.my_items, aug_names)
+        # hero/gap：缺前排且我的英雄可扛时 tank 路线加分（v4.5）
+        new_path = self.rules.infer_current_path(
+            self.my_items, aug_names, hero=self.my_hero or "", gap=self.gap)
         if new_path and new_path != self.current_path:
             self.current_path = new_path
             self._log("current_path", new_path)
@@ -618,6 +1003,18 @@ class GameSession:
                 "suggestion": self.suggestion.render() if self.suggestion else "",
                 "suggestion_kind": self.suggestion.kind if self.suggestion else "",
                 "suggestion_source": self.suggestion.source if self.suggestion else "",
+                "swap_forecast": self.swap_forecast,
+                # 成型度对比（v4.6）：敌我两组六神装进度（锁内深拷贝；
+                # None=快照未到/装备数据缺失，UI 按占位渲染不报错）
+                "build_progress": (
+                    {"ally": [dict(r) for r in self.build_progress["ally"]],
+                     "enemy": [dict(r) for r in self.build_progress["enemy"]]}
+                    if self.build_progress else None),
+                # 军师提示（v4.5）：滚动列表（≤3 条）+ 最新一条（overlay 顶部）
+                "coach": [{"ts": c["ts"], "text": c["text"]}
+                          for c in self.coach_notes],
+                "coach_latest": (self.coach_notes[-1]["text"]
+                                 if self.coach_notes else ""),
                 "card_ranks": [dict(r) for r in self.card_ranks],
                 "hex_active": self.hex_active,
                 "hex_recognized": self.hex_recognized,

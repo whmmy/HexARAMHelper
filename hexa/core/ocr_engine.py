@@ -6,7 +6,6 @@
 RapidOCR 懒加载（首次识别 ~2s 模型初始化，之后单帧几十 ms）。
 """
 import threading
-import time
 
 from thefuzz import process as fuzz_process
 
@@ -15,6 +14,7 @@ class OcrEngine:
     def __init__(self, kb):
         self.kb = kb
         self._ocr = None
+        self._augment_names = None  # 首次匹配时从 kb 固化（见 match_augment）
         self._lock = threading.Lock()
         self.available = True   # import 失败时置 False（上层走模板兜底/提示）
 
@@ -75,8 +75,13 @@ class OcrEngine:
             ch for ch in text if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
         if len(cleaned) < 2:
             return None
+        # 名单固化一次复用：kb.augment_names 是 set，每次 list() 重建 229 项
+        # 既浪费（整帧 OCR 一次匹配几十条）又顺序不定（平分时结果不稳定）；
+        # KB 未就绪/加载失败得到空名单时不缓存，下次调用重试
+        if self._augment_names is None and self.kb.augment_names:
+            self._augment_names = sorted(self.kb.augment_names)
         name, score = fuzz_process.extractOne(
-            cleaned, list(self.kb.augment_names)) or (None, 0)
+            cleaned, self._augment_names or []) or (None, 0)
         if name and score >= threshold:
             return name, int(score)
         return None

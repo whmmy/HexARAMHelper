@@ -6,6 +6,11 @@
    小件合成 / 海克斯时刻评级
 3. GameSession 全生命周期：选人→加载→对局→出门装状态机→死亡触发→
    敌方关键装/KDA 触发→结束重置（含秒退重开）+ AI 精修 serial 防旧覆新
+   + 满六神装替换建议（卖X换Y差价 / 替换预告 / AI 候选对选优）
+   + 军师提示滚动列表（阵容缺口/敌方缺口反向/顺逆风/攒钱/替换提醒，
+   去重节流+保留上限）+ 攒钱决策（攒大件 vs 买小件阈值分支）
+   + 成型度对比（playerlist 六神装进度 x/6+装备估值/敌我分组/深拷贝/
+   无快照占位）+ F9 撤销最近记账（revoke_latest_augment）
 4. PhaseMachine 状态转换（含 dodge_requeue 与断连事件）
 5. DetectorCore 迟滞状态机 + Layout 坐标 + 鼠标落点映射
 6. AI 引擎（FakeClient）：System2 生成/幻觉过滤/规则降级/预算与间隔守门/
@@ -26,8 +31,9 @@ from hexa.core.game_state import GameSession
 from hexa.core.live_api import LivePoller, LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
 from hexa.core.mouse_ledger import CardLedger
-from hexa.core.rules_engine import RulesEngine, ThreatProfile
+from hexa.core.rules_engine import RulesEngine, SwapCandidate, ThreatProfile
 from hexa.core.screen_detect import (DEFAULT_LAYOUT_169, DetectorCore, Layout,
+                                     capture_region, is_fullscreen_cover,
                                      point_in_rect)
 from hexa.knowledge.kb import KnowledgeBase
 
@@ -85,6 +91,33 @@ def make_snap(my_hero_en="Annie", my_items=None, dead=False, enemy_items=None,
         kills=enemy_kda[0], deaths=enemy_kda[1], assists=enemy_kda[2]))
     for cn in ("黑暗之女", "九尾妖狐", "皎月女神"):  # 3 个 AP 英雄做威胁画像
         snap.players.append(PlayerInfo(champion=cn, champion_en="", team="CHAOS"))
+    return snap
+
+
+def full_snap(my_hero_en, my_rows, foe_rows, my_items=None, my_gold=0):
+    """5v5 快照构造器（军师/顺逆风测试用）。
+
+    my_rows: [(中文名, k, d, a), ...] 我方 5 人（首位=我，配 my_items）
+    foe_rows: [(中文名, k, d, a, [装备名]), ...] 敌方 5 人
+    """
+    snap = LiveSnapshot(ts=time.time(), ok=True)
+    snap.my_champion_en = my_hero_en
+    snap.my_champion = kb.champion_cn(my_hero_en) or my_hero_en
+    snap.my_current_gold = my_gold
+    snap.my_items = [{"name": n, "count": 1} for n in (my_items or [])]
+    cn0, k0, d0, a0 = my_rows[0]
+    snap.players.append(PlayerInfo(
+        champion=snap.my_champion, champion_en=my_hero_en, team="ORDER",
+        items=snap.my_items, kills=k0, deaths=d0, assists=a0))
+    for cn, k, d, a in my_rows[1:]:
+        snap.players.append(PlayerInfo(champion=cn, champion_en="",
+                                       team="ORDER", kills=k, deaths=d,
+                                       assists=a))
+    for cn, k, d, a, items in foe_rows:
+        snap.players.append(PlayerInfo(
+            champion=cn, champion_en="", team="CHAOS",
+            items=[{"name": n, "count": 1} for n in (items or [])],
+            kills=k, deaths=d, assists=a))
     return snap
 
 
@@ -259,9 +292,19 @@ def test_rules():
     tp = rules.threat_profile(
         ["九尾妖狐", "皎月女神", "黑暗之女", "盲僧", "众星之子"],
         [PlayerInfo(champion="盲僧", items=[{"name": "荆棘之甲", "count": 1}])])
-    check("AP 数统计", tp.ap_count == 3, str(tp.ap_count))
+    check("AP 数统计", tp.ap_count == 4, str(tp.ap_count))
+    # 4 AP = 九尾妖狐/皎月女神/黑暗之女/众星之子（皎月女神经画像特例
+    # 修正为 ap，辅助按 Support 标签归 ap；盲僧物伤+荆棘之甲计坦）
     check("治疗识别", tp.healers == ["众星之子"])
     check("敌方关键装扫描", tp.key_items and tp.key_items[0]["item"] == "荆棘之甲")
+    tp_multi = ThreatProfile(key_items=[
+        {"champion": "a", "item": "荆棘之甲", "note": ""},
+        {"champion": "b", "item": "中娅沙漏", "note": ""},
+        {"champion": "c", "item": "莫雷洛秘典", "note": ""},
+        {"champion": "d", "item": "兰顿之兆", "note": ""}])
+    check("威胁摘要关键装取前3件去重（原只显示第一件）",
+          "关键装:荆棘之甲/中娅沙漏/莫雷洛秘典" in tp_multi.summary(),
+          tp_multi.summary())
 
     # 伤害类型按实际出装推断（装备覆盖英雄默认）：女枪默认 AD，出 AP 传说件按法伤计
     tp_ap = rules.threat_profile(
@@ -418,7 +461,8 @@ def test_session():
     # ui_state 快照完整性
     check("ui_state 键齐全", {"stage", "my_hero", "ally", "enemy", "augments",
                               "current_path", "threat", "suggestion",
-                              "dd_version", "path_drift"} <= set(st.keys()))
+                              "dd_version", "path_drift",
+                              "build_progress"} <= set(st.keys()))
     fresh = session.data_freshness()
     check("新鲜度字段", "date" in fresh and fresh["dd_version"].startswith("16."))
 
@@ -705,6 +749,31 @@ def test_detect_and_layout():
               doc["regions"]["cards"] == regions_ok["cards"], str(errs))
         check("并发写无 .tmp 残留", not leftovers, str(leftovers))
 
+    # 窗口化/副屏适配：窗口矩形 → 截屏区域/坐标换算（纯函数，不依赖真窗口）
+    check("客户区→mss截屏区域参数", capture_region(100, 50, 1600, 900) ==
+          {"left": 100, "top": 50, "width": 1600, "height": 900}
+          and capture_region(-1920, 200, 1280, 720)["left"] == -1920)
+    check("整屏覆盖判定", is_fullscreen_cover((0, 0, 1920, 1080), 1920, 1080)
+          and not is_fullscreen_cover((8, 31, 1912, 1049), 1920, 1080)
+          and not is_fullscreen_cover((0, 0, 1600, 900), 1920, 1080))
+    # Layout 绑定窗口：默认输出屏幕坐标（+原点偏移，鼠标落点记账直读），
+    # canvas=True 输出画布坐标（截屏帧裁剪）；旧调用方的过期入参被覆盖
+    lay_w = Layout()
+    lay_w.bind_window((100, 50, 1600, 900))
+    px_win = lay_w.to_pixels(1920, 1080)             # 过期的整屏入参
+    px_cvs = lay_w.to_pixels(1920, 1080, canvas=True)
+    w0, c0 = px_win["cards"][0], px_cvs["cards"][0]
+    check("绑定窗口输出屏幕坐标",
+          w0[:2] == [100 + c0[0], 50 + c0[1]] and w0[2:] == c0[2:],
+          str((w0, c0)))
+    check("画布坐标按客户区尺寸换算",
+          all(0 <= r[0] and r[0] + r[2] <= 1600 and 0 <= r[1]
+              and r[1] + r[3] <= 900 for r in px_cvs["cards"] + px_cvs["rerolls"]),
+          str(px_cvs["cards"] + px_cvs["rerolls"]))
+    lay_w.bind_window(None)
+    check("解绑恢复整屏坐标", lay_w.to_pixels(1920, 1080) ==
+          Layout().to_pixels(1920, 1080))
+
     # 鼠标落点 → 卡片序号
     rects = [tuple(r) for r in px["cards"]]
     cl = CardLedger(rects_provider=lambda: rects)
@@ -759,6 +828,10 @@ class FakeSettings:
         except (TypeError, ValueError):
             return default
 
+    def resolve_api_key(self, slot):
+        # Settings.resolve_api_key 的明文分支（冒烟不依赖环境变量兜底）
+        return str(self.get(slot, "api_key", default="") or "").strip()
+
     def set(self, *keys_and_value):
         *keys, value = keys_and_value
         node = self._d
@@ -781,7 +854,7 @@ class FakeClient:
         return True
 
     def chat(self, system, user, max_tokens=None, json_mode=True):
-        self.calls.append(user[:60])
+        self.calls.append(user)   # 存完整 user（重试带因等断言要看尾部）
         text = self.script.pop(0) if self.script else "{}"
         self.usage.add(100, 50)
         return text, {"model": "fake", "latency": 0.01,
@@ -831,6 +904,25 @@ def test_ai_engine():
     check("加点来自 ctx", eng.skill_order(hero) == "主Q副E")
     check("规则模式无 ctx 时加点", RuleDecisionEngine(kb, rules)
           .skill_order(hero) == "主Q副E")
+    # ---- Prompt 强化回归：敌方明细管道 / 幽灵字段清除 / 语义标签 ----
+    check("engine 敌方明细（名+伤害画像）",
+          eng._enemy_detail() == ["黑暗之女(ap)"], str(eng._enemy_detail()))
+    from hexa.ai import system2 as _s2
+    check("System2 无幽灵字段指令（is_upgrade/置信度指向不存在的 schema 字段）",
+          "is_upgrade 标记" not in _s2.SYSTEM_PROMPT
+          and "标注置信度" not in _s2.SYSTEM_PROMPT)
+    aug_line = _s2._fmt_augments(kb, hero)
+    check("海克斯名单带 KB 语义标签（bias 等，防零先验考幻觉）",
+          "bias=" in aug_line, aug_line[:80])
+    comp_line = _s2._fmt_enemy_comp(kb, ["九尾妖狐", "暗裔剑魔", "牛头酋长"])
+    # 牛头酋长 damage=ap 且 is_tank=True → 法伤×2；坦克按 is_tank 另计
+    check("敌方构成行（含 is_tank 计数）",
+          "法伤×2" in comp_line and "物伤×1" in comp_line
+          and "坦克×1" in comp_line, comp_line)
+    cleaned = _s2.validate_and_clean(_json.loads(_json.dumps(ctx_json)),
+                                     kb, hero)
+    check("component_rules 已移除（零消费输出不再生成；旧输入键被忽略）",
+          "component_rules" not in cleaned)
     # ---- System1 出门装精修（异步回调） ----
     threat = ThreatProfile(ap_count=2)
     base = eng.opening_candidates(top[0], threat, serial=1)
@@ -928,6 +1020,24 @@ def test_ai_engine():
     ctx_bad = eng_bad.cache.get()
     check("坏输出降级规则版 Context",
           ctx_bad is not None and ctx_bad.source == "rule", str(ctx_bad.source if ctx_bad else None))
+    # 回归：降级版联动的海克斯名也须过 B 层校验（曾硬编码"心之刚"——
+    # 不在 229 名单内，AI 路径有 validate_and_clean 过滤、降级路径没有）
+    bad_links = ctx_bad.augment_item_links if ctx_bad else []
+    check("降级联动名全过海克斯校验",
+          bad_links and all(kb.valid_augment(l["augment"]) for l in bad_links),
+          str([l.get("augment") for l in bad_links]))
+
+    # ---- System2 重试带失败原因（原样重发等于再掷同一次骰子） ----
+    eng_rt, _c1rt, c2rt = build_ai_engine(
+        script_s2=["not a json", _json.dumps(ctx_json)])
+    eng_rt.bind(lambda *a: None)
+    eng_rt.start_game(hero, ["暗裔剑魔"], ["黑暗之女"])
+    deadline = time.time() + 6
+    while eng_rt.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    check("System2 重试上下文附上次失败原因",
+          len(c2rt.calls) == 2 and "上一次输出未通过校验" in c2rt.calls[1],
+          f"calls={len(c2rt.calls)}")
 
 
 def test_session_ai_serial():
@@ -995,6 +1105,463 @@ def test_session_ai_serial():
         doc = _json2.loads(logs[-1].read_text(encoding="utf-8"))
         check("复盘日志字段", doc.get("hero") == "暗裔剑魔"
               and doc.get("suggestions"), str(doc.get("hero")))
+
+
+# ── 6c. 满六神装替换建议（v4.4：格满后改推"卖X换Y"） ────────────
+
+def test_swap_mode():
+    print("\n[6c] 满六神装替换建议")
+    # AP 法师六神装：5 传说件 + 靴子（含唯一魔抗件 振奋盔甲 供威胁对照）
+    full_ap = ["灭世者的死亡之帽", "虚空之杖", "瑞莱的冰晶节杖", "振奋盔甲",
+               "残疫", "明朗之靴"]
+
+    # ---- 规则层：替换对的 sell 排序（威胁画像 vs 已有装备） ----
+    tp_ap = ThreatProfile(ap_count=4)   # 敌方 4 AP → 魔抗优先
+    swaps = rules.replacement_candidates(full_ap, 2000, "ap", tp_ap,
+                                         hero="黑暗之女", game_map="12")
+    sells = {s.sell for s in swaps}
+    check("替换 sell 排序合理（威胁vs已有）",
+          bool(swaps)
+          and "明朗之靴" not in sells                     # 靴子默认不卖
+          and "振奋盔甲" not in sells                     # 唯一魔抗件是威胁答案，不反卖
+          and all(kb.items[s.sell]["gold"] >= 2200        # 只卖传说件
+                  and "Boots" not in kb.items[s.sell]["tags"] for s in swaps),
+          str(sells))
+    check("替换 buy 针对性补威胁短板",
+          all(s.buy not in full_ap                        # 不与已拥有重复（含被卖件）
+              and kb.item_available(s.buy, "12") for s in swaps)
+          and any("SpellBlock" in kb.items[s.buy]["tags"] for s in swaps),
+          str([(s.sell, s.buy) for s in swaps]))
+    c0 = swaps[0]
+    check("差价净差按 DD 卖出价核算",
+          c0.sell_price == kb.item_sell_price(c0.sell) > 0
+          and c0.price == kb.items[c0.buy]["gold"]
+          and c0.net_cost == c0.price - c0.sell_price - 2000,
+          f"sell{c0.sell_price} buy{c0.price} net{c0.net_cost}")
+
+    # ---- 会话层：满装切替换模式；未满装（药水占格）行为不变 ----
+    session = GameSession(kb, rules)   # 默认规则引擎 = AI 关闭
+    session.on_game_start({"ally": ["黑暗之女"],
+                           "enemy": ["九尾妖狐", "皎月女神", "乐芙兰",
+                                     "盲僧", "众星之子"],
+                           "my_hero": "黑暗之女", "source": "test"})
+    session.on_in_progress()
+    session.on_snapshot(make_snap(my_hero_en="Annie",
+                                  my_items=full_ap[:5] + ["生命药水"],
+                                  my_gold=1500))
+    check("未满装（消耗品占格）不受影响",
+          session.suggestion.kind == "next_items", session.suggestion.kind)
+    session.on_snapshot(make_snap(my_hero_en="Annie", my_items=full_ap,
+                                  my_gold=2000))
+    text = session.suggestion.render()
+    check("满六神装切替换模式（AI 关规则版完整）",
+          session.suggestion.kind == "swap_items"
+          and session.suggestion.source == "rule"
+          and "🔄" in text and "差价" in text and "卖" in text and "买" in text
+          and all(isinstance(c, SwapCandidate)
+                  for c in session.suggestion.candidates),
+          text.split(chr(10))[0])
+    # 满装后身上金币变化仍在替换模式内刷新（差价含金币感知）
+    session.on_snapshot(make_snap(my_hero_en="Annie", my_items=full_ap,
+                                  my_gold=500))
+    check("满装金币变化仍走替换流",
+          session.suggestion.kind == "swap_items"
+          and "现金足够" in session.suggestion.render(),
+          session.suggestion.render().split(chr(10))[1][:40])
+    # 替换预告：换成无魔抗六神装 → 敌 AP 成型而我无魔抗（提示级，不改主建议）
+    full_ap_nomr = ["灭世者的死亡之帽", "虚空之杖", "瑞莱的冰晶节杖",
+                    "莫雷洛秘典", "残疫", "明朗之靴"]
+    session.on_snapshot(make_snap(my_hero_en="Annie", my_items=full_ap_nomr,
+                                  my_gold=600))
+    st = session.ui_state()
+    check("替换预告触发且不改主建议",
+          "魔抗" in st["swap_forecast"]
+          and st["suggestion_kind"] == "swap_items",
+          st["swap_forecast"])
+
+    # ---- AI 精修：候选对内选优 + 幻觉过滤 + 映射回替换对 ----
+    import json as _json
+    hero = "黑暗之女"
+    top = kb.top_augments(hero, 8)
+    pool2 = kb.core_item_pool(hero) or ["长剑"]
+    ctx_json = _json.dumps({
+        "augment_affinity": [{"name": n, "bias": "ap", "note": "t"} for n in top],
+        "opening_items": [{"combo": pool2[:1] or ["多兰之戒"], "when": "标准"},
+                          {"combo": ["多兰之戒"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "build_paths": {"ap": {"items": pool2[:3], "skill_order": "主Q副W",
+                               "note": "主线"}},
+        "component_rules": [], "augment_item_links": []})
+    buy_top = [c.buy for c in session.suggestion.candidates]
+    eng, c1, _c2 = build_ai_engine(
+        script_s2=[ctx_json],
+        script_s1=[_json.dumps({"picks": [
+            {"name": buy_top[-1], "reason": "AI 认为这件更稳"},
+            {"name": "幻觉装备名", "reason": "应被过滤"},
+            {"name": buy_top[0], "reason": "AI 次选"}]})])
+    session.engine = eng
+    eng.bind(session._on_engine_result)
+    eng.start_game(hero, [hero], ["黑暗之女"])
+    deadline = time.time() + 6
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    session.on_snapshot(make_snap(my_hero_en="Annie", my_items=full_ap_nomr,
+                                  my_gold=2600))   # 金币档变化触发 periodic 精修
+    deadline = time.time() + 6
+    while session.suggestion.source != "ai" and time.time() < deadline:
+        time.sleep(0.02)
+    ai_c = session.suggestion.candidates
+    check("替换 AI 精修映射回候选对",
+          session.suggestion.source == "ai"
+          and all(isinstance(c, SwapCandidate) for c in ai_c)
+          and ai_c[0].buy == buy_top[-1]           # AI 选中的对被置顶
+          and ai_c[0].reason == "AI 认为这件更稳"
+          and "幻觉" not in session.suggestion.render(),
+          str([(c.buy, c.reason) for c in ai_c]))
+
+
+# ── 8. 军师提示 / 阵容缺口 / 攒钱决策（v4.5） ────────────────────
+
+def test_coach_save_gap():
+    print("\n[8] 军师提示 / 阵容缺口 / 攒钱决策")
+    from hexa.core.rules_engine import SAVE_GOLD_THRESHOLD
+    from hexa.core.rules_engine import Candidate as _Cand
+
+    # ---- 阵容缺口计算（champ_damage_profile 画像统计） ----
+    all_ad = ["暗裔剑魔", "影哨", "残月之肃", "寒冰射手", "赏金猎人"]
+    g1 = rules.ally_gap(all_ad, my_hero="暗裔剑魔")
+    check("缺口：全AD无前排判缺前排+缺AP",
+          g1.tanks == 0 and g1.ap == 0 and g1.ad == 5
+          and g1.need_tank and g1.need_ap and not g1.need_ad
+          and "缺前排" in g1.summary() and "缺AP" in g1.summary(),
+          g1.summary())
+    balanced = ["牛头酋长", "殇之木乃伊", "暗裔剑魔", "影哨", "九尾妖狐"]
+    g2 = rules.ally_gap(balanced)
+    check("缺口：双前排+双输出=均衡", not g2.gaps and g2.tanks == 2
+          and g2.ap == 3 and g2.ad == 2, g2.summary())
+    # 缺前排 → tank 加分只给可扛英雄（is_tank 或 Fighter）
+    check("tank 加分只给可扛英雄",
+          rules.tank_lean("暗裔剑魔", g1) == 1.5
+          and rules.tank_lean("九尾妖狐", g1) == 0.0
+          and rules.tank_lean("暗裔剑魔", g2) == 0.0)
+    # 缺口影响路线推断：坦/输出各一件的并列压向坦线；纯输出出装不翻转
+    check("缺口影响路线推断",
+          rules.infer_current_path(["长剑", "红水晶"], [], hero="暗裔剑魔",
+                                   gap=g1) == "tank"
+          and rules.infer_current_path(["长剑", "红水晶"], [], hero="暗裔剑魔",
+                                       gap=g2) == "ad"
+          and rules.infer_current_path(["长剑"], [], hero="暗裔剑魔",
+                                       gap=g1) == "ad"
+          and rules.infer_current_path([], [], hero="暗裔剑魔", gap=g1) == "")
+    # gap 经 threat.ally_gap 穿透 engine 层（engine.next_candidates 不透传）
+    tp0, tp1 = ThreatProfile(), ThreatProfile()
+    tp1.ally_gap = g1
+    base = [c.name for c in rules.next_item_candidates(
+        ["红水晶"], "tank", tp0, hero="暗裔剑魔", limit=8)]
+    withg = [c.name for c in rules.next_item_candidates(
+        ["红水晶"], "tank", tp1, hero="暗裔剑魔", limit=8)]
+    check("缺口经 threat 穿透影响下一件排序",
+          base != withg
+          and sum(kb.item_path_bias(n) == "tank" for n in withg)
+          >= sum(kb.item_path_bias(n) == "tank" for n in base),
+          f"{base[-2:]} vs {withg[-2:]}")
+
+    # ---- 攒钱决策（攒大件 vs 买小件，阈值模块常量） ----
+    cap = "灭世者的死亡之帽"
+    cap_price = kb.items[cap]["gold"]
+    comps = sorted({kb.item_id_to_name.get(i)
+                    for i in kb.items[cap]["from"]} - {None})
+    comp_sum = sum(kb.items[c]["gold"] for c in comps)
+    check("攒钱阈值模块常量=500", SAVE_GOLD_THRESHOLD == 500,
+          str(SAVE_GOLD_THRESHOLD))
+    seq1 = [_Cand(cap, "测试", price=cap_price)]
+    # 组件齐、只差 400 合成款（≤500）且无未拥有组件 → 可攒
+    note1 = rules.saving_advice(comps, cap_price - comp_sum - 400, seq1)
+    check("攒钱：差价≤500且组件齐→可攒", "可攒" in note1 and "400" in note1
+          and note1.startswith("💰"), note1)
+    # 空身、现金恰够最便宜组件 → 买小件并写清剩余
+    gold2 = min(kb.items[c]["gold"] for c in comps)
+    cheap = min(comps, key=lambda c: kb.items[c]["gold"])
+    note2 = rules.saving_advice([], gold2, seq1)
+    check("攒钱：差价大→先买小件写清剩余",
+          "买小件" in note2 and cheap in note2
+          and f"剩{gold2 - kb.items[cheap]['gold']:.0f}" in note2, note2)
+    # 组件齐但差价 501（超阈值 1 金）→ 不判"可攒"
+    note3 = rules.saving_advice(comps, cap_price - comp_sum - 501, seq1)
+    check("攒钱：差价超阈值不判可攒", "可攒" not in note3 and "先攒钱" in note3,
+          note3)
+    # 整件已买得起 → 无附注（金币感知行已说清）
+    check("攒钱：整件可购无附注",
+          rules.saving_advice([], cap_price + 100, seq1) == "")
+
+    # ---- 军师：同 key 去重 / 保留上限 / 冷却节流 ----
+    s4 = GameSession(kb, rules)
+    s4._push_coach("t0", "提示0")
+    s4._push_coach("t0", "提示0")
+    check("军师同 key 去重", len(s4.coach_notes) == 1,
+          str([c["text"] for c in s4.coach_notes]))
+    for i in range(1, 5):
+        s4._push_coach(f"t{i}", f"提示{i}")
+    check("军师保留上限 3 条（最新在下）",
+          len(s4.coach_notes) == 3
+          and [c["text"] for c in s4.coach_notes] == ["提示2", "提示3", "提示4"],
+          str([c["text"] for c in s4.coach_notes]))
+    s4._push_coach("t0", "提示0")   # 被挤出后冷却期内不回灌
+    check("军师冷却节流（60s 内不回灌）",
+          "提示0" not in [c["text"] for c in s4.coach_notes]
+          and len(s4.coach_notes) == 3)
+
+    # ---- 军师：会话集成（缺口 / 敌方缺口反向 / 顺逆风 / 同快照去重） ----
+    enemy_ap = ["九尾妖狐", "皎月女神", "黑暗之女", "铸星龙王", "众星之子"]
+    session = GameSession(kb, rules)
+    session.on_game_start({"ally": all_ad, "enemy": enemy_ap,
+                           "my_hero": "暗裔剑魔", "source": "test"})
+    session.on_in_progress()
+    ally_rows = [(cn, 6, 1, 4) for cn in all_ad]
+    foe_rows = [(cn, 1, 6, 2, []) for cn in enemy_ap]
+    # gold=0：攒钱附注不生成（金币未知口径），滚动列表只留三条状态提示，
+    # 缺口文案不被挤出（保留上限 3 条与多来源竞争的实态由 s4/逆风场景覆盖）
+    session.on_snapshot(full_snap("Aatrox", ally_rows, foe_rows,
+                                  my_items=["长剑"], my_gold=0))
+    texts = [c["text"] for c in session.coach_notes]
+    check("阵容缺口+坦装放大入军师",
+          any("缺前排" in t and "坦装价值放大" in t for t in texts), str(texts))
+    check("敌方缺口反向提示（全AP→偏魔抗）",
+          any("魔抗" in t for t in texts), str(texts))
+    check("顺风判断入军师", any("顺风" in t for t in texts), str(texts))
+    n_before = len(session.coach_notes)
+    n_win = sum("顺风" in c["text"] for c in session.coach_notes)
+    session.on_snapshot(full_snap("Aatrox", ally_rows, foe_rows,
+                                  my_items=["长剑"], my_gold=0))
+    check("军师同快照去重不刷（5s 轮询节流）",
+          len(session.coach_notes) == n_before
+          and sum("顺风" in c["text"] for c in session.coach_notes) == n_win)
+
+    # 逆风 + 敌方起飞（阵容均衡且敌我输出均衡：军师只含事件+顺逆风两类，
+    # 起飞提示不被缺口类挤出；KDA 提示同时压制本帧 periodic → 无攒钱条）
+    foe_mix2 = ["盲僧", "放逐之刃", "牛头酋长", "诡术妖姬", "黑暗之女"]
+    session2 = GameSession(kb, rules)
+    session2.on_game_start({"ally": balanced, "enemy": foe_mix2,
+                            "my_hero": "暗裔剑魔", "source": "test"})
+    session2.on_in_progress()
+    session2.on_snapshot(full_snap("Aatrox", [(cn, 1, 6, 2) for cn in balanced],
+                                   [(cn, 6, 1, 4, []) for cn in foe_mix2],
+                                   my_items=["长剑"], my_gold=300))
+    texts2 = [c["text"] for c in session2.coach_notes]
+    check("逆风行动建议（保命装优先）",
+          any("逆风" in t and "保命" in t for t in texts2), str(texts2))
+    check("敌方起飞入军师", any("起飞" in t for t in texts2), str(texts2))
+
+    # 敌方关键装克制提示入军师（军师格式，滚动保留）
+    session3 = GameSession(kb, rules)
+    foe_mix = ["盲僧", "放逐之刃", "诺克萨斯之手", "狂暴之心", "诡术妖姬"]
+    session3.on_game_start({"ally": balanced, "enemy": foe_mix,
+                            "my_hero": "黑暗之女", "source": "test"})
+    session3.on_in_progress()
+    session3.on_snapshot(full_snap(
+        "Annie", [(cn, 2, 2, 2) for cn in balanced],
+        [(cn, 2, 2, 2, ["荆棘之甲"] if cn == "盲僧" else []) for cn in foe_mix],
+        my_items=["多兰之戒"], my_gold=500))
+    check("敌方关键装入军师",
+          any("荆棘之甲" in c["text"] for c in session3.coach_notes),
+          str([c["text"] for c in session3.coach_notes]))
+
+    # ---- 会话层：攒钱附注随建议渲染 + ui_state 军师字段 ----
+    s5 = GameSession(kb, rules)
+    s5.on_game_start({"ally": balanced, "enemy": foe_mix,
+                      "my_hero": "黑暗之女", "source": "test"})
+    s5.on_in_progress()
+    s5.record_augment(REAL_AUG)
+    # 安妮 AP 主线首件=残疫(2700)，身上双组件(章节1200+魔杖850)、现金250
+    # → 差价 400（≤500）且无未拥有组件 → 可攒
+    s5.on_snapshot(full_snap("Annie", [(cn, 2, 2, 2) for cn in balanced],
+                             [(cn, 2, 2, 2, []) for cn in foe_mix],
+                             my_items=["遗失的章节", "爆裂魔杖"], my_gold=250))
+    check("攒钱附注随建议渲染（可攒分支）",
+          s5.suggestion.kind == "next_items"
+          and s5.suggestion.note.startswith("💰")
+          and "可攒" in s5.suggestion.note
+          and "💰" in s5.suggestion.render(),
+          s5.suggestion.note)
+    check("攒钱提醒入军师滚动列表",
+          any("可攒" in c["text"] for c in s5.coach_notes),
+          str([c["text"] for c in s5.coach_notes]))
+    st5 = s5.ui_state()
+    check("ui_state 军师字段",
+          "coach" in st5 and "coach_latest" in st5 and st5["coach"]
+          and st5["coach_latest"] == st5["coach"][-1]["text"]
+          and len(st5["coach"]) <= 3)
+
+    # ---- System1：军师上下文进 prompt + 可选 coach 字段解析 ----
+    from hexa.ai import system1
+
+    class _CoachClient:
+        configured = True
+        usage = UsageStats()
+
+        def __init__(self):
+            self.user = ""
+
+        def chat(self, system, user, max_tokens=None, json_mode=True):
+            self.user = user
+            return ('{"picks": [{"name": "星蚀", "reason": "r"}],'
+                    ' "coach": "逆风先保命，魔抗优先"}', {})
+
+    system1.set_coach_context(["己方阵容缺前排", "敌方缺物伤，魔抗收益更高"])
+    cc = _CoachClient()
+    picks = system1.suggest_next(cc, None, ["长剑"], 900, "ad", "威胁", [],
+                                 [_Cand("星蚀", "r", price=3200)])
+    check("军师上下文进 System1 prompt",
+          "军师提示" in cc.user and "缺前排" in cc.user and "魔抗" in cc.user)
+    check("System1 coach 字段解析（≤30字）",
+          system1.last_coach() == "逆风先保命，魔抗优先"
+          and picks and picks[0]["name"] == "星蚀",
+          system1.last_coach())
+    system1.set_coach_context([])
+    system1.clear_coach()
+
+    # ---- System1 prompt 强化回归：格式下放/价格/路线/敌方明细 ----
+    # 曾在 SYSTEM_PROMPT 全局写死 picks JSON 契约，与 rank_augments 的
+    # grades 契约互斥——flash 档模型服从 system 格式时评级精修静默回落
+    class _Cap:
+        configured = True
+        usage = UsageStats()
+
+        def __init__(self):
+            self.system = self.user = ""
+
+        def chat(self, system, user, max_tokens=None, json_mode=True):
+            self.system, self.user = system, user
+            return ('{"picks": [{"name": "星蚀", "reason": "r"}]}', {})
+
+    from hexa.ai import system2 as _s2c
+    check("SYSTEM_PROMPT 不含 picks 契约（已下放各任务 user prompt）",
+          '"picks"' not in system1.SYSTEM_PROMPT
+          and "《输出格式》" in system1.PICKS_FORMAT)
+    ctx_r = _s2c.ChampionContext(
+        {"augment_affinity": [], "opening_items": [],
+         "build_paths": {"ad": {"items": ["星蚀"], "skill_order": "主Q副E",
+                                "note": "poke 局先穿甲"}},
+         "augment_item_links": []}, "暗裔剑魔")
+    cap = _Cap()
+    system1.suggest_next(cap, ctx_r, ["长剑"], 900, "ad", "威胁", [],
+                         [_Cand("星蚀", "r", price=3200)],
+                         enemy=["黑暗之女(ap)"])
+    check("输出格式在 user prompt、system 不再写死",
+          "《输出格式》" in cap.user and '"picks"' not in cap.system)
+    check("候选行带价格（金币判断有依据）",
+          "3200G" in cap.user, cap.user[-200:])
+    check("路线规划进 prompt（ctx 死参数接上）",
+          "本局路线规划" in cap.user and "poke 局先穿甲" in cap.user)
+    check("敌方明细进 prompt（死管道复活）",
+          "敌方明细" in cap.user and "黑暗之女(ap)" in cap.user)
+    cap2 = _Cap()
+    system1.rank_augments(cap2, ctx_r, "暗裔剑魔", ["贪欲束缚"], [], [],
+                          "威胁", [{"name": "贪欲束缚", "grade": "A",
+                                    "reason": "r"}],
+                          enemy=["盲僧(ad)"])
+    check("评级契约独立声明（system 无 picks 契约干扰）+ 敌方进评级语境",
+          '"grades"' in cap2.user and '"picks"' not in cap2.system
+          and "敌方：盲僧(ad)" in cap2.user)
+
+    # ---- AI coach 覆盖规则军师文案（会话级端到端） ----
+    import json as _json
+    hero = "暗裔剑魔"
+    top8 = kb.top_augments(hero, 8)
+    pool_a = kb.core_item_pool(hero) or ["长剑"]
+    ctx2 = _json.dumps({
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "t"} for n in top8],
+        "opening_items": [{"combo": pool_a[:1], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "build_paths": {"ad": {"items": pool_a[:3], "skill_order": "主Q副E",
+                               "note": "主线"}},
+        "component_rules": [], "augment_item_links": []})
+    s6 = GameSession(kb, rules)
+    eng6, _c16, _c26 = build_ai_engine(
+        script_s2=[ctx2],
+        script_s1=[_json.dumps({"picks": [
+            {"name": pool_a[0], "reason": "AI 版本答案"}],
+            "coach": "AI军师：先出核心再补抗性"})])
+    s6.engine = eng6
+    eng6.bind(s6._on_engine_result)
+    s6.on_game_start({"ally": all_ad, "enemy": enemy_ap, "my_hero": hero,
+                      "source": "test"})
+    s6.on_in_progress()
+    deadline = time.time() + 6
+    while eng6.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    s6.on_snapshot(full_snap("Aatrox", ally_rows, foe_rows,
+                             my_items=["长剑"], my_gold=900))
+    deadline = time.time() + 6
+    while s6.suggestion.source != "ai" and time.time() < deadline:
+        time.sleep(0.02)
+    check("AI coach 覆盖最新军师文案",
+          s6.suggestion.source == "ai" and s6.coach_notes
+          and s6.coach_notes[-1]["text"] == "AI军师：先出核心再补抗性",
+          str([c["text"] for c in s6.coach_notes]))
+    # AI 精修文案打 src="ai" 标记后不再回注 System1 prompt（防自反馈回路：
+    # 模型把自己的旧话当"规则层判断"越滚越偏）
+    s6._set_coach_context()
+    check("AI coach 不回注 prompt",
+          all("AI军师" not in t for t in system1.coach_context()),
+          str(system1.coach_context()))
+
+
+# ── 9. 成型度对比 + F9 撤销（v4.6） ──────────────────────────────
+
+def test_build_progress():
+    print("\n[9] 成型度对比（六神装进度）+ F9 撤销最近记账")
+    # 我在首位（full_snap 约定：首位=我，配 my_items/my_hero）
+    ally5 = ["暗裔剑魔", "牛头酋长", "殇之木乃伊", "影哨", "九尾妖狐"]
+    foe5 = ["盲僧", "放逐之刃", "诺克萨斯之手", "狂暴之心", "诡术妖姬"]
+    legend2 = ["灭世者的死亡之帽", "虚空之杖"]   # 双传说件成型对照
+    legend2_gold = sum(kb.items[n]["gold"] for n in legend2)
+    session = GameSession(kb, rules)
+    session.on_game_start({"ally": ally5, "enemy": foe5,
+                           "my_hero": "暗裔剑魔", "source": "test"})
+    session.on_in_progress()
+    session.on_snapshot(full_snap(
+        "Aatrox", [(cn, 2, 2, 2) for cn in ally5],
+        [("盲僧", 2, 2, 2, legend2),
+         ("放逐之刃", 2, 2, 2, ["生命药水", "多兰之刃"]),   # 药水=消耗品对照
+         ("诺克萨斯之手", 2, 2, 2, []),
+         ("狂暴之心", 2, 2, 2, []),
+         ("诡术妖姬", 2, 2, 2, [])],
+        my_items=["长剑"], my_gold=0))
+    bp = session.ui_state().get("build_progress")
+    rows = {r["name"]: (r["legendary"], r["gold"])
+            for r in (bp or {}).get("enemy", [])}
+    # 传说件计数 x/6 + 装备估值=DD 总价；药水不占格不计值（多兰之刃照算）
+    check("成型度：传说件计数与装备估值",
+          bp is not None
+          and rows.get("盲僧") == (2, legend2_gold)
+          and rows.get("放逐之刃") == (0, kb.items["多兰之刃"]["gold"]),
+          str(rows))
+    # 敌我分组齐全 + 行内成型度降序 + 返回值深拷贝（改了不脏会话）
+    order = [(r["legendary"], r["gold"]) for r in bp["enemy"]]
+    bp["ally"][0]["legendary"] = 99
+    check("ui_state 成型度字段（敌我分组/降序/深拷贝）",
+          set(bp) == {"ally", "enemy"}
+          and sorted(r["name"] for r in bp["ally"]) == sorted(ally5)
+          and len(bp["enemy"]) == 5
+          and order == sorted(order, reverse=True)
+          and session.ui_state()["build_progress"]["ally"][0]["legendary"] != 99,
+          str(order))
+    # 快照未到（待机/装备数据缺失）→ None 占位，UI 按占位渲染不报错
+    check("无快照时成型度占位 None",
+          GameSession(kb, rules).ui_state()["build_progress"] is None)
+
+    # F9 撤销最近一条（app.py 热键入口）：按台账末条撤；空台账安全返回 None
+    session.record_augment(REAL_AUG)
+    other = sorted(kb.augment_names)[1]
+    session.record_augment(other)
+    check("F9 撤销最近一条（revoke_latest_augment）",
+          session.revoke_latest_augment() == other
+          and [a["name"] for a in session.augments] == [REAL_AUG]
+          and session.revoke_latest_augment() == REAL_AUG
+          and session.revoke_latest_augment() is None,
+          str([a["name"] for a in session.augments]))
 
 
 # ── 7. Review 修复回归（P0 闩锁 / epoch 代际 / 双触发 / 排序 / 单位） ──
@@ -1166,6 +1733,18 @@ def test_review_fixes():
         print("stats() 异常:", e)
     check("stats 空价格回退默认", ok, str(st_stats.get("cost_game")))
 
+    # -- P1 回归：build_engine 两槽位用量独立计量（曾共享一份 UsageStats，
+    #    stats() 会把同一份 tokens 按两套单价各算一遍，费用虚高近一倍） --
+    from hexa.ai.engine import build_engine as _build_engine
+    st_be = FakeSettings()
+    for _slot in ("system1", "system2"):   # 槽位配好 Key 才会走 AI 分支
+        st_be.set(_slot, "api_key", "smoke-key")
+    eng_be = _build_engine(kb, rules, st_be)
+    check("build_engine 两槽位用量独立",
+          eng_be.mode == "ai"
+          and eng_be.client_s1.usage is not eng_be.client_s2.usage,
+          eng_be.mode)
+
     # -- Settings.get_float：空串/非法值/缺失键均回退默认 --
     import tempfile as _tempfile
     from pathlib import Path as _Path
@@ -1329,6 +1908,9 @@ if __name__ == "__main__":
     test_ai_engine()
     test_ai_inflight()
     test_session_ai_serial()
+    test_swap_mode()
+    test_coach_save_gap()
+    test_build_progress()
     test_review_fixes()
     test_thinking_params()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")

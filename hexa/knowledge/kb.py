@@ -217,6 +217,9 @@ class KnowledgeBase:
                 "id": _iid,
                 "tags": it.get("tags", []),
                 "gold": (it.get("gold") or {}).get("total", 0),
+                # 卖出价（DD gold.sell，实测全量条目都带）：满六神装后
+                # "卖X换Y"的差价核算依据（v4.4 替换建议）
+                "sell": (it.get("gold") or {}).get("sell", 0),
                 "plaintext": it.get("plaintext", ""),
                 "from": it.get("from", []) or [],   # 组件 item id 列表
                 "into": it.get("into", []) or [],   # 升级目标 item id 列表
@@ -318,6 +321,24 @@ class KnowledgeBase:
 
     def valid_augment(self, name: str) -> bool:
         return name in self.augment_names
+
+    def item_sell_price(self, name: str) -> int:
+        """装备卖出价（DD gold.sell；未知装备 0）。替换建议差价核算用"""
+        return self.items.get(name, {}).get("sell", 0)
+
+    def permanent_items(self, names: list) -> list:
+        """过滤消耗品/饰品后的占格装备名列表（满六神装判定用）。
+
+        大乱斗虽无饰品位，药水等消耗品会临时占格，数格前须排除；
+        库外名（DD 版本滞后于游戏的新装备）按占格保留——宁可多判
+        满装走替换流，也不漏判后继续推买不进的"下一件"。
+        """
+        out = []
+        for n in names:
+            info = self.items.get(n)
+            if info is None or not ({"Consumable", "Trinket"} & set(info["tags"])):
+                out.append(n)
+        return out
 
     # ── OP.GG builds 查询（P1：候选池升级为高频装） ─────────────────
 

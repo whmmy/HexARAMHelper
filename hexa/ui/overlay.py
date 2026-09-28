@@ -79,12 +79,16 @@ class Overlay:
             self.win.attributes("-alpha", 0.88)
         except Exception:
             pass
-        # 右侧居中贴边（高度按内容上限；时刻块出现时内容变长，留足空间）
+        # 右侧居中贴边（高度按内容自适应，见 _fit_height；此处为初始/下限值）
         self.win.update_idletasks()
         screen_w = self.win.winfo_screenwidth()
         screen_h = self.win.winfo_screenheight()
         h = min(round(BASE_HEIGHT * scale), screen_h - 40)
-        self.win.geometry(f"{self.w}x{h}+{screen_w - self.w - 12}+{(screen_h - h) // 2}")
+        self._default_h = h        # 内容不足时的高度下限（原固定默认值）
+        self._screen_h = screen_h
+        self._x = screen_w - self.w - 12
+        self._h = h
+        self.win.geometry(f"{self.w}x{h}+{self._x}+{(screen_h - h) // 2}")
 
     def _top_hwnd(self) -> int:
         """真实顶层 HWND：winfo_id 是 Tk 内层窗口，须取 GA_ROOT（回退 GetParent）"""
@@ -119,6 +123,12 @@ class Overlay:
                                  font=("Microsoft YaHei", self.f_hero, "bold"),
                                  bg=BG, fg=ACCENT)
         self.lbl_hero.pack(**pad)
+        # 军师提示（v4.5）：顶部显著位置（英雄行正下方），最新一条
+        self.lbl_coach = tk.Label(self.win, text="",
+                                  font=("Microsoft YaHei", self.f_body, "bold"),
+                                  bg=BG, fg=GOOD, justify=tk.LEFT,
+                                  wraplength=wrap)
+        self._coach_shown = False   # 未 pack；显示时插到路线行之前（置顶区）
         self.lbl_path = tk.Label(self.win, text="", font=("Microsoft YaHei", self.f_body),
                                  bg=BG, fg=FG_DIM)
         self.lbl_path.pack(**pad)
@@ -169,6 +179,12 @@ class Overlay:
                                    font=("Microsoft YaHei", self.f_body),
                                    bg=BG, fg=WARN, justify=tk.LEFT, wraplength=wrap)
         self.lbl_threat.pack(**pad)
+        # 满装替换预告（威胁 vs 已有装备错配时显示；提示级，不改主建议）
+        self.lbl_forecast = tk.Label(self.win, text="",
+                                     font=("Microsoft YaHei", self.f_small),
+                                     bg=BG, fg=WARN, justify=tk.LEFT,
+                                     wraplength=wrap)
+        self._forecast_shown = False
 
     def sep(self, pady):
         tk.Frame(self.win, height=1, bg="#21262d").pack(fill=tk.X,
@@ -182,6 +198,7 @@ class Overlay:
         stage = {"idle": "", "champ_select": "·选人", "game_start": "·加载",
                  "in_game": "·对局中"}.get(state["stage"], "")
         self.lbl_hero.config(text=hero + stage)
+        self._render_coach(state.get("coach_latest") or "")
         path = state["current_path"].upper()
         if state["path_drift"]:
             path += "（装备偏离已重定）" if path else ""
@@ -193,9 +210,57 @@ class Overlay:
             text="\n".join(f"{i+1}. {a}" for i, a in enumerate(augs)) or "-")
         self.lbl_threat.config(text=state["threat"] or "-")
         self.lbl_suggest.config(text=state["suggestion"] or "对局内自动触发")
+        # 满六神装替换建议视觉区分：琥珀色（普通"下一件"为常规前景色）
+        self.lbl_suggest.config(
+            fg=WARN if state.get("suggestion_kind") == "swap_items" else FG)
+        self._render_forecast(state.get("swap_forecast") or "")
         self._render_ai_busy(state.get("engine") or {})
         self._render_moment(state)
+        self._fit_height()
         self.win.after(500, self._refresh)
+
+    def _fit_height(self):
+        """按内容动态调窗高。原固定 min(560*scale, 屏-40) 不随内容伸缩，
+        军师/替换预告叠上时刻块+4 行 swap 建议后 1440p 最坏 ~604px 超窗，
+        底部"替换预告/敌方威胁"面板被 pack 挤到不可见（winfo_ismapped=False）。
+        取内容所需高度与默认值较大者再夹到屏幕内：内容不足不小于原默认，
+        高度无变化不重设 geometry（防 500ms 轮询抖动）。"""
+        try:
+            self.win.update_idletasks()   # 刷新 label 文本/显隐后再量所需高度
+            want = self.win.winfo_reqheight()
+        except Exception:
+            return
+        h = min(max(want, self._default_h), self._screen_h - 40)
+        if h > 0 and h != self._h:
+            self._h = h
+            y = max(0, (self._screen_h - h) // 2)
+            self.win.geometry(f"{self.w}x{h}+{self._x}+{y}")
+
+    def _render_coach(self, text: str):
+        """军师提示行：最新一条显示在顶部（英雄行下、路线行上），空则收起"""
+        if text:
+            self.lbl_coach.config(text="🧠 军师：" + text)
+            if not self._coach_shown:
+                # before= 固定插入位置：重新 pack 不会跑到内容区末尾
+                self.lbl_coach.pack(before=self.lbl_path,
+                                    padx=self.pad_x, pady=self.pad_y,
+                                    anchor="w")
+                self._coach_shown = True
+        elif self._coach_shown:
+            self.lbl_coach.pack_forget()
+            self._coach_shown = False
+
+    def _render_forecast(self, text: str):
+        """替换预告行：有错配提示时显示在威胁块下方，无则收起"""
+        if text:
+            self.lbl_forecast.config(text="⚠ 替换预告: " + text)
+            if not self._forecast_shown:
+                self.lbl_forecast.pack(padx=self.pad_x, pady=self.pad_y,
+                                       anchor="w")
+                self._forecast_shown = True
+        elif self._forecast_shown:
+            self.lbl_forecast.pack_forget()
+            self._forecast_shown = False
 
     def _render_ai_busy(self, engine_stats):
         """AI 在途生成标识：System1 精修（inflight>0）或 System2 上下文生成中"""
@@ -213,13 +278,18 @@ class Overlay:
         """海克斯时刻：识别状态标识 + 三卡片档位（S 绿 / A 蓝 / B 白 / C 黄）
 
         状态流转（多局零识别成功曾无从判断，全程可见）：
-        界面在屏未识别 → "⏳ 识别中…"；识别成功 → 标题 ✓、点选卡标 ✓已选；
-        reroll → "⏳ 重扫中…"；界面关闭 → 保留上轮 成功✓/失败✗ 一行。
+        界面在屏未识别 → "⏳ 识别中…"；识别成功 → 标题 ✓、点选卡按卡名标 ✓已选
+        （AI 精修可能重排三卡，按下标会标错行）；reroll/新轮识别复位 →
+        上一轮旧评级直接丢弃并回"识别中"；界面关闭 → 保留上轮 成功✓/失败✗ 一行。
         """
         ranks = state.get("card_ranks") or []
         active = state.get("hex_active", False)
         last = state.get("hex_last", "")
         picked = state.get("hex_picked")
+        if active and not state.get("hex_recognized"):
+            # reroll/新轮已把识别复位但 card_ranks 未清（game_state 保留旧值），
+            # 此时在屏的评级必是上一轮旧卡名，直接丢弃防错位显示
+            ranks = []
         if not ranks and not active and not last:
             if self.lbl_moment.winfo_ismapped() or self._moment_shown:
                 self.lbl_moment.pack_forget()
@@ -228,12 +298,14 @@ class Overlay:
         if ranks:
             lines = ["── 海克斯时刻 ✓已识别 ──"
                      if state.get("hex_recognized") else "── 海克斯时刻 ──"]
+            # "✓已选"按稳定身份（卡名）匹配：hex_picked=(idx, name) 的 name
+            # 与评级条目 name 同源于检测卡名，模型重排后仍能标对行
+            picked_name = picked[1] if picked and len(picked) > 1 else ""
             for i, r in enumerate(ranks[:3], 1):
-                mark = " ✓已选" if picked and picked[0] == i - 1 else ""
+                mark = (" ✓已选"
+                        if picked_name and r.get("name") == picked_name else "")
                 lines.append(f"{'①②③'[i-1]} [{r.get('grade', '?')}] "
                              f"{r.get('name', '?')}  {r.get('reason', '')}{mark}")
-            if not state.get("hex_recognized"):
-                lines.append("⏳ 重扫中…")
             text = "\n".join(lines)
             fg = GRADE_COLOR.get(ranks[0].get("grade", "?"), ACCENT)
         elif active:

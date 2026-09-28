@@ -9,14 +9,25 @@
 OCR 连续失配 = UI 漂移/改版 → on_calibrate_hint 提示重标定，不默默推错。
 模板匹配（cv2.matchTemplate）退为预热加速与 OCR 异常兜底。
 
+游戏窗口定位（窗口化/副屏适配）：ctypes FindWindow 查游戏窗口（类名
+"Riot Window" + 标题 "League of Legends (TM) Client"，EnumWindows 模糊
+兜底）→ GetClientRect + ClientToScreen 取客户区屏幕矩形。客户区 ≠ 主屏
+整屏覆盖时：截屏改 mss 区域抓取（left/top/width/height 绝对坐标，副屏
+可为负），Layout 按客户区尺寸换算并绑定原点偏移（to_pixels 默认输出
+屏幕坐标供鼠标记账直读；canvas=True 输出画布坐标供截屏帧裁剪）；查不
+到窗口（独占全屏等）回退 monitors[1] 整屏行为，打一行 [INFO]。
+
 区域坐标（Layout）：默认层 = 16:9 百分比常量（2560x1440 真机实测值，
-media/analysis/ 可复现）；加载时把横向偏移换算为「高度基准 + 屏幕中心
-锚定」单位（H 相对量），16:10/21:9/32:9 兜得住；标定结果按分辨率存
-calibrations/{W}x{H}.json（gitignore 排除，用户屏幕专属）；自动标定 =
+media/analysis/ 可复现）；加载时把横向偏移换算为「高度基准 + 画布中心
+锚定」单位（H 相对量），16:10/21:9/32:9 兜得住；标定结果按画布分辨率存
+calibrations/{W}x{H}.json（整屏=屏幕分辨率，窗口化=客户区尺寸；gitignore
+排除，用户屏幕专属）；自动标定 =
 中央横带全量 OCR 找三组海克斯标题聚类 → 几何校验 → 按实测锚点推导
 （cards 覆盖含卡名的完整卡框；刷新按钮每卡一个共 3 个）。
 界面活跃期还会自愈：未标定直接落标定，已标定检测到名行漂移自动重标。
 """
+import ctypes
+import ctypes.wintypes   # Win32 窗口定位用（本项目 Windows 专属，同 mouse_ledger）
 import json
 import threading
 import time
@@ -55,14 +66,18 @@ _SAVE_LOCK = threading.Lock()
 class Layout:
     """区域布局：内部以「高度相对量 + 中心锚定」存储，适配任意宽高比。
 
-    存储单元：x 用相对屏幕中心的 H 偏移（xu = (fx-0.5)*16/9），
-    y/w/h 用 H 相对量（w 预乘 16/9）。to_pixels 时：
+    存储单元：x 用相对画布中心（整屏=屏幕 / 窗口化=客户区）的 H 偏移
+    （xu = (fx-0.5)*16/9），y/w/h 用 H 相对量（w 预乘 16/9）。to_pixels 时：
       px_x = W/2 + xu*H ; px_y = y*H ; px_w = wu*H ; px_h = h*H
+    （W/H = 画布尺寸；已绑定窗口时再加客户区原点偏移成屏幕坐标）
     """
 
     def __init__(self, data: dict = None, source: str = "default"):
         d = data or DEFAULT_LAYOUT_169
         self.source = source
+        # 游戏窗口几何绑定（窗口化/副屏适配）：ScreenDetector 每 tick 刷新；
+        # 绑定后 to_pixels 以客户区尺寸换算并加原点偏移输出屏幕坐标
+        self.window = None   # (origin_x, origin_y, w, h) | None
         rerolls = self._rerolls_of(d)
         if d.get("units") == "h":
             # 自动标定按真实分辨率直接换算的 H 单位（任意宽高比精确）
@@ -97,12 +112,35 @@ class Layout:
         xu, y, wu, h = r
         return [xu / ASPECT_169 + 0.5, y, wu / ASPECT_169, h]
 
-    def to_pixels(self, screen_w: int, screen_h: int):
+    def bind_window(self, geom):
+        """绑定游戏窗口客户区几何 (origin_x, origin_y, w, h)；None 解绑。
+
+        绑定后 to_pixels 默认输出屏幕坐标（原点加到 x/y）——MouseLedger 的
+        屏幕落点/卡片矩形映射直读；canvas=True 输出画布坐标（客户区左上
+        为原点）——检测线程对截屏帧裁剪用。"""
+        self.window = tuple(int(v) for v in geom) if geom else None
+
+    def to_pixels(self, w: int = None, h: int = None, *, canvas: bool = False):
+        """比例矩形 → 像素矩形（title_bands/cards/rerolls 三组）。
+
+        未绑定窗口（整屏模式）：w/h = 屏幕分辨率，输出屏幕坐标（原点 0,0）。
+        已绑定窗口：画布 = 客户区尺寸，绑定值优先于入参——旧调用方
+        （app.py 闭包）捕获的是启动时屏幕分辨率，窗口化后已过期，被绑定
+        值覆盖才能保证卡片矩形与鼠标落点不错位。
+        canvas=True：返回画布坐标（不加原点偏移），供截屏帧裁剪。"""
+        win = self.window   # 一次快照：bind_window 会被检测线程并发刷新
+        if win:
+            ox, oy, w, h = (0, 0, win[2], win[3]) if canvas else win
+        else:
+            ox, oy = 0, 0
+        if not w or not h:
+            raise ValueError("to_pixels 缺画布尺寸：未绑定窗口且未传 w/h")
+
         def conv(r):
-            xu, y, wu, h = r
-            x = int(screen_w / 2 + xu * screen_h)
-            yy = int(y * screen_h)
-            return [x, yy, int(wu * screen_h), int(h * screen_h)]
+            xu, ry, wu, rh = r
+            x = int(w / 2 + xu * h) + ox
+            yy = int(ry * h) + oy
+            return [x, yy, int(wu * h), int(rh * h)]
         return {"title_bands": [conv(r) for r in self.title_bands],
                 "cards": [conv(r) for r in self.cards],
                 "rerolls": [conv(r) for r in self.rerolls]}
@@ -144,6 +182,84 @@ def save_layout(screen_w: int, screen_h: int, regions: dict, confidence: float):
 def point_in_rect(x: int, y: int, rect) -> bool:
     rx, ry, rw, rh = rect
     return rx <= x < rx + rw and ry <= y < ry + rh
+
+
+# ── 游戏窗口定位（窗口化/副屏适配；纯 Win32 只读查询，不注入不拦截） ──
+
+GAME_WINDOW_CLASS = "Riot Window"                    # LOL 游戏内主窗口类名
+GAME_WINDOW_TITLE = "League of Legends (TM) Client"  # 窗口化时的标题栏标题
+GAME_MIN_CLIENT = (640, 480)   # 客户区最小可信尺寸（游戏内最小 1024x576，
+                               # 低于此 = 异常状态，按未找到窗口回退整屏）
+
+
+def find_game_window():
+    """查找游戏窗口 → hwnd | None。FindWindow 类名+标题精确匹配优先；
+    查不到再 EnumWindows 按「类名 Riot Window + 标题含 League of
+    Legends」模糊兜底（标题被录屏/挂件工具改写过的场景）。"""
+    user32 = ctypes.windll.user32
+    hwnd = user32.FindWindowW(GAME_WINDOW_CLASS, GAME_WINDOW_TITLE)
+    if hwnd:
+        return hwnd
+    found = []
+
+    # 回调引用必须存活到 EnumWindows 返回（ctypes 不保管局部 CFUNCTYPE）
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND,
+                        ctypes.wintypes.LPARAM)
+    def _on_enum(h, _lparam):
+        if not user32.IsWindowVisible(h):   # 只看可见顶层窗口
+            return True
+        cls = ctypes.create_unicode_buffer(64)
+        user32.GetClassNameW(h, cls, 64)
+        if cls.value != GAME_WINDOW_CLASS:
+            return True
+        title = ctypes.create_unicode_buffer(128)
+        user32.GetWindowTextW(h, title, 128)
+        if "League of Legends" in title.value:
+            found.append(h)
+            return False                    # 找到即停
+        return True
+
+    user32.EnumWindows(_on_enum, 0)
+    return found[0] if found else None
+
+
+def game_window_geometry():
+    """游戏窗口客户区的屏幕矩形 (origin_x, origin_y, w, h) | None。
+
+    用客户区而非 GetWindowRect 全窗矩形：窗口化的标题栏/边框不属于游戏
+    画面，截屏画布与卡片坐标都必须以客户区为基准（GetClientRect 的
+    left/top 恒 0，原点用 ClientToScreen(0,0) 换算成屏幕坐标）。进程已
+    SetProcessDpiAwareness(1)（app.py），Win32 返回物理像素，与 mss 抓
+    屏/GetCursorPos 同一坐标系。最小化（IsIconic）或客户区过小 = 不可
+    用，按未找到处理（调用方回退整屏）。"""
+    hwnd = find_game_window()
+    if not hwnd:
+        return None
+    user32 = ctypes.windll.user32
+    if user32.IsIconic(hwnd):
+        return None
+    rc = ctypes.wintypes.RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(rc)):
+        return None
+    cw, ch = rc.right - rc.left, rc.bottom - rc.top
+    if cw < GAME_MIN_CLIENT[0] or ch < GAME_MIN_CLIENT[1]:
+        return None
+    pt = ctypes.wintypes.POINT(0, 0)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(pt)):
+        return None
+    return (pt.x, pt.y, cw, ch)
+
+
+def capture_region(origin_x: int, origin_y: int, w: int, h: int) -> dict:
+    """画布原点+尺寸 → mss 区域抓屏参数。绝对屏幕坐标可为负（副屏在
+    主屏左侧时窗口原点为负——mss 按虚拟桌面坐标处理，负值合法）。"""
+    return {"left": int(origin_x), "top": int(origin_y),
+            "width": int(w), "height": int(h)}
+
+
+def is_fullscreen_cover(geom, screen_w: int, screen_h: int) -> bool:
+    """客户区是否恰好整屏覆盖主屏（无边框全屏 → 等价独占，走 monitors[1]）"""
+    return tuple(geom) == (0, 0, int(screen_w), int(screen_h))
 
 
 # ── 纯逻辑状态机（离线可测） ─────────────────────────────────────────
@@ -298,10 +414,18 @@ class ScreenDetector(threading.Thread):
         self._tpl_loaded = False          # 懒加载一次
         self._auto_calib_tries = 0        # 本活跃期自愈标定尝试次数（≤3）
         self._auto_calib_done = False     # 本活跃期自愈标定已成功
+        self._window = None               # 游戏窗口客户区几何（本 tick 生效）
+        self._mode_logged = None          # 抓屏模式日志去重（window/screen）
+        self._canvas_loaded = None        # 当前画布尺寸（变更时重读标定/模板）
 
     # ── 控制 ──────────────────────────────────────────────────────
 
     def set_layout(self, layout: Layout):
+        # 窗口几何绑定跨 set_layout 保持：自动标定会换新 Layout 对象，
+        # 不继承绑定的话 app.py 侧 to_pixels 立刻退回整屏坐标 → 记账错位
+        if layout is not None and self.layout is not None \
+                and self.layout.window and layout is not self.layout:
+            layout.window = self.layout.window
         self.layout = layout
 
     def pause(self):
@@ -317,24 +441,74 @@ class ScreenDetector(threading.Thread):
     def stop(self):
         self._running = False
 
+    # ── 游戏窗口几何（窗口化/副屏适配） ──────────────────────────
+
+    def _refresh_geometry(self):
+        """每 tick 重查游戏窗口 → 绑定客户区几何；查不到回退整屏。
+
+        - 找到窗口且客户区 ≠ 主屏整屏覆盖（窗口化/副屏/异尺寸）→ 绑定
+          几何，截屏走 mss 区域抓取，坐标按客户区换算；
+        - 恰好整屏覆盖（无边框全屏）或查不到窗口（独占全屏/已退出/查询
+          异常）→ 回退 monitors[1] 整屏行为，模式切换时打一行 [INFO]
+          （不每 tick 刷屏）。
+        - 画布尺寸变化（窗口化↔全屏/改窗口大小）→ 按画布分辨率重读标定
+          与模板（{W}x{H}.json 机制不变），自愈标定预算重置（换画布 = 全新
+          标定问题，旧尝试次数不作数）。
+        """
+        geom, err = None, None
+        try:
+            geom = game_window_geometry()
+        except Exception as e:  # noqa: BLE001 —— Win32 查询异常按未找到处理
+            err = e
+        mode = "screen"
+        if geom:
+            pw, ph = self._primary_size()
+            if not is_fullscreen_cover(geom, pw, ph):
+                mode = "window"
+            else:
+                geom = None   # 整屏覆盖：与独占全屏等价，走 monitors[1]
+        self._window = geom
+        if self.layout is not None:
+            self.layout.bind_window(geom)
+            canvas = self._screen_size()
+            if canvas != self._canvas_loaded:
+                self.set_layout(load_layout(*canvas))
+                self._tpl_loaded = False   # 模板按画布分辨率存档，缓存作废
+                self._tpl = None
+                self._auto_calib_tries = 0
+                self._auto_calib_done = False
+                self._canvas_loaded = canvas
+        if mode != self._mode_logged:
+            self._mode_logged = mode
+            if mode == "window":
+                ox, oy, w, h = geom
+                print(f"[INFO] 游戏窗口模式：客户区 {w}x{h} @({ox},{oy})，"
+                      "截屏/坐标按窗口客户区换算")
+            else:
+                print("[INFO] 未找到独立游戏窗口（独占全屏或已退出），"
+                      f"按主屏整屏识别{('：' + str(err)) if err else ''}")
+
     # ── 截屏 ──────────────────────────────────────────────────────
 
     def _grab(self, screen=None):
-        """主屏全帧 → BGR ndarray。screen 可传独立 mss 实例（标定线程用，
+        """当前画布全帧（窗口模式 = 客户区区域抓取；整屏 = monitors[1]）
+        → BGR ndarray。screen 可传独立 mss 实例（标定线程用，
         mss 非线程安全，检测线程实例加锁自用）。"""
         import mss
         import numpy
+        region = capture_region(*self._window) if self._window else None
         if screen is not None:
-            shot = screen.grab(screen.monitors[1])
+            shot = screen.grab(region or screen.monitors[1])
         else:
             with self._grab_lock:
                 if self._screen is None:
                     self._screen = mss.mss()
-                shot = self._screen.grab(self._screen.monitors[1])
+                shot = self._screen.grab(region or self._screen.monitors[1])
         img = numpy.asarray(shot)
         return img[:, :, :3][:, :, ::-1].copy()  # BGRA→BGR
 
-    def _screen_size(self):
+    def _primary_size(self):
+        """主屏物理分辨率（整屏回退的画布；全屏覆盖判定基准）"""
         with self._grab_lock:
             if self._screen is None:
                 import mss
@@ -342,10 +516,21 @@ class ScreenDetector(threading.Thread):
             mon = self._screen.monitors[1]
         return mon["width"], mon["height"]
 
+    def _screen_size(self):
+        """当前画布尺寸：窗口模式 = 客户区尺寸，整屏模式 = 主屏分辨率。
+        标定/模板文件按画布分辨率存档（机制不变，窗口化自动换档）。"""
+        if self._window:
+            return self._window[2], self._window[3]
+        return self._primary_size()
+
     def _grab_bands(self, band_rects) -> list:
-        """只截 3 个标题条小图（非活跃期省掉全屏 14MB 拷贝）→ BGR ndarray 列表"""
+        """只截 3 个标题条小图（非活跃期省掉全屏 14MB 拷贝）→ BGR ndarray 列表。
+
+        band_rects 是画布坐标；窗口模式加客户区原点 → 屏幕绝对坐标区域抓
+        取（原点可为负——副屏在主屏左侧，不能往 0 截，截 0 会错位到主屏）。"""
         import mss
         import numpy
+        ox, oy = (self._window[0], self._window[1]) if self._window else (0, 0)
         strips = []
         with self._grab_lock:
             if self._screen is None:
@@ -353,9 +538,8 @@ class ScreenDetector(threading.Thread):
             for band in band_rects:
                 x, y, w, h = band
                 shot = self._screen.grab({
-                    "top": max(0, int(y)), "left": max(0, int(x)),
-                    "width": max(1, int(w)), "height": max(1, int(h)),
-                    "mon": 1})
+                    "top": int(y + oy), "left": int(x + ox),
+                    "width": max(1, int(w)), "height": max(1, int(h))})
                 strips.append(numpy.asarray(shot)[:, :, :3][:, :, ::-1].copy())
         return strips
 
@@ -463,7 +647,10 @@ class ScreenDetector(threading.Thread):
         if self.layout is None or not self.ocr.available:
             return
         self._tick_count += 1
-        regions = self.layout.to_pixels(*self._screen_size())
+        self._refresh_geometry()
+        # 画布坐标（窗口模式相对客户区左上）——截屏帧裁剪用；屏幕坐标
+        # （含原点偏移）由 to_pixels 默认输出给 app.py 的记账矩形
+        regions = self.layout.to_pixels(*self._screen_size(), canvas=True)
 
         # ── 非活跃期：小图模板预筛，命中/盲扫帧才 OCR ──────────────
         if self.core.state != "active":
@@ -492,7 +679,7 @@ class ScreenDetector(threading.Thread):
                 and self._auto_calib_tries < self.AUTO_CALIB_TRIES:
             self._auto_calib_tries += 1
             self._auto_calibrate_frame(frame)
-            regions = self.layout.to_pixels(sw, sh)
+            regions = self.layout.to_pixels(sw, sh, canvas=True)
 
         card_texts, any_text = self._ocr_cards(frame, regions["cards"],
                                                prev_texts=self.core.last_content)
@@ -529,7 +716,8 @@ class ScreenDetector(threading.Thread):
                 self._auto_calib_done = False
                 try:
                     frame = self._grab()
-                    regions = self.layout.to_pixels(*self._screen_size())
+                    regions = self.layout.to_pixels(*self._screen_size(),
+                                                    canvas=True)
                     self._save_templates(frame, regions)
                 except Exception:
                     pass
@@ -587,6 +775,9 @@ class ScreenDetector(threading.Thread):
             print(f"[CALIB] {delay:.0f} 秒后开始识别——请立刻把海克斯三选一"
                   "界面切到前台并保持不动（等卡面翻好，勿点刷新）")
             time.sleep(delay)
+        # 倒计时期间窗口可能移动/切窗口化：标定前重查几何（窗口模式也
+        # 抓客户区，否则窗口化标定的是整屏 → 区域推导全部错位）
+        self._refresh_geometry()
         for i in range(attempts):
             frame = self._grab(screen=mss.mss())
             if self._calibrate_from_frame(frame):
@@ -613,7 +804,8 @@ class ScreenDetector(threading.Thread):
             return False
         save_layout(sw, sh, regions, confidence=0.9)
         self.set_layout(Layout(regions, source="auto_calib"))
-        self._save_templates(frame, self.layout.to_pixels(sw, sh))
+        # canvas=True：模板/裁剪基于截屏帧（画布坐标），不带原点偏移
+        self._save_templates(frame, self.layout.to_pixels(sw, sh, canvas=True))
         print("[CALIB] 几何校验通过，标定已保存")
         return True
 

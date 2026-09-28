@@ -7,6 +7,8 @@
    （P1 起：下一件用英雄 OP.GG 高频装，出门装用 OP.GG starter_items；
     P2 由 ChampionContext + System1 排序接管，本引擎仍为离线兜底）
 4. 海克斯时刻规则评级（S/A/B：先验排名 + 语境修正合成评分，非胜率分桶）
+5. 己方阵容缺口 ally_gap + 攒钱决策 saving_advice（v4.5 军师/流派倾向：
+   缺前排 × 可扛英雄 → tank 路线加分；下一大件差价 ≤500 且无组件可买 → 攒）
 
 铁律：数据出事实，模型出判断 —— 本模块全部确定性，无随机无 AI。
 """
@@ -47,6 +49,12 @@ KEY_ENEMY_ITEMS = {
 
 LEGENDARY_GOLD = 2200  # 传说件价格门槛（粗分）
 
+# 攒大件阈值：下一大件按组件抵扣后差价 ≤ 此值、且身上没有现金能买的
+# 未拥有组件 → 建议攒钱直购。依据：大乱斗被动收入约 44G/5s + 一波兵线，
+# 差价 500G ≈ 一次回城间隔内即可攒够；整件成型立即获得完整属性/被动，
+# 优于把钱拆进小件（组件价值虽可抵扣，但多占一格、无成型收益）。
+SAVE_GOLD_THRESHOLD = 500
+
 
 @dataclass
 class ThreatProfile:
@@ -55,6 +63,13 @@ class ThreatProfile:
     tank_count: int = 0
     healers: list = field(default_factory=list)
     key_items: list = field(default_factory=list)  # [{"champion", "item", "note"}]
+    # 敌方传说级抗性件总数（换装克制判断：三人堆魔抗 vs 我方法伤等场景）
+    enemy_mr_items: int = 0
+    enemy_armor_items: int = 0
+    # 己方阵容缺口（v4.5 军师/流派倾向数据源）。engine 层接口不透传
+    # gap，GameSession 把它挂到威胁对象上，随 threat 穿透到
+    # build_sequence / next_item_candidates（"缺前排→tank 加分"链路）
+    ally_gap: object = None
 
     def summary(self) -> str:
         parts = []
@@ -67,7 +82,9 @@ class ThreatProfile:
         if self.healers:
             parts.append(f"治疗:{'/'.join(self.healers)}")
         if self.key_items:
-            parts.append(f"关键装:{self.key_items[0]['item']}")
+            # 去重取前 3（原只显示第一件，克制信息丢了一截）
+            names = list(dict.fromkeys(k["item"] for k in self.key_items))
+            parts.append("关键装:" + "/".join(names[:3]))
         return " | ".join(parts) or "暂无数据"
 
     def resist_advice(self) -> str:
@@ -91,6 +108,52 @@ class Candidate:
     afford_note: str = ""   # 金币感知标注（"可购买"/"还差N"），由 GameSession 按序累计填写
 
 
+@dataclass
+class AllyGap:
+    """己方阵容缺口（champ_damage_profile 画像统计；军师文案与流派倾向共用）"""
+    tanks: int = 0
+    ap: int = 0
+    ad: int = 0
+    gaps: list = field(default_factory=list)  # ["缺前排"/"缺AP"/"缺AD"]
+    complete: bool = True  # 名单完整性门槛（ally_gap 不足 5 人置 False，不判缺）
+
+    @property
+    def need_tank(self) -> bool:
+        return "缺前排" in self.gaps
+
+    @property
+    def need_ap(self) -> bool:
+        return "缺AP" in self.gaps
+
+    @property
+    def need_ad(self) -> bool:
+        return "缺AD" in self.gaps
+
+    def summary(self) -> str:
+        if not self.complete:
+            return "暂无数据"   # 名单不全，缺位结论不可信（同威胁画像口径）
+        return "、".join(self.gaps) if self.gaps else "阵容均衡"
+
+
+@dataclass
+class SwapCandidate(Candidate):
+    """满六神装替换建议对：卖 sell 换买 name（Candidate 子类）。
+
+    继承 Candidate 使替换对能沿用引擎/建议管道（engine.next_candidates
+    的同步底线与 AI 精修转换都按 Candidate 协议收发，无需感知新类型，
+    system1 按 buy 属性识别切 prompt）。net_cost = 买价 − 卖价 − 身上
+    金币（<=0 = 现金足够立即换）；引擎层拿不到金币时先按价差计，
+    GameSession 收到后再补减（见 _suggest_swap）。
+    """
+    sell: str = ""
+    net_cost: int = 0
+    sell_price: int = 0
+
+    @property
+    def buy(self) -> str:
+        return self.name
+
+
 class RulesEngine:
     def __init__(self, kb):
         self.kb = kb
@@ -103,9 +166,9 @@ class RulesEngine:
         bias = info.get("path_bias")
         if bias in ("ap", "ad", "tank"):
             return bias
-        if bias:  # none/其他 → 无偏移，落回内置小表兜底
-            return AUGMENT_PATH_BIAS.get(name)
-        return AUGMENT_PATH_BIAS.get(name)
+        if bias:  # 显式标注 none/unknown → 无偏移，不回落内置表（防标签被小表覆盖）
+            return None
+        return AUGMENT_PATH_BIAS.get(name)  # 未标注/数据缺失（augments.json 无此条）→ 内置小表兜底
 
     def augment_opening_shift(self, name: str):
         """海克斯 → 出门装联动 (item, reason) | None"""
@@ -126,10 +189,15 @@ class RulesEngine:
 
     # ── 1. current_path 确定性推断 ────────────────────────────────
 
-    def infer_current_path(self, my_items: list, augments: list) -> str:
+    def infer_current_path(self, my_items: list, augments: list,
+                           hero: str = "", gap=None) -> str:
         """已购装备（按 DD 标签投票，传说件权重 ×2）+ 已选海克斯偏移 → ap/ad/tank
 
         空输入（出门装前）返回 ""（路线未定，出门装阶段不约束）。
+        v4.5 阵容缺口加分：缺前排且我的英雄可扛（is_tank/Fighter）时
+        tank 票 +tank_lean——只放大已有的坦向证据（身上至少一件坦件），
+        让"坦/输出各一件"的并列压向坦线；不凭空把纯输出出装判成坦
+        （单件散件路线不受阵容缺口翻转，防误伤出门装回归）。
         """
         votes = {"ap": 0.0, "ad": 0.0, "tank": 0.0}
         for item in my_items:
@@ -142,6 +210,9 @@ class RulesEngine:
             bias = self.augment_path_bias(aug)
             if bias:
                 votes[bias] += 1.5  # 海克斯偏移权重：介于小件与传说件之间
+        lean = self.tank_lean(hero, gap)
+        if lean and votes["tank"] > 0:
+            votes["tank"] += lean
         if sum(votes.values()) == 0:
             return ""
         return max(votes, key=votes.get)
@@ -211,7 +282,64 @@ class RulesEngine:
                 if note:
                     tp.key_items.append({
                         "champion": p.champion, "item": it["name"], "note": note})
+                # 敌方传说级抗性件计数（换装克制判断：敌方全队堆魔抗/护甲）
+                info = self.kb.items.get(it.get("name", ""))
+                if info and info["gold"] >= LEGENDARY_GOLD:
+                    tags = set(info["tags"])
+                    if "SpellBlock" in tags:
+                        tp.enemy_mr_items += 1
+                    if "Armor" in tags:
+                        tp.enemy_armor_items += 1
         return tp
+
+    # ── 2b. 己方阵容缺口（v4.5 军师 / 流派倾向） ──────────────────
+
+    def ally_gap(self, champions: list, my_hero: str = "") -> AllyGap:
+        """己方 5 人（含我）阵容缺口：前排数（is_tank）+ AP/AD 输出数。
+
+        判据（5 人编制）：无前排=缺前排；法伤位 0=缺AP；物伤位 0=缺AD；
+        全都有 → 均衡（gaps 空）。敌方阵容同样可用本函数统计，
+        反向利用（敌方缺 AP → 我方护甲更值钱）由军师层取 need_ap/need_ad。
+        my_hero 仅作记录用途（加分判断在 tank_lean，单独传 hero）。
+        名单完整性门槛：不足 5 人（对局刚开始快照不全、LCU 报错、名单缺
+        id）时只记数不判缺，summary 落"暂无数据"（同威胁画像口径）——
+        缺位结论建立在"5 人看全"的前提上，否则空名单会同时得出"缺AP"
+        "缺AD"，军师层同帧互斥提示双双触发；信息不足不出声（同顺逆风）。
+        """
+        gap = AllyGap()
+        for cn in champions:
+            prof = self.kb.champ_profile.get(cn, {})
+            if prof.get("is_tank"):
+                gap.tanks += 1
+            damage = prof.get("damage")
+            if damage == "ap":
+                gap.ap += 1
+            elif damage == "ad":
+                gap.ad += 1
+        if len(champions) < 5:
+            gap.complete = False
+            return gap
+        if gap.tanks == 0:
+            gap.gaps.append("缺前排")
+        if gap.ap == 0:
+            gap.gaps.append("缺AP")
+        if gap.ad == 0:
+            gap.gaps.append("缺AD")
+        return gap
+
+    def tank_lean(self, hero: str, gap) -> float:
+        """缺前排 × 我的英雄可扛（is_tank 或 Fighter 类 tags）→ tank 加分权重。
+
+        取 1.5：高于单小件票重(1.0)——缺前排时能把"坦/输出各一件"的
+        并列压向坦线；调用侧要求已有坦向证据（infer_current_path 里
+        votes["tank"]>0 才生效），纯输出出装不受阵容缺口翻转。
+        """
+        if not gap or not getattr(gap, "need_tank", False) or not hero:
+            return 0.0
+        prof = self.kb.champ_profile.get(hero, {})
+        if prof.get("is_tank") or "Fighter" in (prof.get("tags") or []):
+            return 1.5
+        return 0.0
 
     # ── 3a. 出门装候选池（OP.GG starter_items + 海克斯联动，手工池兜底） ──
 
@@ -279,14 +407,20 @@ class RulesEngine:
 
     def next_item_candidates(self, my_items: list, current_path: str,
                              threat: ThreatProfile, hero: str = "",
-                             limit: int = 3, game_map: str = "") -> list:
+                             limit: int = 3, game_map: str = "",
+                             gap=None) -> list:
         """在 current_path 内、排除已拥有、按敌方构成加权的传说件候选。
 
         P1 候选池 = 英雄 OP.GG 高频核心装（顺序即登场率），坦克路线另开放
         DD 抗性件全库扫描（输出位不因敌方构成推抗性装）。分数 = OP.GG 高频
         (3→0) + 路线匹配(2) + 敌方抗性方向(2) + 正在合成(3)。
         game_map: "11"/"12"，当前地图不可买的名字直接出局。
+        gap: 己方阵容缺口（缺前排且英雄可扛 → 坦向件 +tank_lean 分）；
+        显式传入优先，否则从 threat.ally_gap 取（engine 层经 threat 穿透）。
         """
+        if gap is None and threat is not None:
+            gap = getattr(threat, "ally_gap", None)
+        lean = self.tank_lean(hero, gap)
         owned = set(my_items)
         # 我已有装备的升级目标（优先：正在攒的合成线）
         building_into = set()
@@ -336,6 +470,10 @@ class RulesEngine:
                 score += 2.0
             if name in building_into:
                 score += 3.0  # 正在合成的线优先
+            if lean and bias == "tank":
+                # 己方缺前排且英雄可扛：坦向件加分（权重同路线推断，
+                # 让"下一件"排序与路线推断的倾向一致）
+                score += lean
             scored.append((score, name))
 
         scored.sort(reverse=True)
@@ -365,7 +503,8 @@ class RulesEngine:
 
     def build_sequence(self, my_items: list, current_path: str,
                        threat: ThreatProfile, hero: str = "",
-                       limit: int = 3, game_map: str = "") -> list:
+                       limit: int = 3, game_map: str = "",
+                       gap=None) -> list:
         """出装主线序列（v4.3）：英雄核心套装线优先，敌情评分补位。
 
         v4.2 按"敌情加权评分"直接排会出"还没出核心就被阵容带偏"的序列；
@@ -373,7 +512,18 @@ class RulesEngine:
         爆杀流/半肉/法系线由路线决定），未拥有的核心件按登场序占满前排；
         ②核心出完或不足 limit 再用 next_item_candidates（敌情/合成线/其余
         高频件）补位。每件带价格，可买性由 GameSession 按金币累计填写。
+        满六神装（v4.4）：格满后"下一件"买不进格，主线切为替换建议
+        （replacement_candidates）。gold/augments 引擎接口不透传，替换对
+        先按价差计 net_cost，GameSession 收到后补减金币并按台账联动重排。
+        gap: 己方阵容缺口，经 next_item_candidates 参与坦向件加分；
+        缺省从 threat.ally_gap 取（GameSession 挂载，穿透 engine 层）。
         """
+        if gap is None and threat is not None:
+            gap = getattr(threat, "ally_gap", None)
+        if len(self.kb.permanent_items(my_items)) >= 6:
+            return self.replacement_candidates(
+                my_items, 0, current_path, threat,
+                augments=None, hero=hero, limit=limit, game_map=game_map)
         owned = set(my_items)
         seq, seen = [], set()
         line = self.kb.core_build_line(hero, current_path)
@@ -392,7 +542,7 @@ class RulesEngine:
                 return seq
         for c in self.next_item_candidates(my_items, current_path, threat,
                                            hero=hero, limit=limit * 2,
-                                           game_map=game_map):
+                                           game_map=game_map, gap=gap):
             if c.name in seen:
                 continue
             seen.add(c.name)
@@ -402,6 +552,195 @@ class RulesEngine:
             if len(seq) >= limit:
                 break
         return seq
+
+    # ── 3e. 满六神装替换候选（v4.4：格满后改推"卖X换Y"） ──────────
+
+    def _sell_contribution(self, item: str, current_path: str,
+                           threat: ThreatProfile, augments=None) -> float:
+        """已拥有传说件的当前局势贡献分（越高越不该卖）。
+
+        三个参考维度（任务口径）：威胁画像（敌方 AP 多而这件毫无魔抗
+        贡献 → 弱）、与 current_path 一致性（path_drift 思路复用）、
+        与已选海克斯联动度（augments 可得时）。
+        """
+        info = self.kb.items.get(item, {})
+        tags = set(info.get("tags", []))
+        bias = self.kb.item_path_bias(item)
+        # 基础底价：能进六神装的传说件都有基本贡献，只在相对排序中变弱
+        score = 1.0
+        if bias and bias == current_path:
+            score += 2.0        # 与主力路线一致（核心输出/承伤件）
+        elif bias and current_path:
+            score -= 1.5        # 偏离主力路线（早期过渡件/路线切换遗留）
+        advice = threat.resist_advice() if threat else ""
+        if advice == "魔抗优先":
+            # +3.0 与 buy 侧短板动机同价：敌方 AP 成型时，身上的魔抗件
+            # 正是为此买的，不因"偏离输出路线"被反卖（-1.5 扣不过 +3.0）
+            score += 3.0 if "SpellBlock" in tags else -1.0
+        elif advice == "护甲优先":
+            score += 3.0 if "Armor" in tags else -1.0
+        elif advice == "重伤考虑" and self.is_antiheal_item(item):
+            score += 1.0
+        for aug in augments or []:
+            if bias and self.augment_path_bias(aug) == bias:
+                score += 0.5    # 与已选海克斯同向，联动收益被放大
+        return score
+
+    def _replacement_buy_pool(self, owned_after: set, current_path: str,
+                              threat: ThreatProfile, hero: str = "",
+                              game_map: str = "") -> list:
+        """替换买件池（复用 next_item_candidates 的池子思路再补短板）。
+
+        与"下一件"的关键差异：替换的核心动机就是针对性补威胁短板，
+        抗性/重伤件不限坦克路线开放（next_item_candidates 里只有 tank
+        才开抗性池——那是"成长期不因敌情改线"，满装换装反过来正是
+        为了敌情调整）。返回按 适配分 降序的 [(score, name, reason)]。
+        """
+        advice = threat.resist_advice() if threat else ""
+        scored = {}
+        # 1. 威胁短板件（替换的第一动机）：敌方 AP 多 → 魔抗件；物伤多 → 护甲
+        want_tag = {"魔抗优先": "SpellBlock", "护甲优先": "Armor"}.get(advice)
+        if want_tag:
+            for name, info in self.kb.items.items():
+                if (info["gold"] >= LEGENDARY_GOLD
+                        and want_tag in info["tags"]
+                        and name not in owned_after
+                        and self.kb.item_available(name, game_map)):
+                    label = ("补魔抗短板" if want_tag == "SpellBlock"
+                             else "补护甲短板")
+                    scored[name] = (3.0, label)
+        elif advice == "重伤考虑":
+            for name, info in self.kb.items.items():
+                if (info["gold"] >= LEGENDARY_GOLD
+                        and self.is_antiheal_item(name)
+                        and name not in owned_after
+                        and self.kb.item_available(name, game_map)):
+                    scored[name] = (3.0, "敌方治疗多，重伤压制")
+        # 2. OP.GG 高频/路线内传说件（换装也可以是同级更优输出件）；
+        #    分值封顶 2.7 < 短板件 3.0——替换的第一动机是补威胁短板
+        opgg_pool = self.kb.core_item_pool(hero)
+        for rank, name in enumerate(opgg_pool):
+            if name in scored or name in owned_after:
+                continue
+            info = self.kb.items.get(name)
+            if not info or info["gold"] < LEGENDARY_GOLD:
+                continue
+            if not self.kb.item_available(name, game_map):
+                continue
+            bias = self.kb.item_path_bias(name)
+            if current_path and bias != current_path:
+                continue  # 换装不换路线（换路线是重开局级决策）
+            scored[name] = (max(0.3, 2.7 - 0.3 * rank),
+                            f"OP.GG 高频（第{rank + 1}位）")
+        return sorted(((s, n, r) for n, (s, r) in scored.items()), reverse=True)
+
+    def replacement_candidates(self, my_items: list, gold: float,
+                               current_path: str, threat: ThreatProfile,
+                               augments=None, hero: str = "", limit: int = 3,
+                               game_map: str = "") -> list:
+        """满六神装替换建议：[{sell, buy, reason, net_cost}]（SwapCandidate）。
+
+        sell 池 = 已拥有传说件（靴子默认不卖——移动速度无替代品，且
+        kb 鞋类价位远低于传说线，卖了也回不了多少款；无卖价不入池，
+        投机者之刃是库内唯一无 gold.sell 的传说件，混进来卖价按 0 算，
+        差价/净差全错）；按"当前局势贡献最低"升序取前 3。buy 池不与
+        已拥有重复（含被卖件本身，卖X买回X是无意义换手）、当前地图可买。
+        同一买件只保留最优卖件对（AI 精修按买件名映射回对，买件名必须唯一）。
+        net_cost = 买价 − 卖价 − gold（<=0 = 现金足够立即换）。
+        """
+        # sell 池：传说件、库内（要核卖价）、非靴子、有卖价
+        sellable = [it for it in my_items
+                    if it in self.kb.items
+                    and self.kb.items[it]["gold"] >= LEGENDARY_GOLD
+                    and "Boots" not in self.kb.items[it]["tags"]
+                    and self.kb.item_sell_price(it) > 0]
+        if not sellable:
+            return []
+        # 同分兜底排序：先卖英雄高频池外的散件（本命核心件不轻易动，
+        # 键取 in core_set——池外 False 升序在前），再按价格升序（回款
+        # 小、试错成本低）
+        core_set = set(self.kb.core_item_pool(hero))
+        sellable.sort(key=lambda it: (
+            self._sell_contribution(it, current_path, threat, augments),
+            it in core_set,
+            self.kb.items[it]["gold"]))
+        advice = threat.resist_advice() if threat else ""
+        best_by_buy = {}
+        # buy 池排除"全部已拥有"（含被卖件：卖X买回X是无意义换手）；
+        # 池子只依赖已拥有/路线/敌情，与卖件无关，循环外算一次即可
+        # （原来在 sellable[:3] 循环内重复算 3 遍，结果相同纯属白做）
+        owned_all = set(my_items)
+        buy_pool = self._replacement_buy_pool(
+            owned_all, current_path, threat, hero, game_map)[:3]
+        for sell in sellable[:3]:
+            sp = self.kb.item_sell_price(sell)
+            # sell 侧弱点文案（威胁错配 > 路线偏离 > 兜底）
+            s_bias = self.kb.item_path_bias(sell)
+            s_tags = set(self.kb.items[sell]["tags"])
+            if advice == "魔抗优先" and "SpellBlock" not in s_tags:
+                weak = "敌方法伤成型而它零魔抗"
+            elif advice == "护甲优先" and "Armor" not in s_tags:
+                weak = "敌方物伤成型而它零护甲"
+            elif s_bias and current_path and s_bias != current_path:
+                weak = f"偏离当前{current_path.upper()}路线"
+            else:
+                weak = "当前局势贡献最低"
+            for b_score, buy, b_reason in buy_pool:
+                info = self.kb.items.get(buy, {})
+                sw = SwapCandidate(
+                    name=buy, reason=f"{weak}，换入{b_reason}",
+                    price=info.get("gold", 0),
+                    sell=sell, sell_price=sp,
+                    net_cost=info.get("gold", 0) - sp - int(gold))
+                # 同一买件只留分更高的对（卖件更弱 = 该对更值得执行）
+                cur = best_by_buy.get(buy)
+                if cur is None or b_score > cur[0]:
+                    best_by_buy[buy] = (b_score, sw)
+        out = [sw for _s, sw in sorted(best_by_buy.values(),
+                                       key=lambda t: -t[0])]
+        return out[:limit]
+
+    def swap_augment_rank(self, swaps: list, augments: list) -> list:
+        """替换对按已选海克斯联动度稳定重排（只定序不减员）。
+
+        引擎接口不透传 augments，规则层排序拿不到台账——由 GameSession
+        收到替换对后用台账补排。集合不变仅重排，AI 精修按买件名映射
+        不受影响。
+        """
+        if not augments or not swaps:
+            return swaps
+        biases = [b for b in (self.augment_path_bias(a) for a in augments) if b]
+        if not biases:
+            return swaps
+
+        def synergy(sw):
+            b = self.kb.item_path_bias(sw.buy)
+            return -sum(1.0 for x in biases if x == b) if b else 0.0
+        return sorted(swaps, key=synergy)  # stable：同分保持规则序
+
+    def swap_forecast(self, my_items: list, current_path: str,
+                      threat: ThreatProfile) -> str:
+        """威胁画像 vs 已有装备明显错配 → 替换预告文案（提示级，不改主建议）。
+
+        任务示例场景：敌方三人堆魔抗而你全身 AP；敌方 AP 成型而你
+        毫无魔抗。空串 = 无明显错配。
+        """
+        if not threat:
+            return ""
+        tags_all = [set(self.kb.items.get(n, {}).get("tags", []))
+                    for n in my_items]
+        advice = threat.resist_advice()
+        if advice == "魔抗优先" and not any("SpellBlock" in t for t in tags_all):
+            return (f"敌方法伤×{threat.ap_count}成型而你无魔抗装，"
+                    "后续替换优先补魔抗")
+        if advice == "护甲优先" and not any("Armor" in t for t in tags_all):
+            return (f"敌方物伤×{threat.ad_count}成型而你无护甲装，"
+                    "后续替换优先补护甲")
+        if current_path == "ap" and threat.enemy_mr_items >= 3:
+            return "敌方三人以上堆魔抗克制法伤，替换时考虑法穿/真伤方向"
+        if current_path == "ad" and threat.enemy_armor_items >= 3:
+            return "敌方三人以上堆护甲克制物伤，替换时考虑破甲/法伤方向"
+        return ""
 
     # ── 3d. 海克斯时刻规则评级（S/A/B 合成评分，非胜率分桶） ────────
 
@@ -482,3 +821,50 @@ class RulesEngine:
                 return target, (f"身上【{item}】可合成【{target}】，"
                                 f"与当前路线一致")
         return None, "无待合成小件，攒钱即可"
+
+    # ── 3f. 攒钱决策（v4.5：这波回城攒大件 vs 先买小件） ──────────
+
+    def saving_advice(self, my_items: list, gold: float, seq: list,
+                      game_map: str = "") -> str:
+        """下一大件（seq 首位）差价与组件可买性 → 建议行附注。
+
+        口径与 _apply_afford 一致：差价 = 总价 − 现金 − 身上已拥有的该件
+        组件价值。分支：
+        - 差价 ≤ SAVE_GOLD_THRESHOLD 且没有现金能买的未拥有组件 → 攒
+          （差价约一波兵收入，整件成型优先）；
+        - 有现金能买的未拥有组件 → 建议买"最贵可负担"组件（同等现金
+          抵扣更多、格子效率最高），写清剩多少金；
+        - 差价还大且无组件可买 → 攒钱中（中性进度提示）。
+        整件已买得起 / 金币未知 → 空串（金币感知行已说清，不重复）。
+        """
+        if not seq or gold <= 0:
+            return ""
+        target = seq[0]
+        if not target or not target.price:
+            return ""
+        info = self.kb.items.get(target.name, {})
+        frm = {self.kb.item_id_to_name.get(f)
+               for f in info.get("from", [])} - {None}
+        owned = set(my_items)
+        discount = sum(self.kb.items.get(c, {}).get("gold", 0)
+                       for c in frm & owned)
+        gap = target.price - gold - discount
+        if gap <= 0:
+            return ""
+        # 未拥有、当前地图有售、现金买得起的组件（"高性价比"取最贵：
+        # 同样的钱抵扣更多合成款，不买 435G 碎件浪费格子）
+        affordable = []
+        for comp in frm - owned:
+            cinfo = self.kb.items.get(comp)
+            if not cinfo or cinfo["gold"] <= 0:
+                continue
+            if not self.kb.item_available(comp, game_map):
+                continue
+            if cinfo["gold"] <= gold:
+                affordable.append((comp, cinfo["gold"]))
+        if gap <= SAVE_GOLD_THRESHOLD and not affordable:
+            return f"💰 距{target.name}还差{gap:.0f}，可攒"
+        if affordable:
+            comp, cprice = max(affordable, key=lambda t: t[1])
+            return f"💰 建议买小件【{comp}】{cprice}G，剩{gold - cprice:.0f}金"
+        return f"💰 距{target.name}还差{gap:.0f}，先攒钱"

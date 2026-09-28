@@ -46,9 +46,34 @@ TAG_DAMAGE_PRIORITY = [
     ("Fighter", "ad"),
 ]
 
-# 已知与启发式结论冲突的特例（当前版本主流玩法），P1 持续精化
+# 已知与启发式结论冲突的特例（当前版本主流玩法），P1 持续精化。
+# 值为 dict：damage 覆写 ap/ad，is_tank 覆写坦度；键 = DD 英雄 key（非中文名）
 MANUAL_OVERRIDES = {
-    # 例: "Kaisa": "ad",   # 卡莎双修，主流 AD
+    # ── 修正启发式误判（覆盖后结论实际翻转）────────────────────────
+    "Akali": {"damage": "ap"},        # 离群之刺：全技能魔法加成，主流 AP（仅 Assassin 标签被误判 ad）
+    "Azir": {"damage": "ap"},         # 沙漠皇帝：纯 AP 法核（Mage+Marksman 被 Marksman 优先级抢成 ad）
+    "TwistedFate": {"damage": "ap"},  # 卡牌大师：主流 AP（同为 Mage+Marksman 被 Marksman 抢成 ad）
+    "Corki": {"damage": "ap"},        # 英勇投弹手：被动普攻 80% 转魔法且技能全魔法，主流魔法伤害
+    "Teemo": {"damage": "ap"},        # 迅捷斥候：Q/毒/蘑菇全魔法，主流 AP（Marksman 标签误导）
+    "Kayle": {"damage": "ap"},        # 正义天使：主流纳什之牙混装，输出以魔法为主
+    "Diana": {"damage": "ap"},        # 皎月女神：纯 AP 突进法师（tags 无 Mage 被误判 ad）
+    "Fizz": {"damage": "ap"},         # 潮汐海灵：全技能魔法，纯 AP 刺客（Assassin+Fighter 无 Mage 标签）
+    "Gwen": {"damage": "ap"},         # 灵罗娃娃：Q 剪刀全魔法含真伤，纯 AP（仅 Fighter 标签）
+    "Shaco": {"damage": "ap"},        # 恶魔小丑：经典双修，大乱斗主流 AP 盒子流
+    "Zac": {"damage": "ap", "is_tank": True},   # 生化魔人：全技能魔法伤害的 AP 坦
+    "DrMundo": {"damage": "ap", "is_tank": True},  # 祖安狂人：Q/R 魔法百分比伤害为主
+    "Rammus": {"damage": "ap"},       # 披甲龙龟：反伤 W/大招全魔法（仅 Tank 标签兜底成 ad）
+    # ── 显式锚定（启发式当前同值，防 DD 标签顺序/优先级表漂移）────────
+    "Evelynn": {"damage": "ap"},      # 痛苦之拥：纯 AP 刺客
+    "Katarina": {"damage": "ap"},     # 不祥之刃：全技能魔法
+    "Kennen": {"damage": "ap"},       # 狂暴之心：技能全魔法的 AP 法核
+    "Mordekaiser": {"damage": "ap"},  # 铁铠冥魂：纯 AP 战士
+    "Rumble": {"damage": "ap"},       # 机械公敌：全技能魔法
+    "Singed": {"damage": "ap"},       # 炼金术士：毒雾魔法伤害的 AP 坦
+    "Ezreal": {"damage": "ad"},       # 探险家：经典双修，主流 AD 魔宗
+    "Kaisa": {"damage": "ad"},        # 虚空之女：经典双修，默认 AD 特效流
+    "Jax": {"damage": "ad"},          # 武器大师：混伤但主流 AD 武器
+    "Sion": {"is_tank": True},        # 亡灵战神：主流坦克（Q/E 物理伤害为主，保持 ad）
 }
 
 def gen_damage_profile():
@@ -64,8 +89,12 @@ def gen_damage_profile():
                 break
         if damage is None:
             damage = "ad"  # 兜底
-        if key in MANUAL_OVERRIDES:
-            damage = MANUAL_OVERRIDES[key]
+        is_tank = "Tank" in tags
+        # 人工特例覆盖：与 tags 启发式冲突时以人工结论为准（P1 持续精化）
+        ov = MANUAL_OVERRIDES.get(key)
+        if ov:
+            damage = ov.get("damage", damage)
+            is_tank = ov.get("is_tank", is_tank)
         profile[c["name"]] = {  # 键 = 中文名（与 champions.json/LCU 一致）
             "key": key,
             "damage": damage,
@@ -75,7 +104,7 @@ def gen_damage_profile():
     out = {
         "version": version,
         "generated_at": datetime.date.today().isoformat(),
-        "note": "P0 启发式粗分类（DD tags 推断，非逐英雄校准），P1 精化",
+        "note": "P0 启发式粗分类（DD tags 推断）+ 23 条人工特例覆盖（双修/无 Mage 标签 AP 等）",
         "champions": profile,
     }
     path = KNOW / "champ_damage_profile.json"

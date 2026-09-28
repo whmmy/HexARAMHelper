@@ -119,6 +119,7 @@ class AIDecisionEngine(DecisionEngine):
         self._last_refine = {"opening": 0.0, "next_items": 0.0,
                              "augment_ranks": 0.0}
         self._hero = ""
+        self._enemy = []           # 敌方名单（System1 prompt 敌方明细数据源）
         self.game_map = ""         # 当前对局地图（"11"/"12"）
         self._tasks = []           # 后台线程引用（防 GC）
         self._inflight = 0         # 在途 AI 生成数（浮窗"生成中"标识）
@@ -172,8 +173,21 @@ class AIDecisionEngine(DecisionEngine):
 
     # ── 生命周期 ──────────────────────────────────────────────────
 
+    def _enemy_detail(self) -> list:
+        """敌方明细行 ["名(伤害画像)"]：start_game 名单 + champ_damage_profile。
+
+        _fmt_snapshot 的 enemy 管道此前恒为空（死参数），威胁只有计数摘要；
+        补上名字+画像后 System1 才能做"全 AD 局早护甲"级别的语境判断。
+        """
+        out = []
+        for name in self._enemy[:5]:
+            dmg = self.delegate.kb.champ_profile.get(name, {}).get("damage") or "?"
+            out.append(f"{name}({dmg})")
+        return out
+
     def start_game(self, hero, ally, enemy, game_map=""):
         self._hero = hero
+        self._enemy = [str(x) for x in (enemy or [])]
         self.game_map = game_map or ""
         with self._lock:
             self._epoch += 1
@@ -181,18 +195,25 @@ class AIDecisionEngine(DecisionEngine):
             self._calls = 0
         self._last_refine = {"opening": 0.0, "next_items": 0.0,
                              "augment_ranks": 0.0}
-        usage = getattr(self.client_s2, "usage", None)
-        if usage:
-            usage.new_game()
+        # 两槽位用量各自独立计量：System1/2 单价不同，若共享实例，
+        # stats() 会把同一份 tokens 按两套单价各算一遍（费用虚高近一倍）
+        for _c in (self.client_s1, self.client_s2):
+            _u = getattr(_c, "usage", None)
+            if _u:
+                _u.new_game()
         self.delegate._hero = hero
         self.delegate.game_map = self.game_map
+        # 新局开始必须无条件使上一局上下文失效（清缓存 + 置 pending），
+        # 早退路径（hero 缺失 / 槽位未配置）也不例外：否则 LCU 迟到时
+        # 缓存仍是上一局 ChampionContext，本局沿用上一局英雄的出门/路线/
+        # 加点生成 prompt，直到 late_start 补开局才自愈
+        self.cache.start_pending()
         if not hero:
             print("[AI] 英雄未知，跳过 System2 上下文生成（可手动设英雄后重开局）")
             return
         if not (self.client_s2.configured and self.client_s1.configured):
             print("[AI] 槽位未配置完整，本局纯规则模式")
             return
-        self.cache.start_pending()
         kb = self.delegate.kb
         rules = self.delegate.rules
 
@@ -240,11 +261,21 @@ class AIDecisionEngine(DecisionEngine):
 
         def fn():
             picks = self.s1.suggest_opening(
-                self.client_s1, ctx, self._hero, first_augment, summary, base)
-            return [Candidate(p["name"], p["reason"],
-                              price=kb.items.get(p["name"], {}).get("gold", 0))
-                    for p in picks
-                    if kb.item_available(p["name"], gm)]
+                self.client_s1, ctx, self._hero, first_augment, summary, base,
+                enemy=self._enemy_detail())
+            out = []
+            for p in picks:
+                if not kb.item_available(p["name"], gm):
+                    continue
+                # combo 原样保留：Candidate 无 combo 字段，与规则版口径一致
+                # （rules_engine.opening_candidates：组合构成入理由、价格按
+                # 组合总价），此前丢字段且价格退化为单件价
+                combo = p.get("combo") or [p["name"]]
+                out.append(Candidate(
+                    p["name"], f"{p['reason']}（{'+'.join(combo)}）",
+                    price=sum(kb.items.get(n, {}).get("gold", 0)
+                              for n in combo)))
+            return out
         self._submit(KIND_OPENING, serial, fn)
         return base
 
@@ -264,7 +295,7 @@ class AIDecisionEngine(DecisionEngine):
         def fn():
             picks = self.s1.suggest_next(
                 self.client_s1, ctx, my_items, gold, current_path, summary,
-                taken, base)
+                taken, base, enemy=self._enemy_detail())
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
                     for p in picks
@@ -283,7 +314,7 @@ class AIDecisionEngine(DecisionEngine):
         def fn():
             return self.s1.rank_augments(
                 self.client_s1, ctx, hero, card_names, taken or [], my_items,
-                summary, base)
+                summary, base, enemy=self._enemy_detail())
         self._submit(KIND_RANKS, serial, fn)
         return base
 
@@ -314,7 +345,8 @@ class AIDecisionEngine(DecisionEngine):
             cost_total += u2.cost(p2i, p2o, cumulative=True)
         ctx = self.cache.get()
         return {"mode": self.mode, "calls": calls,
-                "budget": int(self.settings.get("ai", "budget_per_game", default=15)),
+                "budget": int(self.settings.get_float(
+                    "ai", "budget_per_game", default=15)),
                 "cost_game": round(cost_game, 4),
                 "cost_total": round(cost_total, 4),
                 "inflight": self._inflight,
@@ -368,9 +400,10 @@ def build_engine(kb, rules, settings) -> DecisionEngine:
         return delegate
     from hexa.ai import client as client_mod
     from hexa.ai import system1, system2
-    usage = client_mod.UsageStats()
-    c2 = client_mod.LLMClient(settings, "system2", usage=usage)
-    c1 = client_mod.LLMClient(settings, "system1", usage=usage)
+    # 不共享 UsageStats：两槽位单价不同，混在一起无法按槽位计价，
+    # 且 stats() 会对同一份用量重复计费；LLMClient 缺省即自建独立实例
+    c2 = client_mod.LLMClient(settings, "system2")
+    c1 = client_mod.LLMClient(settings, "system1")
     if not (c1.configured and c2.configured):
         print("[AI] 已开启但槽位缺模型名/Key（settings 或环境变量），纯规则模式")
         return delegate

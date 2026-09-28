@@ -1,13 +1,15 @@
 """HexARAMHelper 入口：主窗口 + overlay + 服务编排
 
 生命周期全自动（LCU 阶段状态机驱动），无操作热键；
-仅保留一个可选 overlay 显隐键（F10）。
+仅保留两个可选键：F10 浮窗显隐（全局）、F9 撤销最近一条记账
+（带前台窗口校验——仅本工具窗口在前台时生效，对局中请用主窗口「撤销」）。
 
 P1 起：画面检测线程（标题条 OCR + 229 库匹配，迟滞）+ 只读鼠标记账
 （海克斯界面活跃窗口内点击卡片 → 台账；点 reroll → 主动重扫）。
 P2 起：AI 双槽位引擎（settings 开关；无 Key 自动纯规则）。
 """
 import ctypes
+import ctypes.wintypes  # Win32 前台校验用（本项目 Windows 专属，同 screen_detect）
 import os
 import queue
 import sys
@@ -214,20 +216,78 @@ def main():
         new_engine = engine_mod.build_engine(kb, rules, settings)
         session.replace_engine(new_engine)
 
-    # overlay 显隐键（唯一热键，可选项；Tk 调度统一走 ui 队列）
+    # 热键（F10 overlay 显隐 + F9 撤销记账；Tk 调度统一走 ui 队列）
     # GetAsyncKeyState 轮询而非 keyboard 库——keyboard 在 import 时就装全局
-    # 键盘低级钩子，钩子回调依赖本进程线程调度，进程有 CPU 突刺时全系统
-    # 按键都会延迟（游戏内"动不了"的元凶）。P0 只需 F10，无需钩子。
+    # 键盘低级钩子，钩子回调依赖本进程线程调度，进程有 CPU 突发时全系统
+    # 按键都会延迟（游戏内"动不了"的元凶）。本工具只需 F10/F9，无需钩子。
+    # F10 保持全局（游戏内也要能开关浮窗）；F9 改台账，只在本工具窗口
+    # 处于前台时生效（见 _foreground_is_own_window）。
+    def _foreground_is_own_window():
+        """F9 前台校验：前台窗口是否属于本进程。
+
+        EnumWindows 枚举本进程全部顶层窗口（主窗/浮窗/设置窗任一在前台
+        即算"自己"），与 GetForegroundWindow 句柄比对——没有这层校验时，
+        在浏览器/IDE 里按 F9 也会静默撤销台账且不可逆。句柄集合每次现查
+        不缓存（设置窗可能后开、主窗可能缩托盘），仅在按键命中时调用，
+        开销可忽略。
+        """
+        user32 = ctypes.windll.user32
+        # 默认 restype 是 c_int，64 位下高位句柄带符号，会与枚举集合比对失配
+        user32.GetForegroundWindow.restype = ctypes.wintypes.HWND
+        hwnds = set()
+        pid_self = os.getpid()
+
+        # 回调引用必须存活到 EnumWindows 返回（ctypes 不保管局部 CFUNCTYPE）
+        @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.wintypes.HWND,
+                            ctypes.wintypes.LPARAM)
+        def _on_enum(hwnd, _lparam):
+            pid = ctypes.wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == pid_self:
+                hwnds.add(hwnd)
+            return True
+
+        user32.EnumWindows(_on_enum, 0)
+        return user32.GetForegroundWindow() in hwnds
+
+    def _revoke_latest_augment():
+        """F9：撤销最近一条海克斯记账（误点快速纠错）。
+
+        仅在本工具窗口处于前台时生效（hotkey_loop 先经
+        _foreground_is_own_window 校验；游戏内误点需切回主窗口再按 F9，
+        或点台账行「撤销」按钮）。末条读取与撤销在 session RLock 内原子
+        完成（revoke_latest_augment 封装），在本热键线程直接执行——只做
+        规则级重算，无重活，不进 Tk 主线程；主窗口台账由 500ms ui_state
+        轮询自动刷新（≤0.5s 可见）。
+        """
+        name = session.revoke_latest_augment()
+        if name:
+            print(f"[INFO] 已撤销最近海克斯记账：{name}")
+        else:
+            print("[INFO] F9 撤销：台账为空，无可撤销")
+
     def hotkey_loop():
         import ctypes
+        VK_F9 = 0x78
         VK_F10 = 0x79
-        last = 0.0
+        last_f9 = 0.0
+        last_f10 = 0.0
         while True:
             try:
+                now = time.time()
                 if (ctypes.windll.user32.GetAsyncKeyState(VK_F10) & 0x8000
-                        and time.time() - last > 0.8):
-                    last = time.time()
+                        and now - last_f10 > 0.8):
+                    last_f10 = now
                     ui_queue.put(overlay.toggle)
+                if (ctypes.windll.user32.GetAsyncKeyState(VK_F9) & 0x8000
+                        and now - last_f9 > 0.8):
+                    last_f9 = now
+                    if _foreground_is_own_window():
+                        _revoke_latest_augment()
+                    else:
+                        print("[INFO] F9 忽略：本工具窗口不在前台"
+                              "（防其他应用误按）；撤销请切回主窗口再按 F9"
+                              "或点台账行「撤销」按钮")
             except Exception:
                 pass
             time.sleep(0.05)

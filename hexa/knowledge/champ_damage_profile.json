@@ -1,7 +1,7 @@
 {
  "version": "16.19.1",
- "generated_at": "2026-09-24",
- "note": "P0 启发式粗分类（DD tags 推断，非逐英雄校准），P1 精化",
+ "generated_at": "2026-09-28",
+ "note": "P0 启发式粗分类（DD tags 推断）+ 23 条人工特例覆盖（双修/无 Mage 标签 AP 等）",
  "champions": {
   "暗裔剑魔": {
    "key": "Aatrox",
@@ -22,7 +22,7 @@
   },
   "离群之刺": {
    "key": "Akali",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Assassin"
@@ -117,7 +117,7 @@
   },
   "沙漠皇帝": {
    "key": "Azir",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Mage",
@@ -213,7 +213,7 @@
   },
   "英勇投弹手": {
    "key": "Corki",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Marksman",
@@ -231,7 +231,7 @@
   },
   "皎月女神": {
    "key": "Diana",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Fighter",
@@ -248,7 +248,7 @@
   },
   "祖安狂人": {
    "key": "DrMundo",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": true,
    "tags": [
     "Tank",
@@ -311,7 +311,7 @@
   },
   "潮汐海灵": {
    "key": "Fizz",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Assassin",
@@ -372,7 +372,7 @@
   },
   "灵罗娃娃": {
    "key": "Gwen",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Fighter"
@@ -538,7 +538,7 @@
   },
   "正义天使": {
    "key": "Kayle",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Marksman",
@@ -934,7 +934,7 @@
   },
   "披甲龙龟": {
    "key": "Rammus",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": true,
    "tags": [
     "Tank"
@@ -1057,7 +1057,7 @@
   },
   "恶魔小丑": {
    "key": "Shaco",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Assassin"
@@ -1205,7 +1205,7 @@
   },
   "迅捷斥候": {
    "key": "Teemo",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Marksman",
@@ -1250,7 +1250,7 @@
   },
   "卡牌大师": {
    "key": "TwistedFate",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": false,
    "tags": [
     "Mage",
@@ -1460,7 +1460,7 @@
   },
   "生化魔人": {
    "key": "Zac",
-   "damage": "ad",
+   "damage": "ap",
    "is_tank": true,
    "tags": [
     "Tank",
