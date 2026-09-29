@@ -46,12 +46,23 @@ class Theme:
 
 
 class LogRedirector(io.TextIOBase):
-    """stdout/stderr → Queue（GUI 日志面板），同时保留原流输出"""
+    """stdout/stderr → Queue（GUI 日志面板），同时保留原流输出。
 
-    def __init__(self, log_queue, original_stream=None):
+    tee_path 可选：同步追加落盘（log/app_启动时刻.log）。控制台窗口一关
+    输出全丢，真机排障（如 2026-09-29 台账复发案）必须有事后可查的留档；
+    多写入方（stdout/stderr 两个重定向实例）共享同一文件句柄，append 模式
+    + 逐条小写入，无需加锁交叉也不会撕裂单行（单次 write 原子性足够）。"""
+
+    def __init__(self, log_queue, original_stream=None, tee_path=None):
         super().__init__()
         self.log_queue = log_queue
         self.original = original_stream
+        self._tee = None
+        if tee_path is not None:
+            try:
+                self._tee = open(tee_path, "a", encoding="utf-8")
+            except Exception:
+                self._tee = None   # 留档失败不阻塞日志主链路
 
     def write(self, text):
         if text and text.strip():
@@ -61,6 +72,12 @@ class LogRedirector(io.TextIOBase):
             try:
                 self.original.write(text)
                 self.original.flush()
+            except Exception:
+                pass
+        if self._tee and text:
+            try:
+                self._tee.write(text)
+                self._tee.flush()
             except Exception:
                 pass
         return len(text) if text else 0

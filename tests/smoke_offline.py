@@ -15,6 +15,8 @@
 5. DetectorCore 迟滞状态机 + Layout 坐标 + 鼠标落点映射
 6. AI 引擎（FakeClient）：System2 生成/幻觉过滤/规则降级/预算与间隔守门/
    System1 防幻觉/复盘日志
+10. 点击链丢弃诊断（rect_miss/no_hex_evidence/reroll_no_evidence 限频上
+    报+timeline 留痕）+ LogRedirector tee 文件留档（2026-09-29 台账复发案）
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -2290,6 +2292,59 @@ def test_ai_inflight():
     check("评级回调已发", "augment_ranks" in got, str(got))
 
 
+# ── 10. 点击链诊断 + stdout tee 留档（2026-09-29 台账复发案） ─────
+
+def test_click_diag_and_tee():
+    """台账复发案回归：海克斯识别成功但台账空，旧版 _on_click 静默丢弃
+    分支（矩形未命中/无海克斯证据/reroll 无证据）无线索可查，且控制台
+    一关 stdout 全丢。修复：三处丢弃全上限频诊断（面板+timeline 双落），
+    LogRedirector 加 tee 文件留档。"""
+    import io
+    import queue as _queue
+    from hexa.ui.theme import LogRedirector
+
+    print("\n[10] 点击链丢弃诊断 + stdout tee 留档")
+
+    tmp = Path(tempfile.mkdtemp(prefix="smoke_tee_"))
+    tee_path = tmp / "app.log"
+    q = _queue.Queue()
+    orig = io.StringIO()
+    red = LogRedirector(q, orig, tee_path=tee_path)
+    red.write("hello tee\n")
+    check("tee: 日志面板收到带时间戳行", q.qsize() == 1
+          and "hello tee" in q.get())
+    check("tee: 原流保留", orig.getvalue() == "hello tee\n")
+    check("tee: 文件落盘", tee_path.exists()
+          and "hello tee" in tee_path.read_text(encoding="utf-8"))
+    bad = LogRedirector(q, None, tee_path=tmp / "no_dir" / "x.log")
+    bad.write("still ok\n")
+    check("tee: 路径打不开不崩、队列照收（留档失败不阻塞日志主链路）",
+          q.qsize() == 1)
+
+    app_src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    seg_click = app_src[app_src.index("def _on_click")
+                        :app_src.index("def _record_click")]
+    seg_reroll = app_src[app_src.index("def _on_reroll")
+                         :app_src.index("ledger = MouseLedger")]
+    check("_on_click rect_miss：界面在屏但未命中卡片矩形 → 诊断"
+          "（标定错位直接证据，含落点+矩形）",
+          "rect_miss" in seg_click and "标定错位嫌疑" in seg_click
+          and 'core.state == "active"' in seg_click)
+    check("_on_click no_hex_evidence：矩形命中但无海克斯证据 → 诊断",
+          "no_hex_evidence" in seg_click)
+    check("_on_reroll reroll_no_evidence：刷新命中但无证据 → 诊断",
+          "reroll_no_evidence" in seg_reroll)
+    check("诊断写 timeline（click_dropped 随复盘日志事后可查）",
+          "click_dropped" in app_src)
+    check("诊断按 key 限频（防对局期刷屏）",
+          "_click_diag_ts.get(key" in app_src)
+    check("stdout/stderr tee 落盘接线（log/app_启动时刻.log）",
+          "tee_path=_tee_path" in app_src
+          and '"log"' in app_src
+          and "app_{time.strftime('%Y%m%d_%H%M%S')}" in app_src)
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -2308,6 +2363,7 @@ if __name__ == "__main__":
     test_build_progress()
     test_review_fixes()
     test_thinking_params()
+    test_click_diag_and_tee()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

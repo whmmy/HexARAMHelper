@@ -64,9 +64,12 @@ def main():
     root = tk.Tk()
     root.withdraw()  # 主窗口在初始化完成后再显示
 
-    # stdout/stderr → 日志面板
-    sys.stdout = LogRedirector(log_queue, sys.stdout)
-    sys.stderr = LogRedirector(log_queue, sys.stderr)
+    # stdout/stderr → 日志面板 + 文件留档（控制台窗口一关输出全丢：
+    # 2026-09-29 台账复发案无任何事后日志可查，从本次启动起 tee 落盘）
+    _tee_path = BASE_DIR / "log" / f"app_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    _tee_path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout = LogRedirector(log_queue, sys.stdout, tee_path=_tee_path)
+    sys.stderr = LogRedirector(log_queue, sys.stderr, tee_path=_tee_path)
 
     # UI 线程调度 helper（任意线程 → mainloop）
     def ui(fn):
@@ -134,19 +137,48 @@ def main():
             else None
         return px["rerolls"] if px else None
 
-    _click_hint_ts = [0.0]   # 记账失败提示限频（常规对局点击不刷屏）
+    _click_diag_ts = {}   # 点击链诊断限频（key → 上次打印时刻）
+
+    def _click_diag(key, detail):
+        """点击链丢弃诊断：3s 限频 print（落日志面板+tee 文件），并写
+        session timeline 供复盘日志事后追溯（stdout 无留档时唯一现场）。
+
+        2026-09-29 复发案：海克斯识别成功但台账空——旧版 _on_click 三个
+        静默 return（reroll 防御/矩形未命中/无海克斯证据）无线索可查，
+        本轮全部上诊断。只诊断异常丢弃：正常"点卡片矩形外"的移动/攻击
+        点击（无海克斯证据时不进到这里）不刷屏。"""
+        now = time.monotonic()
+        if now - _click_diag_ts.get(key, 0.0) < 3.0:
+            return
+        _click_diag_ts[key] = now
+        print(f"[LEDGER] 点击未记账({key}): {detail}")
+        try:
+            session._log("click_dropped", f"{key} {detail}")
+        except Exception:
+            pass
 
     def _on_click(x, y):
         # 双保险：MouseLedger 已把刷新按钮命中独占路由给 on_reroll，正常
         # 走不到这里；留着防御路由/矩形来源将来变更时误把刷新记账成选卡
         for rr in _reroll_rects() or []:
             if point_in_rect(x, y, rr):
+                _click_diag("reroll_overlap",
+                            f"({x},{y}) 命中刷新按钮矩形（路由异常?）")
                 return
         idx = card_ledger.card_at(x, y)
+        active = detector.recent_hex_activity()
         if idx is None:
+            if detector.core.state == "active":
+                rects = card_ledger.rects_provider()
+                _click_diag("rect_miss",
+                            f"({x},{y}) 海克斯界面在屏但未命中任何卡片矩形 "
+                            f"{rects}（标定错位嫌疑）")
             return   # 常规对局点击（移动/攻击）占绝大多数：静默防刷屏
-        if not detector.recent_hex_activity():
-            return   # 卡片矩形命中但无海克斯证据 = 误入，静默
+        if not active:
+            _click_diag("no_hex_evidence",
+                        f"({x},{y}) 卡{idx + 1} 矩形命中但无海克斯证据"
+                        "（界面刚关 >10s？）")
+            return   # 卡片矩形命中但无海克斯证据 = 误入
         # 稳定结果优先；识别尚未稳定时用最近一帧读数兜底（历史缺陷：
         # OCR 逐帧抖动导致永不稳定 → last_cards 空 → 点击被静默丢弃）
         cards = detector.last_cards or detector.last_cards_raw
@@ -168,8 +200,8 @@ def main():
         if not name or not kb.valid_augment(name):
             session._log("augment_unverified", f"卡{idx + 1} raw={raw}")
             now = time.time()
-            if now - _click_hint_ts[0] > 5.0:
-                _click_hint_ts[0] = now
+            if now - _click_diag_ts.get("unverified", 0.0) > 5.0:
+                _click_diag_ts["unverified"] = now
                 ui(lambda i=idx: print(f"[LEDGER] 卡片{i + 1} 点击未记账："
                                        "海克斯名未识别出来（界面刚出现"
                                        "或已关闭），已忽略；若卡面确有名字，"
@@ -183,6 +215,8 @@ def main():
 
     def _on_reroll():
         if not detector.recent_hex_activity():
+            _click_diag("reroll_no_evidence",
+                        f"({MouseLedger.cursor_pos()}) 刷新按钮命中但无海克斯证据")
             return   # 界面关闭 >10s 后的对局点击不再触发重扫/刷日志（同 _on_click 门）
         detector.force_rescan()
         detector.last_cards = None  # 重扫稳定前点击不记账（防按旧卡片名记录）
