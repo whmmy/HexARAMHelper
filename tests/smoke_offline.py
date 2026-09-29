@@ -299,7 +299,8 @@ def test_rules():
         [PlayerInfo(champion="盲僧", items=[{"name": "荆棘之甲", "count": 1}])])
     check("AP 数统计", tp.ap_count == 4, str(tp.ap_count))
     # 4 AP = 九尾妖狐/皎月女神/黑暗之女/众星之子（皎月女神经画像特例
-    # 修正为 ap，辅助按 Support 标签归 ap；盲僧物伤+荆棘之甲计坦）
+    # 修正为 ap，辅助按 Support 标签归 ap；盲僧物伤+荆棘之甲坦票重≥2
+    # → 只计坦克，退出物伤计数）
     check("治疗识别", tp.healers == ["众星之子"])
     check("敌方关键装扫描", tp.key_items and tp.key_items[0]["item"] == "荆棘之甲")
     tp_multi = ThreatProfile(key_items=[
@@ -325,6 +326,25 @@ def test_rules():
         [PlayerInfo(champion="赏金猎人", items=[{"name": "增幅典籍", "count": 1}])])
     check("单小件不推翻默认路线",
           tp_early.ad_count == 1 and tp_early.ap_count == 0, tp_early.summary())
+
+    # 坦克出装退出伤害威胁计数（真机 2026-09-28 木木局泰坦案）：泰坦底板
+    # damage=ap+is_tank，全出坦装（坦克票重≥2）时只计坦克不计法伤——
+    # 否则 ap_count 凑到 3 误触发"补魔抗"建议
+    tp_tank = rules.threat_profile(
+        ["深海泰坦", "迅捷斥候", "灰烬驱魔人"],
+        [PlayerInfo(champion="深海泰坦",
+                    items=[{"name": "日炎圣盾", "count": 1},
+                           {"name": "荆棘之甲", "count": 1}])])
+    check("坦装泰坦只计坦克不计法伤",
+          tp_tank.ap_count == 2 and tp_tank.tank_count == 1, tp_tank.summary())
+    # 对比：泰坦出 AP 传说件（法伤票重≥2）时仍按法伤计（底板+出装双证）
+    tp_ap_naut = rules.threat_profile(
+        ["深海泰坦"],
+        [PlayerInfo(champion="深海泰坦",
+                    items=[{"name": "灭世者的死亡之帽", "count": 1}])])
+    check("泰坦出法伤装仍计法伤",
+          tp_ap_naut.ap_count == 1 and tp_ap_naut.tank_count == 1,
+          tp_ap_naut.summary())
 
     # 海克斯时刻评级（S/A/B 合成评分）
     top3 = kb.top_augments("暗裔剑魔", 3)

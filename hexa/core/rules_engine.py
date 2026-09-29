@@ -306,6 +306,12 @@ class RulesEngine:
             if weight >= 2.0 or (vote and not damage):
                 if vote == "tank":
                     is_tank = True
+                    if weight >= 2.0:
+                        # 实际出装走坦克线 → 退出 ap/ad 威胁计数（真机
+                        # 2026-09-28 泰坦案：底板 damage=ap 的坦克全出坦装
+                        # 仍被计法伤，ap_count≥3 误触发魔抗建议——伤害
+                        # 威胁看出装实证，不看英雄底板）
+                        damage = ""
                 elif vote:
                     damage = vote
             if damage == "ap":
