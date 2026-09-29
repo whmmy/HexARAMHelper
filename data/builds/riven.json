@@ -1,6 +1,6 @@
 {
  "slug": "riven",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/riven/build",
  "patch": "16.19",
  "starter_items": [
@@ -33,19 +33,19 @@
    "死亡之舞"
   ],
   [
-   "星蚀",
-   "焚天",
-   "黑色切割者"
-  ],
-  [
    "焚天",
    "星蚀",
    "死亡之舞"
   ],
   [
-   "公理圆弧",
-   "无穷饥渴",
-   "死亡之舞"
+   "星蚀",
+   "焚天",
+   "玛莫提乌斯之噬"
+  ],
+  [
+   "星蚀",
+   "焚天",
+   "朔极之矛"
   ]
  ],
  "skill_orders": [

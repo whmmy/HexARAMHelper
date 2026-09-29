@@ -31,7 +31,8 @@ from hexa.core.game_state import GameSession
 from hexa.core.live_api import LivePoller, LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
 from hexa.core.mouse_ledger import CardLedger
-from hexa.core.rules_engine import RulesEngine, SwapCandidate, ThreatProfile
+from hexa.core.rules_engine import (RulesEngine, SwapCandidate, ThreatProfile,
+                                    is_full_build)
 from hexa.core.screen_detect import (DEFAULT_LAYOUT_169, DetectorCore, Layout,
                                      capture_region, is_fullscreen_cover,
                                      point_in_rect)
@@ -126,7 +127,9 @@ def full_snap(my_hero_en, my_rows, foe_rows, my_items=None, my_gold=0):
 def test_kb():
     print("\n[1] KnowledgeBase")
     check("173 英雄先验", len(kb.hero_augments) == 173, f"got {len(kb.hero_augments)}")
-    check("229 海克斯名单", len(kb.augment_names) == 229, f"got {len(kb.augment_names)}")
+    check("海克斯名单（剔除 ？？？ 占位后 228）",
+          len(kb.augment_names) == 228 and "？？？" not in kb.augment_names,
+          f"got {len(kb.augment_names)}")
     check("装备库加载", len(kb.items) > 250, f"got {len(kb.items)}")
     check("DD 版本号", kb.dd_version.startswith("16."), kb.dd_version)
     # 峡谷/大乱斗商店买不到的模式专属件不入库（推荐出去 = 幻觉）
@@ -246,7 +249,9 @@ def test_rules():
           and "兰德里的折磨" in [c.name for c in seq_ap],
           str([c.name for c in seq_ap]))
     seq_j = rules.build_sequence([], "ad", ThreatProfile(), hero="暗裔剑魔")
-    check("剑魔爆杀流核心线", seq_j and seq_j[0].name == "星蚀",
+    # 2026-09-29 重抓后 OP.GG 剑魔第一线为 锯齿短匕·狂妄 开局（4 件全
+    # ad bias，票数压过 星蚀·焚天·死亡之舞 的 3 票）
+    check("剑魔爆杀流核心线", seq_j and seq_j[0].name == "锯齿短匕",
           str([c.name for c in seq_j]))
     seq2 = rules.build_sequence(["收集者"], "ad", ThreatProfile(),
                                 hero="恶魔小丑")
@@ -542,6 +547,23 @@ def test_phase_machine():
           events[kinds.index("end_of_game")][1] == "dodge_requeue", str(events))
     check("秒退后重新选人", kinds.count("champ_select") >= 1)
 
+    # 回归（2026-09-28 真机）：真机 gameflow 序列 InProgress → PreEndOfGame
+    # → EndOfGame → None——PreEndOfGame 不算收尾时 on_end_of_game 整局不
+    # 触发（会话卡"对局中"、复盘日志不落盘）
+    events.clear()
+    pm3 = PhaseMachine(FakeLCU(), callbacks={
+        "on_in_progress": lambda: events.append(("in_progress",)),
+        "on_end_of_game": lambda r: events.append(("end_of_game", r)),
+    })
+    pm3._handle("InProgress")
+    pm3._handle("PreEndOfGame")   # 结算画面出现（胜利/失败界面）
+    pm3._handle("EndOfGame")
+    pm3._handle("None")           # 回大厅
+    kinds3 = [e[0] for e in events]
+    check("PreEndOfGame 即局终（真机序列）",
+          kinds3 == ["in_progress", "end_of_game"]
+          and events[1][1] == "PreEndOfGame", str(events))
+
     # 断连（In game 中连续取不到 phase）
     class DeadLCU(FakeLCU):
         def is_connected(self):
@@ -716,6 +738,45 @@ def test_detect_and_layout():
     check("活跃期全帧识别不抛 MIN_TITLE_HITS",
           bool(_got) and _got[0][0] == _cards3, _aerr)
 
+    # 点击时刻补扫：识别未稳定时的记账兜底（真机 2026-09-28 复盘：
+    # 界面刚出现的窗口期点击被静默丢弃 → 台账缺记录）。补扫必须直接
+    # 消费 recognize 原文——经 _ocr_cards@72 预过滤时库外文本早被置
+    # None，留痕恒 raw=None（2026-09-29 核验实锤后改直连）
+    ch0 = cards[0][3] or 1
+    _raw_hit = [("「有始有终」", [8, int(0.45 * ch0), 120, 40], 0.95)]
+    _raw_miss = [("无漆安途", [8, int(0.45 * ch0), 120, 40], 0.95)]
+
+    class _SyncOcr:
+        available = True
+        out = _raw_hit
+
+        @staticmethod
+        def recognize(image):
+            return list(_SyncOcr.out)
+
+        @staticmethod
+        def match_augment(text, threshold=72):
+            # 镜像真实引擎：先清洗标点（ocr_engine.py:77-80）再匹配；
+            # 库名恒命中；库外文本低于任意正阈值，仅 threshold=0
+            # （模糊兜底）返回最低分候选
+            cleaned = "".join(
+                ch for ch in text
+                if ch.isalnum() or "\u4e00" <= ch <= "\u9fff")
+            if cleaned in _cards3:
+                return (cleaned, 99)
+            return None if threshold > 0 else (cleaned or text, 0)
+
+    det_a.ocr = _SyncOcr()
+    got_raw = det_a.sync_ocr_card_raw(0)
+    check("点击补扫命中：raw=装饰原文（非归一化名）",
+          got_raw == (_cards3[0], "「有始有终」"), str(got_raw))
+    check("薄壳 sync_ocr_card 返回库名", det_a.sync_ocr_card(0) == _cards3[0])
+    _SyncOcr.out = _raw_miss
+    got_miss = det_a.sync_ocr_card_raw(1)
+    check("点击补扫库外名：raw 留原文（不再恒 None）",
+          got_miss == (None, "无漆安途"), str(got_miss))
+    check("补扫越界安全", det_a.sync_ocr_card(9) is None)
+
     # save_layout 并发原子性（检测线程自愈 × 手动标定线程两写者回归）：
     # 交错写后文件必须仍是完整 JSON，且无 .tmp 残留
     import tempfile as _tempfile
@@ -790,6 +851,12 @@ def test_detect_and_layout():
         [[1, 2, 3, 4], [5, 6, 7, 8]]) == [[1, 2, 3, 4], [5, 6, 7, 8]])
     check("归一化空值", MouseLedger._as_rect_list(None) == []
           and MouseLedger._as_rect_list([]) == [])
+
+    # 点击记账证据门：迟滞窗口内的点击也要能记账（台账空白根因回归）
+    check("无证据默认不记账", det_v.recent_hex_activity() is False)
+    det_v.core.state = "active"
+    check("活跃期允许记账", det_v.recent_hex_activity() is True)
+    det_v.core.state = "inactive"
 
     # on_cards 发射门：≥2 个有效库名才上报（复用上面 det_v 实例）
     check("发射门：全有效名 3", det_v.count_valid_cards(
@@ -1151,6 +1218,35 @@ def test_swap_mode():
                                   my_gold=1500))
     check("未满装（消耗品占格）不受影响",
           session.suggestion.kind == "next_items", session.suggestion.kind)
+
+    # ---- 回归 2026-09-28 真机（炽炎雏龙/木木局）：满装判据收紧 ----
+    # 修复前按"6 占格"判满装：1 传说+魄罗佳肴凑格、3 传说+2 组件+鞋都
+    # 被切进替换流推"卖X换Y"幻影替换。修复后 is_full_build = 格满 且
+    # 传说档非靴件 ≥5（FULL_BUILD_LEGENDARY_MIN）。
+    check("占位条目（魄罗佳肴）不入满装格",
+          "魄罗佳肴" not in kb.permanent_items(
+              ["夺萃之镰", "暴食胫甲", "魄罗佳肴", "狂热", "红水晶", "布甲"]))
+    recon_2233 = ["夺萃之镰", "暴食胫甲", "狂热", "红水晶", "布甲", "布甲"]
+    check("1传说+鞋+组件凑格不判满装",
+          not is_full_build(kb, recon_2233), str(is_full_build(kb, recon_2233)))
+    full5_no_boots = ["灭世者的死亡之帽", "虚空之杖", "瑞莱的冰晶节杖",
+                      "振奋盔甲", "残疫", "红水晶"]
+    check("5传说+1组件（无靴）判满装",
+          is_full_build(kb, full5_no_boots))
+    session_amumu = GameSession(kb, rules)
+    session_amumu.on_game_start({"ally": ["殇之木乃伊"], "enemy": ["九尾妖狐"],
+                                 "my_hero": "殇之木乃伊", "source": "test"})
+    session_amumu.on_in_progress()
+    items_amumu = ["日炎圣盾", "心之钢", "无终恨意", "棘刺背心", "巨人腰带",
+                   "暴食胫甲"]
+    session_amumu.on_snapshot(make_snap(my_hero_en="Amumu",
+                                        my_items=items_amumu, my_gold=515))
+    check("木木式 3传说+2组件+鞋 不切替换流（保持买装）",
+          session_amumu.suggestion.kind == "next_items",
+          session_amumu.suggestion.kind)
+    check("木木式局面 session._is_full_build=False",
+          not session_amumu._is_full_build())
+
     session.on_snapshot(make_snap(my_hero_en="Annie", my_items=full_ap,
                                   my_gold=2000))
     text = session.suggestion.render()

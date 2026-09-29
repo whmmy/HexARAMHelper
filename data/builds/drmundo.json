@@ -1,6 +1,6 @@
 {
  "slug": "drmundo",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/drmundo/build",
  "patch": "16.19",
  "starter_items": [
@@ -69,19 +69,19 @@
   ],
   [
    "Q",
-   "Q",
-   "E",
    "W",
+   "E",
+   "Q",
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ],
   [
@@ -91,14 +91,14 @@
    "Q",
    "Q",
    "R",
-   "E",
-   "Q",
    "Q",
    "E",
+   "Q",
+   "W",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ]
  ],

@@ -10,6 +10,7 @@ skills 页含 QWER 加点序列（1-18 级顺序，第一个为主流方案）�
     uv run python scripts/fetch_opgg_builds.py                # P0.5 三英雄
     uv run python scripts/fetch_opgg_builds.py --all          # 全量 173 英雄
     uv run python scripts/fetch_opgg_builds.py --all --force  # 强制重抓（忽略当日缓存）
+    uv run python scripts/fetch_opgg_builds.py --hero amumu --force  # 单英雄定向刷新
 
 特性：断点续爬（当日已有即跳过）、失败重试+退避、连续失败 5 次中止防限流、
 全量完成后汇总 data/builds/builds.csv。
@@ -151,14 +152,22 @@ def main():
     args = [a for a in sys.argv[1:] if not a.startswith("-")]
     fetch_all = "--all" in sys.argv
     force = "--force" in sys.argv
-    out_dir = OUT_DIR
+    hero = None
+    if "--hero" in sys.argv:
+        _i = sys.argv.index("--hero")
+        hero = sys.argv[_i + 1] if _i + 1 < len(sys.argv) else None
+        args = [a for a in args if a != hero]   # 防误当 P0.5 三英雄 slug 抓错目录
+    cn_to_en = json.loads((DATA_DIR / "champions.json").read_text(encoding="utf-8"))
     if fetch_all:
-        cn_to_en = json.loads((DATA_DIR / "champions.json").read_text(encoding="utf-8"))
         slugs = sorted({en.lower().replace(" ", "") for en in cn_to_en.values()})
         out_dir = DATA_DIR / "builds"      # 全量正式资产：data/builds/{slug}.json
+    elif hero:
+        # 单英雄定向刷新：复用全量正式资产目录（版本检查/抓取日期随单文件更新）
+        slugs = [hero.strip().lower().replace(" ", "")]
+        out_dir = DATA_DIR / "builds"
     else:
-        cn_to_en = json.loads((DATA_DIR / "champions.json").read_text(encoding="utf-8"))
         slugs = args or ["aatrox", "annie", "jinx"]
+        out_dir = OUT_DIR
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ok, skip, failed = 0, 0, []

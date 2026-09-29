@@ -1,6 +1,6 @@
 {
  "slug": "veigar",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/veigar/build",
  "patch": "16.19",
  "starter_items": [
@@ -76,11 +76,11 @@
    "Q",
    "R",
    "Q",
-   "W",
+   "E",
    "Q",
    "W",
    "R",
-   "E",
+   "W",
    "W",
    "W",
    "E"
@@ -93,9 +93,9 @@
    "Q",
    "R",
    "Q",
-   "E",
-   "Q",
    "W",
+   "Q",
+   "E",
    "R",
    "W",
    "W",

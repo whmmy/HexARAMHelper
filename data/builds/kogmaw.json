@@ -1,6 +1,6 @@
 {
  "slug": "kogmaw",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kogmaw/build",
  "patch": "16.19",
  "starter_items": [
@@ -43,6 +43,7 @@
    "智慧末刃"
   ],
   [
+   "女神之泪",
    "残疫",
    "炽天使之拥",
    "兰德里的折磨"
@@ -74,12 +75,12 @@
    "W",
    "R",
    "W",
-   "E",
+   "Q",
    "W",
    "Q",
    "R",
    "Q",
-   "Q",
+   "E",
    "Q",
    "E"
   ],
@@ -91,9 +92,9 @@
    "W",
    "R",
    "W",
-   "Q",
-   "W",
    "E",
+   "W",
+   "Q",
    "R",
    "Q",
    "Q",

@@ -1,6 +1,6 @@
 {
  "slug": "sivir",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/sivir/build",
  "patch": "16.19",
  "starter_items": [
@@ -74,29 +74,29 @@
    "R",
    "Q",
    "W",
-   "W",
    "Q",
+   "W",
    "R",
    "W",
-   "W",
    "E",
+   "W",
    "E"
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
    "Q",
    "W",
    "Q",
-   "W",
+   "E",
    "R",
    "W",
    "W",
-   "E",
+   "W",
    "E"
   ]
  ],

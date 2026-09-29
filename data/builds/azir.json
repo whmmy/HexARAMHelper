@@ -1,6 +1,6 @@
 {
  "slug": "azir",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/azir/build",
  "patch": "16.19",
  "starter_items": [
@@ -39,14 +39,14 @@
    "瑞莱的冰晶节杖"
   ],
   [
-   "纳什之牙",
-   "影焰",
-   "中娅沙漏"
-  ],
-  [
    "卢登的回声",
    "纳什之牙",
    "影焰"
+  ],
+  [
+   "纳什之牙",
+   "影焰",
+   "中娅沙漏"
   ]
  ],
  "skill_orders": [
@@ -87,9 +87,9 @@
   [
    "W",
    "W",
-   "E",
    "Q",
    "W",
+   "E",
    "W",
    "R",
    "W",

@@ -386,7 +386,9 @@ class ScreenDetector(threading.Thread):
       on_calibrate_hint()                                # OCR 连续失配
     """
 
-    POLL_INTERVAL = 2.0
+    POLL_INTERVAL = 2.0    # 纯待机轮询间隔（非活跃且无模板证据）
+    ACTIVE_POLL = 1.0      # 活跃期间隔（识别窗口就几十秒，抢稳定速度）
+    WAKE_POLL = 0.5        # 模板命中但未确认活跃：短轮询加速迟滞确认
     MISMATCH_LIMIT = 5     # 连续 N 轮"标题命中但卡片全失配" → 提示重标定
     BLIND_OCR_EVERY = 3    # 非活跃期每 N 帧强制 OCR 一次（防模板漏检）
     TPL_HIT = 0.60         # matchTemplate 命中阈值（卡框美术恒定，文字占比小）
@@ -417,6 +419,8 @@ class ScreenDetector(threading.Thread):
         self._window = None               # 游戏窗口客户区几何（本 tick 生效）
         self._mode_logged = None          # 抓屏模式日志去重（window/screen）
         self._canvas_loaded = None        # 当前画布尺寸（变更时重读标定/模板）
+        self._last_tpl_score = 0.0        # 最近一帧模板预筛分（0=无模板）
+        self._last_hex_evidence = 0.0     # 最近海克斯证据时刻（点击记账门）
 
     # ── 控制 ──────────────────────────────────────────────────────
 
@@ -641,7 +645,14 @@ class ScreenDetector(threading.Thread):
                 self._tick()
             except Exception as e:  # noqa: BLE001 —— 单帧失败不影响循环
                 print(f"[WARN] 检测帧异常: {e}")
-            time.sleep(self.POLL_INTERVAL)
+            # 自适应间隔：OCR 是大头，间隔只影响响应延迟——活跃期/
+            # 模板命中期短轮询抢识别窗口（海克斯选择就几十秒）；纯待机 2s
+            if self.core.state == "active":
+                time.sleep(self.ACTIVE_POLL)
+            elif self._last_tpl_score >= self.TPL_HIT:
+                time.sleep(self.WAKE_POLL)
+            else:
+                time.sleep(self.POLL_INTERVAL)
 
     def _tick(self):
         if self.layout is None or not self.ocr.available:
@@ -656,27 +667,44 @@ class ScreenDetector(threading.Thread):
         if self.core.state != "active":
             self._load_templates()
             strips = self._grab_bands(regions["title_bands"])
-            do_ocr = self._tick_count % self.BLIND_OCR_EVERY == 0
-            if not do_ocr and self._tpl is not None:
-                do_ocr = self._template_score(strips) >= self.TPL_HIT
+            # 模板分每帧都算（matchTemplate ~ms 级）：命中=版式未漂移，
+            # 既当 OCR 门也当短轮询/点击记账的证据
+            tpl_score = (self._template_score(strips)
+                         if self._tpl is not None else 0.0)
+            self._last_tpl_score = tpl_score
+            if tpl_score >= self.TPL_HIT:
+                self._last_hex_evidence = time.time()
+            do_ocr = (self._tick_count % self.BLIND_OCR_EVERY == 0
+                      or tpl_score >= self.TPL_HIT)
             hits, _titles = self._ocr_title_strips(strips) if do_ocr else (0, [])
+            if hits >= self.core.MIN_TITLE_HITS:
+                self._last_hex_evidence = time.time()
             self.core.feed_titles(hits)
             self._fire_state_change()
-            return
+            if self.core.state != "active":
+                return
+            # 刚激活：不等下一轮轮询，本 tick 直接落全帧卡识别（首读快 ~2s）
 
         # ── 活跃期：全帧一次，标题 + 卡片共用 ─────────────────────
         frame = self._grab()
         sh, sw = frame.shape[:2]
 
-        hits, _titles = self._ocr_title_strips(
-            [self._crop(frame, band) for band in regions["title_bands"]])
+        title_strips = [self._crop(frame, band)
+                        for band in regions["title_bands"]]
+        hits, _titles = self._ocr_title_strips(title_strips)
+        # 模板分（matchTemplate ~ms 级）：高分 = 版式未漂移
+        self._last_tpl_score = (self._template_score(title_strips)
+                                if self._tpl is not None else 0.0)
+        if hits >= self.core.MIN_TITLE_HITS:
+            self._last_hex_evidence = time.time()
         self.core.feed_titles(hits)
         self._fire_state_change()
 
         # 活跃期自愈标定（未标定/标定漂移；每活跃期最多 3 次尝试）——
         # 成功后区域可能更新，卡片 OCR 用刷新后的区域
         if hits >= self.core.MIN_TITLE_HITS and not self._auto_calib_done \
-                and self._auto_calib_tries < self.AUTO_CALIB_TRIES:
+                and self._auto_calib_tries < self.AUTO_CALIB_TRIES \
+                and self._last_tpl_score < self.TPL_HIT:
             self._auto_calib_tries += 1
             self._auto_calibrate_frame(frame)
             regions = self.layout.to_pixels(sw, sh, canvas=True)
@@ -730,6 +758,79 @@ class ScreenDetector(threading.Thread):
     # 0.176~0.665H → 相对 0.45~0.51；带留边后取 0.30~0.62，用于排除卡面
     # 描述文字里提及的其他海克斯名干扰）
     NAME_ZONE = (0.30, 0.62)
+
+    # ── 点击时刻记账支撑（活跃迟滞窗口内的点击也要能记账） ────────
+
+    def recent_hex_activity(self, within: float = 10.0) -> bool:
+        """最近 within 秒内有过海克斯证据（界面活跃/标题命中/模板高分）。
+
+        点击记账的门：检测状态机有 2 帧出现/3 帧消失迟滞——界面刚出现
+        或刚关闭的窗口期内点击若按 state 门控会被静默丢弃（2026-09-28
+        真机复盘：台账空白的根因之一），改按证据时间窗判定。"""
+        return (self.core.state == "active"
+                or time.time() - self._last_hex_evidence < within)
+
+    def sync_ocr_card_raw(self, idx: int) -> tuple:
+        """点击时刻同步补扫第 idx 张卡 → (库名|None, 原始OCR文本|None)。
+
+        与检测线程不同：这里直接消费 recognize() 的原始文本，不走
+        _ocr_cards 的 match_augments_in@72 预过滤——否则库外名/低分
+        读数在进入本函数前就被置 None，留痕恒为 raw=None，事后无从
+        追溯（2026-09-29 核验实锤）。命中时 raw=命中框的 OCR 原文
+        （含「」·等装饰字符）；未命中时 raw=名字带内相似度最高一条的
+        原文（知识库落后于游戏版本时，复盘日志里能看到卡面真名，
+        人工补录词表的依据）。名字带过滤同 _ocr_cards（防卡面描述
+        文字/tooltip 干扰），但未命中留痕也只取带内文本。其余行为同
+        sync_ocr_card。
+        """
+        if self.layout is None or not self.ocr.available:
+            return None, None
+        try:
+            regions = self.layout.to_pixels(*self._screen_size(), canvas=True)
+            cards = regions["cards"]
+            if idx < 0 or idx >= len(cards):
+                return None, None
+            with self._grab_lock:
+                frame = self._grab()
+            crop = self._crop(frame, cards[idx])
+            ch = crop.shape[0] or 1
+            hits = []                     # (name, score, in_zone, raw_text)
+            best_raw, best_score = None, -1.0
+            for t, rect, _conf in self.ocr.recognize(crop):
+                if not t:
+                    continue
+                in_zone = (self.NAME_ZONE[0] * ch
+                           <= rect[1] + rect[3] / 2 <= self.NAME_ZONE[1] * ch)
+                m = self.ocr.match_augment(t, threshold=80)
+                if m:
+                    hits.append((m[0], m[1], in_zone, t))
+                    continue
+                # 未命中：留相似度最高的带内原文（库外名线索）
+                if not in_zone:
+                    continue
+                near = self.ocr.match_augment(t, threshold=0)
+                if near and near[1] > best_score:
+                    best_raw, best_score = t, near[1]
+            if hits:
+                # 名字带内优先，同带取最高分（同 _ocr_cards 口径）
+                zone_hits = [h for h in hits if h[2]] or hits
+                name = max(zone_hits, key=lambda h: h[1])
+                return name[0], name[3]
+            return None, best_raw
+        except Exception as e:  # noqa: BLE001 —— 补扫失败不影响主流程
+            print(f"[WARN] 点击补扫异常: {e}")
+        return None, None
+
+    def sync_ocr_card(self, idx: int):
+        """点击时刻同步补扫（薄壳，保持原返回值：库名|None）。
+
+        识别未稳定（界面刚出现/流光抖动）时的记账兜底——OCR 未及 2 帧
+        稳定就点击时，稳定读数/最近一帧读数都可能还没有有效卡名。检测
+        线程可能正在 OCR，OcrEngine 内部有锁串行；本调用在记账线程内
+        阻塞至多 ~2s（不卡 UI/游戏）。匹配阈值提到 80（补扫只此一帧，
+        误记账的代价比漏记高）。失败返回 None。"""
+        name, _raw = self.sync_ocr_card_raw(idx)
+        return name
 
     def count_valid_cards(self, cards: list) -> int:
         """三卡中有效库名的个数（on_cards 发射门：≥2 才上报）"""
@@ -825,6 +926,12 @@ class ScreenDetector(threading.Thread):
             got = sorted(sum(h[1] for h in cl) / len(cl) for cl in clusters)
             drift = sum(abs(a - b) for a, b in zip(got, cur)) / 3
             if drift <= self.AUTO_CALIB_DRIFT:
+                # 标定没漂移：本活跃期自愈标定视为已完成——否则
+                # _auto_calib_done 恒 False，活跃期每个 tick 都重跑
+                # 一次全宽带聚类 OCR（~2-6s，最多 3 次），识别稳定
+                # 被白拖十几秒（2026-09-28 真机复盘：界面出现→卡片
+                # 稳定 ~15s 的主因）
+                self._auto_calib_done = True
                 return
             print(f"[CALIB] 检测到标题条漂移 ~{drift:.0f}px，自动重标定")
         self._auto_calib_done = self._calibrate_from_frame(frame)

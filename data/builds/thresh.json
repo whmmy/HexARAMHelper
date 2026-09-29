@@ -1,6 +1,6 @@
 {
  "slug": "thresh",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/thresh/build",
  "patch": "16.19",
  "starter_items": [
@@ -37,8 +37,8 @@
    "无终恨意"
   ],
   [
-   "末日寒冬",
-   "败魔",
+   "心之钢",
+   "狂徒铠甲",
    "荆棘之甲"
   ],
   [
@@ -73,19 +73,19 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
    "Q",
    "E",
    "Q",
-   "E",
+   "W",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ],
   [
@@ -98,10 +98,10 @@
    "Q",
    "E",
    "Q",
-   "W",
+   "E",
    "R",
    "E",
-   "E",
+   "W",
    "E",
    "W"
   ]

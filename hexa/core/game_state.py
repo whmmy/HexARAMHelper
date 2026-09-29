@@ -17,7 +17,8 @@ from dataclasses import dataclass, field
 from hexa.ai import engine as engine_mod
 from hexa.ai.engine import KIND_CTX, KIND_NEXT, KIND_OPENING, KIND_RANKS
 from hexa.config import BASE_DIR
-from hexa.core.rules_engine import LEGENDARY_GOLD, Candidate, SwapCandidate
+from hexa.core.rules_engine import (LEGENDARY_GOLD, Candidate, SwapCandidate,
+                                    is_full_build)
 
 # ── 军师提示（v4.5）口径常量 ─────────────────────────────────────
 COACH_MAX_NOTES = 3            # 滚动保留最近 3 条（任务口径）
@@ -142,6 +143,7 @@ class GameSession:
             self.hex_picked = None        # 本轮点击选中的卡 (idx, name)
             self.hex_last = ""            # 上一轮识别结果（界面关闭后保留展示）
             self.history = []             # 建议历史（复盘日志）
+            self._review_flushed = False  # 本局复盘已落盘标记（双兜底防丢）
             self._game_t0 = time.time()
             self._log("session_reset")
 
@@ -154,6 +156,9 @@ class GameSession:
     def on_champ_select(self, teams):
         with self._lock:
             my_hero = self.kb.validate_hero(teams.get("my_hero") or "")
+            # 上一局终局事件丢失（中途启动/秒退）时补写复盘（flush 幂等，
+            # 正常路径已写过则此处空转）
+            self.flush_pending_review()
             if self.stage in ("game_start", "in_game") or (
                     my_hero and my_hero != self.my_hero and self.stage == "champ_select"):
                 # 骰子换人 / 异常回退：重置会话重新跟随
@@ -169,6 +174,8 @@ class GameSession:
 
     def on_game_start(self, teams):
         with self._lock:
+            # 上一局终局事件丢失（直接开局/秒退跳过 EndOfGame）时补写复盘
+            self.flush_pending_review()
             self.reset()
             self.stage = "game_start"
             self.my_hero = self.kb.validate_hero(teams.get("my_hero") or "") or self.my_hero
@@ -349,14 +356,25 @@ class GameSession:
     # ── 海克斯记账（P1 mouse_ledger 调用入口；冒烟测试直接调用） ───
 
     def record_augment(self, name: str, tier: str = "", card_idx=None):
-        """记账入口。card_idx：点击的卡片序号（0-2），供 overlay"✓已选"标记。"""
+        """记账入口。card_idx：点击的卡片序号（0-2），供 overlay"✓已选"标记。
+
+        同名防重复记账：拒绝时不动 hex_picked——被拒的点击不是一条新
+        台账（同名已在档），把"✓已选"挪到新卡会让浮窗谎报已选而台账
+        缺条（2026-09-29 核验实锤的错位）。模式是否允许同名强化跨轮
+        重复选取无仓库数据可证（离线不可判），留 augment_duplicate_click
+        轨迹事件供真机对局定性后再决定是否改按 (name, 轮次) 记账。
+        """
         with self._lock:
             if not name:
                 return False
+            if any(a["name"] == name for a in self.augments):
+                if card_idx is not None:
+                    self._log("augment_duplicate_click",
+                              f"卡{card_idx + 1} {name}（台账已有同名，"
+                              "未重复记账，✓已选保持原卡）")
+                return False
             if card_idx is not None:
                 self.hex_picked = (card_idx, name)
-            if any(a["name"] == name for a in self.augments):
-                return False  # 防重复记账
             self.augments.append({"name": name, "tier": tier, "ts": time.time()})
             self._log("augment_recorded", f"{tier} {name}")
             if self.first_augment is None:
@@ -540,7 +558,8 @@ class GameSession:
         else:
             target, note = self.rules.component_advice(
                 self.my_items, self.current_path, game_map=self.game_map,
-                prefer=[c.name for c in seq])
+                prefer=[c.name for c in seq], hero=self.my_hero or "",
+                threat=self.threat)
             if target:
                 if seq and seq[0].name == target:
                     # 目标本就是主线第一件：合成提示并入理由，不重排不重复占位
@@ -587,9 +606,10 @@ class GameSession:
     # ── 满六神装替换建议（v4.4） ─────────────────────────────────
 
     def _is_full_build(self) -> bool:
-        """占格装备（扣除药水等消耗品/饰品）满 6 件。
-        大乱斗无饰品位，以 Live API 物品格实数为准。"""
-        return len(self.kb.permanent_items(self.my_items)) >= 6
+        """满六神装：6 占格且其中传说档非靴件 ≥5（is_full_build 单一口径，
+        与 rules_engine.build_sequence 分流同尺；鞋/组件/消耗品占格不再
+        单独构成满装——2026-09-28 真机 3 传说+2 组件+鞋误判案）。"""
+        return is_full_build(self.kb, self.my_items)
 
     def _suggest_swap(self, swaps: list, serial: int, reason: str = "event"):
         """替换建议落位：补记金币净差 + 台账联动重排。
@@ -610,7 +630,8 @@ class GameSession:
         note = ""
         target, cnote = self.rules.component_advice(
             self.my_items, self.current_path, game_map=self.game_map,
-            prefer=[c.buy for c in swaps])
+            prefer=[c.buy for c in swaps], hero=self.my_hero or "",
+            threat=self.threat)
         if target:
             note = f"先合成：{cnote}"
         self._set_suggestion(Suggestion("swap_items", swaps, note=note,
@@ -960,9 +981,34 @@ class GameSession:
             path = out_dir / f"{ts}_{safe_hero}.json"
             path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
                             encoding="utf-8")
+            self._review_flushed = True   # 写成功才置位；异常保持 False 可重试
             print(f"[SESSION] 复盘日志已写入 {path.name}")
         except Exception as e:
             print(f"[WARN] 复盘日志写入失败: {e}")
+
+    def flush_pending_review(self):
+        """复盘日志兜底②（P1）：终局事件丢失时补写上一局的复盘。
+
+        触发点：下一局 on_champ_select / on_game_start 的 reset 前、
+        App 退出 finally（app.py ledger.stop 后）。条件：本局尚未落盘、
+        仍处于对局阶段（idle 下 reset 已清场，无可写内容）、且台账或
+        建议历史非空，或 timeline 有库外名点击留痕（augment_unverified
+        ——纯留痕局也要落盘，否则知识库落后案的线索随退出丢失）；
+        零内容的空转局不产文件。_write_review_log 幂等——同一局重复
+        调用只在首次成功时产出文件（后写会覆盖同名文件，置位后不再
+        重写）。
+        """
+        with self._lock:
+            if self._review_flushed:
+                return
+            if self.stage not in ("game_start", "in_game"):
+                return
+            has_unverified = any(e[1] == "augment_unverified"
+                                 for e in self.timeline)
+            if not (self.augments or self.history or has_unverified):
+                return
+            self._log("review_flush", "终局事件丢失，兜底补写复盘日志")
+            self._write_review_log()
 
     # ── UI 消费 ───────────────────────────────────────────────────
 

@@ -1,6 +1,6 @@
 {
  "slug": "yone",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/yone/build",
  "patch": "16.19",
  "starter_items": [
@@ -38,14 +38,14 @@
    "不朽盾弓"
   ],
   [
-   "破败王者之刃",
-   "不朽盾弓",
-   "凡性的提醒"
-  ],
-  [
    "海妖杀手",
    "不朽盾弓",
    "无尽之刃"
+  ],
+  [
+   "不朽盾弓",
+   "无尽之刃",
+   "死亡之舞"
   ]
  ],
  "skill_orders": [
@@ -91,9 +91,9 @@
    "Q",
    "R",
    "Q",
-   "E",
-   "Q",
    "W",
+   "Q",
+   "E",
    "R",
    "E",
    "E",

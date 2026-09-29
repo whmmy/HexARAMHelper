@@ -1,6 +1,6 @@
 {
  "slug": "karthus",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/karthus/build",
  "patch": "16.19",
  "starter_items": [
@@ -43,8 +43,8 @@
   ],
   [
    "残疫",
-   "兰德里的折磨",
-   "黯炎火炬"
+   "影焰",
+   "兰德里的折磨"
   ]
  ],
  "skill_orders": [
@@ -84,17 +84,17 @@
   ],
   [
    "Q",
-   "Q",
-   "E",
    "W",
+   "E",
+   "Q",
    "Q",
    "R",
    "Q",
    "E",
    "Q",
    "E",
-   "R",
    "E",
+   "R",
    "E",
    "W",
    "W"

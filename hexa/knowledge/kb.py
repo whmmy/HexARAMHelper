@@ -134,6 +134,10 @@ class KnowledgeBase:
                 except ValueError:
                     t_rank = 999
                 name = row[5].strip()
+                if not name or name == "？？？":
+                    # 上游榜单占位行：不入档也不进唯一名集合（防 OCR
+                    # 幻觉校验被占位符污染；真名补齐需重抓 CSV，运维项）
+                    continue
                 if hero not in self.hero_augments:
                     self.hero_augments[hero] = {}
                 self.hero_augments[hero][name] = {
@@ -330,6 +334,10 @@ class KnowledgeBase:
         """过滤消耗品/饰品后的占格装备名列表（满六神装判定用）。
 
         大乱斗虽无饰品位，药水等消耗品会临时占格，数格前须排除；
+        gold=0 且无 tags 的占位条目（魄罗佳肴/防御工事/小兵去质器/
+        银蛇币杂项/普朗克 占位，全库实测 7 条）同样不算正式件——
+        它们占格但不构成战力，2026-09-28 炽炎雏龙局 1 传说+魄罗佳肴
+        凑满 6 格被误判满装即此因。
         库外名（DD 版本滞后于游戏的新装备）按占格保留——宁可多判
         满装走替换流，也不漏判后继续推买不进的"下一件"。
         """
@@ -337,6 +345,8 @@ class KnowledgeBase:
         for n in names:
             info = self.items.get(n)
             if info is None or not ({"Consumable", "Trinket"} & set(info["tags"])):
+                if info is not None and not info.get("gold") and not info.get("tags"):
+                    continue
                 out.append(n)
         return out
 
@@ -366,7 +376,7 @@ class KnowledgeBase:
         "先出自己流派的核心三件套，敌情是后续调整"）。
 
         按当前路线选最匹配的组合：小丑 ad→收集者线 / ap→黯炎火炬·面具线，
-        剑魔 爆杀流→星蚀·焚天·死亡之舞。匹配票数 = 组合内与路线同 bias 的
+        剑魔 ad→锯齿短匕·狂妄·焚天·死亡之舞（2026-09-29 重抓）。匹配票数 = 组合内与路线同 bias 的
         件数，同票取 OP.GG 登场序靠前；无路线（对局早期）退回首组。
         返回展平装备名列表（组合内顺序），组合不合法（含库外名）整组跳过。
         """

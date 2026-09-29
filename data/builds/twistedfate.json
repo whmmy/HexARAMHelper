@@ -1,6 +1,6 @@
 {
  "slug": "twistedfate",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/twistedfate/build",
  "patch": "16.19",
  "starter_items": [
@@ -17,7 +17,7 @@
    "法师之靴"
   ],
   [
-   "狂战士胫甲"
+   "轻灵之靴"
   ]
  ],
  "core_builds": [
@@ -37,9 +37,9 @@
    "影焰"
   ],
   [
-   "卢登的回声",
-   "风暴狂涌",
-   "影焰"
+   "时光之杖",
+   "巫妖之祸",
+   "疾射火炮"
   ],
   [
    "时光之杖",
@@ -77,25 +77,25 @@
    "Q",
    "W",
    "W",
-   "R",
    "W",
+   "E",
    "E",
    "E"
   ],
   [
    "Q",
+   "Q",
    "W",
    "E",
-   "Q",
    "Q",
    "R",
    "Q",
    "W",
    "Q",
    "W",
+   "R",
    "W",
    "W",
-   "E",
    "E",
    "E"
   ]

@@ -1,6 +1,6 @@
 {
  "slug": "kalista",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kalista/build",
  "patch": "16.19",
  "starter_items": [
@@ -40,12 +40,12 @@
   [
    "破败王者之刃",
    "卢安娜的飓风",
-   "界弓"
+   "鬼索的狂暴之刃"
   ],
   [
-   "斯塔缇克电刃",
-   "鬼索的狂暴之刃",
-   "智慧末刃"
+   "破败王者之刃",
+   "卢安娜的飓风",
+   "界弓"
   ]
  ],
  "skill_orders": [
@@ -85,15 +85,15 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "E",
    "E",
    "R",
    "E",
    "Q",
-   "Q",
    "E",
+   "Q",
    "R",
    "Q",
    "Q",

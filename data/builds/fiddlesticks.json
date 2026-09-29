@@ -1,6 +1,6 @@
 {
  "slug": "fiddlesticks",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/fiddlesticks/build",
  "patch": "16.19",
  "starter_items": [
@@ -29,12 +29,12 @@
   [
    "残疫",
    "中娅沙漏",
-   "影焰"
+   "兰德里的折磨"
   ],
   [
    "残疫",
    "中娅沙漏",
-   "兰德里的折磨"
+   "影焰"
   ],
   [
    "残疫",
@@ -73,9 +73,9 @@
    "W",
    "R",
    "W",
-   "Q",
-   "W",
    "E",
+   "W",
+   "Q",
    "R",
    "Q",
    "Q",
@@ -90,11 +90,11 @@
    "W",
    "R",
    "W",
-   "E",
+   "Q",
    "W",
    "Q",
    "R",
-   "Q",
+   "E",
    "Q",
    "Q",
    "E"

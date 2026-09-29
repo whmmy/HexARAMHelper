@@ -49,7 +49,10 @@ class OcrEngine:
             self.available = False
             return []
         try:
-            result, _ = ocr(image)
+            # 推理串行化：点击补扫（记账线程）与检测线程可能并发调用——
+            # onnxruntime 会话线程安全，但 RapidOCR 管线预处理共享态不保证
+            with self._lock:
+                result, _ = ocr(image)
         except Exception as e:
             print(f"[WARN] OCR 识别异常: {e}")
             return []

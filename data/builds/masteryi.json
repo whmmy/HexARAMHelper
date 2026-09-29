@@ -1,6 +1,6 @@
 {
  "slug": "masteryi",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/masteryi/build",
  "patch": "16.19",
  "starter_items": [
@@ -36,18 +36,18 @@
   ],
   [
    "收集者",
+   "破败王者之刃",
+   "智慧末刃"
+  ],
+  [
+   "收集者",
    "无尽之刃",
    "纳沃利烁刃"
   ],
   [
    "收集者",
    "破败王者之刃",
-   "智慧末刃"
-  ],
-  [
-   "海妖杀手",
-   "收集者",
-   "无尽之刃"
+   "死亡之舞"
   ]
  ],
  "skill_orders": [

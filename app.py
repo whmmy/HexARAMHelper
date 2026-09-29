@@ -134,6 +134,8 @@ def main():
             else None
         return px["rerolls"] if px else None
 
+    _click_hint_ts = [0.0]   # 记账失败提示限频（常规对局点击不刷屏）
+
     def _on_click(x, y):
         # 双保险：MouseLedger 已把刷新按钮命中独占路由给 on_reroll，正常
         # 走不到这里；留着防御路由/矩形来源将来变更时误把刷新记账成选卡
@@ -142,15 +144,30 @@ def main():
                 return
         idx = card_ledger.card_at(x, y)
         if idx is None:
-            ui(lambda: print(f"[LEDGER] 点击 ({x}, {y}) 不在卡片区域，忽略"))
-            return
+            return   # 常规对局点击（移动/攻击）占绝大多数：静默防刷屏
+        if not detector.recent_hex_activity():
+            return   # 卡片矩形命中但无海克斯证据 = 误入，静默
         # 稳定结果优先；识别尚未稳定时用最近一帧读数兜底（历史缺陷：
         # OCR 逐帧抖动导致永不稳定 → last_cards 空 → 点击被静默丢弃）
         cards = detector.last_cards or detector.last_cards_raw
         name = cards[idx] if cards and idx < len(cards) else None
+        raw = None
         if not name or not kb.valid_augment(name):
-            ui(lambda: print(f"[LEDGER] 卡片{idx + 1} 点击被忽略："
-                             "识别尚未稳定（界面出现后等几秒再点）"))
+            # 点击时刻同步补扫该卡（迟滞窗口/OCR 迟滞期的点击也要能记账；
+            # 历史缺陷：这里的点击被静默丢弃 → 台账缺记录）
+            name, raw = detector.sync_ocr_card_raw(idx)
+        if not name or not kb.valid_augment(name):
+            # 库外名留痕：timeline 记下 OCR 原文随复盘日志落盘（知识库
+            # 落后于游戏版本时才有线索可查）；不进台账、不参与联动推装
+            session._log("augment_unverified", f"卡{idx + 1} raw={raw}")
+            now = time.time()
+            if now - _click_hint_ts[0] > 5.0:
+                _click_hint_ts[0] = now
+                ui(lambda i=idx: print(f"[LEDGER] 卡片{i + 1} 点击未记账："
+                                       "海克斯名未识别出来（界面刚出现"
+                                       "或已关闭），已忽略；若卡面确有名字，"
+                                       "可能是知识库落后于游戏版本，"
+                                       "请刷新 augments.json"))
             return
         if session.record_augment(name, card_idx=idx):
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
@@ -158,6 +175,8 @@ def main():
             ui(lambda n=name: print(f"[LEDGER] {n} 已在台账，忽略重复记录"))
 
     def _on_reroll():
+        if not detector.recent_hex_activity():
+            return   # 界面关闭 >10s 后的对局点击不再触发重扫/刷日志（同 _on_click 门）
         detector.force_rescan()
         detector.last_cards = None  # 重扫稳定前点击不记账（防按旧卡片名记录）
         detector.last_cards_raw = None
@@ -166,7 +185,6 @@ def main():
 
     ledger = MouseLedger(
         on_click=_on_click,
-        gate=lambda: detector.core.state == "active",
         on_reroll=_on_reroll,
         reroll_rect_provider=_reroll_rects,
     )
@@ -380,6 +398,7 @@ def main():
         live.stop()
         detector.stop()
         ledger.stop()
+        session.flush_pending_review()   # 复盘日志兜底②：退出前补写未落盘的局
         if tray:
             tray.stop()
 

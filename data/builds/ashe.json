@@ -1,6 +1,6 @@
 {
  "slug": "ashe",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/ashe/build",
  "patch": "16.19",
  "starter_items": [
@@ -39,13 +39,13 @@
   ],
   [
    "育恩塔尔荒野箭",
-   "幻影之舞",
-   "无尽之刃"
-  ],
-  [
-   "育恩塔尔荒野箭",
    "破败王者之刃",
    "卢安娜的飓风"
+  ],
+  [
+   "残疫",
+   "帝国指令",
+   "公理圆弧"
   ]
  ],
  "skill_orders": [
@@ -86,12 +86,12 @@
   [
    "Q",
    "W",
+   "W",
    "E",
    "W",
-   "W",
    "R",
-   "Q",
    "W",
+   "Q",
    "W",
    "Q",
    "R",

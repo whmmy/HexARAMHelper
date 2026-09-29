@@ -49,11 +49,51 @@ KEY_ENEMY_ITEMS = {
 
 LEGENDARY_GOLD = 2200  # 传说件价格门槛（粗分）
 
+# 满六神装判定的传说件下限：6 占格中至少 5 件"传说档非鞋"才算成型。
+# 依据 2026-09-28 真机复盘：按"6 占格"判满装会把 3 传说+2 组件+鞋的
+# 中期局面切进替换流，推"卖X换Y"幻影替换（炽炎雏龙局更早：1 传说+
+# 魄罗佳肴凑格即触发）。判据收紧后这类局面回买装流，由
+# component_advice（合成腾格）+ saving_advice 接手。
+FULL_BUILD_LEGENDARY_MIN = 5
+
+
+def is_full_build(kb, items) -> bool:
+    """满六神装判定（rules_engine / game_state 两处调用点单一口径）。
+
+    格满（permanent_items ≥6）且其中传说档非靴件 ≥FULL_BUILD_LEGENDARY_MIN。
+    鞋/组件/消耗品占格不再单独构成满装；库外名仍按占格保留（kb 口径），
+    但不计传说数。5 传说+1 组件（无靴）等边界翻为满装属期望行为。
+    """
+    perms = kb.permanent_items(items)
+    if len(perms) < 6:
+        return False
+    return sum(
+        1 for n in perms
+        if kb.items.get(n, {}).get("gold", 0) >= LEGENDARY_GOLD
+        and "Boots" not in kb.items.get(n, {}).get("tags", [])
+    ) >= FULL_BUILD_LEGENDARY_MIN
+
 # 攒大件阈值：下一大件按组件抵扣后差价 ≤ 此值、且身上没有现金能买的
 # 未拥有组件 → 建议攒钱直购。依据：大乱斗被动收入约 44G/5s + 一波兵线，
 # 差价 500G ≈ 一次回城间隔内即可攒够；整件成型立即获得完整属性/被动，
 # 优于把钱拆进小件（组件价值虽可抵扣，但多占一格、无成型收益）。
 SAVE_GOLD_THRESHOLD = 500
+
+# ── 属性堆叠杂项守卫（推荐池过滤；P0-3 2026-09-28 真机复盘） ────────
+# DD tags 与此"属性家族"交集 ≥8 → 该件是纯属性加成型杂项（全库实测仅
+# 属性加成=8 / 金铲铲=9 命中，正常传说件交集最高 5）。这类件 tags 全家桶，
+# 任何"魔抗优先/护甲优先"短板都会误命中替换池（金铲铲案），合成链又把
+# 它顶成"先合成"目标。只进推荐池过滤——不进步格计数/台账/幻觉校验。
+FULLSTAT_FAMILY_TAGS = frozenset({
+    "SpellDamage", "Damage", "CriticalStrike", "AttackSpeed", "LifeSteal",
+    "ArmorPenetration", "Armor", "SpellBlock", "Health", "HealthRegen",
+})
+
+
+def _is_fullstat_item(kb, name: str) -> bool:
+    """金铲铲/属性加成这类全家桶 tags 杂项 → True（不进任何推荐池）。"""
+    tags = kb.items.get(name, {}).get("tags", [])
+    return len(set(tags) & FULLSTAT_FAMILY_TAGS) >= 8
 
 
 @dataclass
@@ -451,6 +491,8 @@ class RulesEngine:
             info = self.kb.items.get(name)
             if not info or info["gold"] < LEGENDARY_GOLD:
                 continue
+            if _is_fullstat_item(self.kb, name):
+                continue  # 金铲铲/属性加成类全家桶杂项，不进推荐池
             if not self.kb.item_available(name, game_map):
                 continue  # 当前地图商店没有（模式专属件），推了也买不了
             seen.add(name)
@@ -469,7 +511,10 @@ class RulesEngine:
             elif advice == "重伤考虑" and self.is_antiheal_item(name):
                 score += 2.0
             if name in building_into:
-                score += 3.0  # 正在合成的线优先
+                # 正在合成的线优先；OP.GG 池内目标 +3，池外 +1（数据序
+                # into 目标未必是本命核心——心之钢旁路案 2026-09-28：
+                # 巨人腰带 into 的池外件不该与池内核心同权重）
+                score += 3.0 if name in opgg_rank else 1.0
             if lean and bias == "tank":
                 # 己方缺前排且英雄可扛：坦向件加分（权重同路线推断，
                 # 让"下一件"排序与路线推断的倾向一致）
@@ -520,7 +565,7 @@ class RulesEngine:
         """
         if gap is None and threat is not None:
             gap = getattr(threat, "ally_gap", None)
-        if len(self.kb.permanent_items(my_items)) >= 6:
+        if is_full_build(self.kb, my_items):
             return self.replacement_candidates(
                 my_items, 0, current_path, threat,
                 augments=None, hero=hero, limit=limit, game_map=game_map)
@@ -605,7 +650,8 @@ class RulesEngine:
                 if (info["gold"] >= LEGENDARY_GOLD
                         and want_tag in info["tags"]
                         and name not in owned_after
-                        and self.kb.item_available(name, game_map)):
+                        and self.kb.item_available(name, game_map)
+                        and not _is_fullstat_item(self.kb, name)):
                     label = ("补魔抗短板" if want_tag == "SpellBlock"
                              else "补护甲短板")
                     scored[name] = (3.0, label)
@@ -614,7 +660,8 @@ class RulesEngine:
                 if (info["gold"] >= LEGENDARY_GOLD
                         and self.is_antiheal_item(name)
                         and name not in owned_after
-                        and self.kb.item_available(name, game_map)):
+                        and self.kb.item_available(name, game_map)
+                        and not _is_fullstat_item(self.kb, name)):
                     scored[name] = (3.0, "敌方治疗多，重伤压制")
         # 2. OP.GG 高频/路线内传说件（换装也可以是同级更优输出件）；
         #    分值封顶 2.7 < 短板件 3.0——替换的第一动机是补威胁短板
@@ -784,15 +831,23 @@ class RulesEngine:
     # ── 3c. 小件合成判断 ─────────────────────────────────────────
 
     def component_advice(self, my_items: list, current_path: str,
-                         game_map: str = "", prefer: list = None):
+                         game_map: str = "", prefer: list = None,
+                         hero: str = "", threat=None):
         """身上组件 → (建议合成目标 | None, 提示语)
 
         目标不能是已拥有的装备（真机 2026-09-27：心之钢已买出、身上是
         第二件巨人腰带，按 into 数据序把心之钢又顶回第①位）。prefer 给
-        当前推荐序列时优先从中选（腰带往正在攒的坦克核心件合），否则按
-        合成链数据序兜底。
+        当前推荐序列时优先从中选（腰带往正在攒的坦克核心件合），否则
+        兜底按"OP.GG 池内目标优先（高频序）→ 敌方抗性方向 → 原数据序"排
+        （hero 形参供池查询；心之钢旁路案 2026-09-28：数据序把池外千变者
+        贾修顶到池内核心件前；二番案 2026-09-29：主线换新后双目标均池外，
+        into 数据序仍让纯生命的心之钢压过千变者贾修——补抗性方向层，
+        敌方 3 法伤时魔抗件先出，无敌情保持数据序不变）。
         """
         owned = set(my_items)
+        advice = threat.resist_advice() if threat is not None else ""
+        want_tag = {"魔抗优先": "SpellBlock",
+                    "护甲优先": "Armor"}.get(advice, "")
 
         def _targets(item):
             info = self.kb.items.get(item)
@@ -803,6 +858,7 @@ class RulesEngine:
                 target = self.kb.item_id_to_name.get(tid)
                 if (target and target not in owned
                         and self.kb.item_available(target, game_map)
+                        and not _is_fullstat_item(self.kb, target)
                         and (not current_path
                              or self.kb.item_path_bias(target) == current_path)):
                     out.append(target)
@@ -815,11 +871,25 @@ class RulesEngine:
                     if target in by_item[item]:
                         return target, (f"身上【{item}】可合成【{target}】，"
                                         f"与当前路线一致")
-        for item in my_items:
-            if by_item[item]:
-                target = by_item[item][0]
-                return target, (f"身上【{item}】可合成【{target}】，"
-                                f"与当前路线一致")
+        pairs = [(item, t) for item in my_items for t in by_item[item]]
+        if pairs:
+            pool_rank = {n: i for i, n in
+                         enumerate(self.kb.core_item_pool(hero))}
+            # 池内目标按高频序排前；池外目标先按敌方抗性方向（魔抗/护甲
+            # 件前移），同向内保持原数据序（稳定排序）
+            pairs.sort(key=lambda p: (
+                0 if p[1] in pool_rank else 1,
+                pool_rank.get(p[1], 0),
+                1 if want_tag and want_tag not in self.kb.items.get(
+                    p[1], {}).get("tags", []) else 0))
+            item, target = pairs[0]
+            note = f"身上【{item}】可合成【{target}】，与当前路线一致"
+            if want_tag and want_tag in self.kb.items.get(
+                    target, {}).get("tags", []):
+                side, dmg = (("魔抗", "法") if want_tag == "SpellBlock"
+                             else ("护甲", "物"))
+                note += f"（敌方{dmg}伤成型，优先补{side}）"
+            return target, note
         return None, "无待合成小件，攒钱即可"
 
     # ── 3f. 攒钱决策（v4.5：这波回城攒大件 vs 先买小件） ──────────

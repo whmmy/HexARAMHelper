@@ -1,6 +1,6 @@
 {
  "slug": "senna",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/senna/build",
  "patch": "16.19",
  "starter_items": [
@@ -43,9 +43,9 @@
    "疾射火炮"
   ],
   [
-   "收集者",
-   "无尽之刃",
-   "疾射火炮"
+   "斯塔缇克电刃",
+   "疾射火炮",
+   "无尽之刃"
   ]
  ],
  "skill_orders": [
@@ -85,19 +85,19 @@
   ],
   [
    "Q",
-   "Q",
    "W",
    "E",
    "Q",
+   "Q",
    "R",
    "Q",
-   "W",
-   "Q",
-   "W",
-   "R",
-   "W",
-   "W",
    "E",
+   "Q",
+   "W",
+   "R",
+   "W",
+   "W",
+   "W",
    "E"
   ]
  ],

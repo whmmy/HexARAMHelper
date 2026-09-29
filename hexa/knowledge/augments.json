@@ -343,7 +343,8 @@
   "升级：献祭": {
    "path_bias": "tank",
    "tags": [
-    "持续输出"
+    "持续输出",
+    "经济"
    ],
    "is_upgrade": true,
    "opening_shift": "",
@@ -1366,8 +1367,8 @@
   "炽烈黎明": {
    "path_bias": "ap",
    "tags": [
-    "治疗",
-    "护盾"
+    "持续输出",
+    "团队协同"
    ],
    "is_upgrade": false,
    "opening_shift": "",
@@ -2164,13 +2165,6 @@
     "护盾",
     "生命"
    ],
-   "is_upgrade": false,
-   "opening_shift": "",
-   "opening_shift_reason": ""
-  },
-  "？？？": {
-   "path_bias": "none",
-   "tags": [],
    "is_upgrade": false,
    "opening_shift": "",
    "opening_shift_reason": ""

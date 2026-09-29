@@ -1,6 +1,6 @@
 {
  "slug": "gragas",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/gragas/build",
  "patch": "16.19",
  "starter_items": [
@@ -9,7 +9,8 @@
    "遗失的章节"
   ],
   [
-   "遗失的章节"
+   "生命药水",
+   "万世催化石"
   ]
  ],
  "boots": [
@@ -42,9 +43,9 @@
    "灭世者的死亡之帽"
   ],
   [
-   "残疫",
+   "卢登的回声",
    "风暴狂涌",
-   "影焰"
+   "巫妖之祸"
   ]
  ],
  "skill_orders": [

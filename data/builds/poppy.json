@@ -1,6 +1,6 @@
 {
  "slug": "poppy",
- "fetched_at": "2026-09-24",
+ "fetched_at": "2026-09-29",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/poppy/build",
  "patch": "16.19",
  "starter_items": [
@@ -42,14 +42,15 @@
    "荆棘之甲"
   ],
   [
-   "末日寒冬",
-   "焚天",
+   "心之钢",
+   "荆棘之甲",
    "败魔"
   ],
   [
+   "女神之泪",
    "心之钢",
-   "无终恨意",
-   "振奋盔甲"
+   "末日寒冬",
+   "败魔"
   ]
  ],
  "skill_orders": [
@@ -72,20 +73,20 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "Q",
    "Q",
    "R",
    "Q",
    "E",
    "Q",
-   "W",
+   "E",
    "R",
    "E",
    "E",
    "W",
-   "E"
+   "W"
   ],
   [
    "Q",

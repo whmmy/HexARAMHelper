@@ -31,8 +31,11 @@ COMMON_INSTALL_PATHS = [
 ]
 
 # gameflow-phase 归并后的逻辑阶段
+# 真机 gameflow 序列：InProgress → PreEndOfGame → EndOfGame → None——
+# PreEndOfGame 不算收尾时 InProgress→IDLE 永不匹配，on_end_of_game 整局
+# 不触发（会话卡"对局中"、复盘日志不落盘）
 IDLE_PHASES = {"None", "Lobby", "Matchmaking", "ReadyCheck",
-               "WaitingForStats", "EndOfGame"}
+               "WaitingForStats", "PreEndOfGame", "EndOfGame"}
 
 
 class LCUConnector:
