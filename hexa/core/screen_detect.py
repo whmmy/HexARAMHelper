@@ -770,65 +770,108 @@ class ScreenDetector(threading.Thread):
         return (self.core.state == "active"
                 or time.time() - self._last_hex_evidence < within)
 
-    def sync_ocr_card_raw(self, idx: int) -> tuple:
-        """点击时刻同步补扫第 idx 张卡 → (库名|None, 原始OCR文本|None)。
+    def _grab_card_crop(self, idx: int):
+        """点击时刻定格第 idx 张卡画面 → 裁剪图 | None（毫秒级，不 OCR）。
 
-        与检测线程不同：这里直接消费 recognize() 的原始文本，不走
-        _ocr_cards 的 match_augments_in@72 预过滤——否则库外名/低分
-        读数在进入本函数前就被置 None，留痕恒为 raw=None，事后无从
-        追溯（2026-09-29 核验实锤）。命中时 raw=命中框的 OCR 原文
-        （含「」·等装饰字符）；未命中时 raw=名字带内相似度最高一条的
-        原文（知识库落后于游戏版本时，复盘日志里能看到卡面真名，
-        人工补录词表的依据）。名字带过滤同 _ocr_cards（防卡面描述
-        文字/tooltip 干扰），但未命中留痕也只取带内文本。其余行为同
-        sync_ocr_card。
-        """
+        抓帧在 _grab_lock 内一次完成：点击瞬间画面定格，之后界面动画/
+        关闭都不影响已取到的像素——"选的时候直接截图，分析交给后台"。"""
         if self.layout is None or not self.ocr.available:
-            return None, None
+            return None
         try:
             regions = self.layout.to_pixels(*self._screen_size(), canvas=True)
             cards = regions["cards"]
             if idx < 0 or idx >= len(cards):
-                return None, None
+                return None
             with self._grab_lock:
                 frame = self._grab()
-            crop = self._crop(frame, cards[idx])
-            ch = crop.shape[0] or 1
-            hits = []                     # (name, score, in_zone, raw_text)
-            best_raw, best_score = None, -1.0
-            for t, rect, _conf in self.ocr.recognize(crop):
-                if not t:
-                    continue
-                in_zone = (self.NAME_ZONE[0] * ch
-                           <= rect[1] + rect[3] / 2 <= self.NAME_ZONE[1] * ch)
-                m = self.ocr.match_augment(t, threshold=80)
-                if m:
-                    hits.append((m[0], m[1], in_zone, t))
-                    continue
-                # 未命中：留相似度最高的带内原文（库外名线索）
-                if not in_zone:
-                    continue
-                near = self.ocr.match_augment(t, threshold=0)
-                if near and near[1] > best_score:
-                    best_raw, best_score = t, near[1]
-            if hits:
-                # 名字带内优先，同带取最高分（同 _ocr_cards 口径）
-                zone_hits = [h for h in hits if h[2]] or hits
-                name = max(zone_hits, key=lambda h: h[1])
-                return name[0], name[3]
-            return None, best_raw
+            return self._crop(frame, cards[idx])
+        except Exception as e:  # noqa: BLE001 —— 抓帧失败按"未抓到"处理
+            print(f"[WARN] 点击抓帧异常: {e}")
+        return None
+
+    def _analyze_card_crop(self, crop) -> tuple:
+        """卡面裁剪 → (库名|None, 原始OCR文本|None)（sync/async 补扫共用）。
+
+        直接消费 recognize() 的原始文本，不走 _ocr_cards 的
+        match_augments_in@72 预过滤——否则库外名/低分读数在进入本函数
+        前就被置 None，留痕恒为 raw=None，事后无从追溯（2026-09-29 核验
+        实锤）。命中时 raw=命中框的 OCR 原文（含「」·等装饰字符）；
+        未命中时 raw=名字带内相似度最高一条的原文（知识库落后于游戏
+        版本时，复盘日志里能看到卡面真名，人工补录词表的依据）。名字带
+        过滤同 _ocr_cards（防卡面描述文字/tooltip 干扰），但未命中留痕
+        也只取带内文本。"""
+        ch = crop.shape[0] or 1
+        hits = []                     # (name, score, in_zone, raw_text)
+        best_raw, best_score = None, -1.0
+        for t, rect, _conf in self.ocr.recognize(crop):
+            if not t:
+                continue
+            in_zone = (self.NAME_ZONE[0] * ch
+                       <= rect[1] + rect[3] / 2 <= self.NAME_ZONE[1] * ch)
+            m = self.ocr.match_augment(t, threshold=80)
+            if m:
+                hits.append((m[0], m[1], in_zone, t))
+                continue
+            # 未命中：留相似度最高的带内原文（库外名线索）
+            if not in_zone:
+                continue
+            near = self.ocr.match_augment(t, threshold=0)
+            if near and near[1] > best_score:
+                best_raw, best_score = t, near[1]
+        if hits:
+            # 名字带内优先，同带取最高分（同 _ocr_cards 口径）
+            zone_hits = [h for h in hits if h[2]] or hits
+            name = max(zone_hits, key=lambda h: h[1])
+            return name[0], name[3]
+        return None, best_raw
+
+    def async_ocr_card_raw(self, idx: int, on_done) -> None:
+        """点击时刻抓帧定格 → 后台线程识别 → on_done(库名|None, raw|None)。
+
+        用户案 2026-09-29：系统已知点击的卡位（坐标→card_at），点击只需
+        截图，识别（最长 ~2s）挪后台 daemon 线程——记账线程不再被同步
+        补扫阻塞，连续快速点两张卡不再漏第二张。抓帧失败/越界当场回调
+        (None, None)；OCR 经 recognize 内部锁与检测线程串行，不并发读数。
+        """
+        crop = self._grab_card_crop(idx)
+        if crop is None:
+            on_done(None, None)
+            return
+
+        def _work():
+            try:
+                name, raw = self._analyze_card_crop(crop)
+            except Exception as e:  # noqa: BLE001 —— 补扫失败不影响主流程
+                print(f"[WARN] 点击补扫异常: {e}")
+                name, raw = None, None
+            on_done(name, raw)
+
+        threading.Thread(target=_work, daemon=True,
+                         name=f"click-ocr-{idx}").start()
+
+    def sync_ocr_card_raw(self, idx: int) -> tuple:
+        """点击时刻同步补扫第 idx 张卡 → (库名|None, 原始OCR文本|None)。
+
+        async_ocr_card_raw 的同步形态（同一分析体，阻塞至识别完成），
+        供合成测试/离线断言直调；产品路径走 async 版。"""
+        crop = self._grab_card_crop(idx)
+        if crop is None:
+            return None, None
+        try:
+            return self._analyze_card_crop(crop)
         except Exception as e:  # noqa: BLE001 —— 补扫失败不影响主流程
             print(f"[WARN] 点击补扫异常: {e}")
         return None, None
 
     def sync_ocr_card(self, idx: int):
-        """点击时刻同步补扫（薄壳，保持原返回值：库名|None）。
+        """同步补扫薄壳（保持原返回值：库名|None）。
 
         识别未稳定（界面刚出现/流光抖动）时的记账兜底——OCR 未及 2 帧
         稳定就点击时，稳定读数/最近一帧读数都可能还没有有效卡名。检测
-        线程可能正在 OCR，OcrEngine 内部有锁串行；本调用在记账线程内
-        阻塞至多 ~2s（不卡 UI/游戏）。匹配阈值提到 80（补扫只此一帧，
-        误记账的代价比漏记高）。失败返回 None。"""
+        线程可能正在 OCR，OcrEngine 内部有锁串行；同步形态阻塞至多
+        ~2s（产品路径已改走 async_ocr_card_raw，本壳留给测试/直调）。
+        匹配阈值提到 80（补扫只此一帧，误记账的代价比漏记高）。失败
+        返回 None。"""
         name, _raw = self.sync_ocr_card_raw(idx)
         return name
 

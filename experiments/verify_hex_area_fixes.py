@@ -233,13 +233,30 @@ ocr.recognize = lambda image, _out=[("不祥契约", [10, 220, 120, 40], 0.95)]:
 thin = det.sync_ocr_card(0)   # 薄壳委托：原返回值语义不变（库名|None）
 check("薄壳 sync_ocr_card 保持原返回值（库名|None）", thin == "不祥契约", str(thin))
 
+# P1-6b async 补扫（产品路径 2026-09-29）：点击抓帧定格 → 后台线程识别 →
+# 回调，记账线程不再被同步补扫阻塞 ~2s（用户案："选的时候直接截个图
+# 后台分析"）
+ocr.recognize = lambda image, _out=[("「不祥契约」", [10, 220, 120, 40], 0.95)]: list(_out)
+_cb = []
+det.async_ocr_card_raw(0, lambda n, r: _cb.append((n, r)))
+_deadline = time.time() + 5
+while not _cb and time.time() < _deadline:
+    time.sleep(0.02)
+check("P1-6b async 后台识别回调 (库名, 装饰原文)，与 sync 同口径",
+      _cb == [("不祥契约", "「不祥契约」")], str(_cb))
+_cb2 = []
+det.async_ocr_card_raw(9, lambda n, r: _cb2.append((n, r)))
+check("P1-6b 抓帧越界当场回调 (None, None)（不丢回调）",
+      _cb2 == [(None, None)], str(_cb2))
+
 # app.py 源码断言：丢弃分支调 raw 版 + 写 timeline + 提示语含刷新指引；退出 flush
 app_src = (ROOT / "app.py").read_text(encoding="utf-8")
 seg = app_src[app_src.index("def _on_click"):app_src.index("def _on_reroll")]
 seg_r = app_src[app_src.index("def _on_reroll"):app_src.index("ledger = MouseLedger")]
-check("app._on_click 调 sync_ocr_card_raw 并写 augment_unverified + 提示刷新 augments.json",
-      "sync_ocr_card_raw" in seg and "augment_unverified" in seg
-      and "请刷新 augments.json" in seg)
+check("app._on_click 点击抓帧走 async_ocr_card_raw 后台补扫，"
+      "augment_unverified 留痕 + 提示刷新 augments.json（_record_click 共用）",
+      "async_ocr_card_raw" in seg and "augment_unverified" in seg
+      and "请刷新 augments.json" in seg and "_record_click" in seg)
 check("app._on_reroll 门控先于 force_rescan（recent_hex_activity）",
       seg_r.index("recent_hex_activity") < seg_r.index("force_rescan"))
 check("app.py finally 在 ledger.stop() 后调 flush_pending_review()",

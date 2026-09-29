@@ -151,14 +151,21 @@ def main():
         # OCR 逐帧抖动导致永不稳定 → last_cards 空 → 点击被静默丢弃）
         cards = detector.last_cards or detector.last_cards_raw
         name = cards[idx] if cards and idx < len(cards) else None
-        raw = None
+        if name and kb.valid_augment(name):
+            _record_click(idx, name, None)
+            return
+        # 点击时刻抓帧定格（毫秒级），识别挪后台线程（迟滞窗口/OCR 迟滞
+        # 期的点击也要能记账；历史缺陷：这里的点击被静默丢弃 → 台账缺
+        # 记录；2026-09-29 起不再同步阻塞记账线程 ~2s，连点两卡不漏）
+        detector.async_ocr_card_raw(
+            idx, lambda n, r, i=idx: _record_click(i, n, r))
+
+    def _record_click(idx, name, raw):
+        """点击记账落位（稳定名直记 / 后台补扫回调共用）。
+
+        库外名留痕：timeline 记下 OCR 原文随复盘日志落盘（知识库
+        落后于游戏版本时才有线索可查）；不进台账、不参与联动推装"""
         if not name or not kb.valid_augment(name):
-            # 点击时刻同步补扫该卡（迟滞窗口/OCR 迟滞期的点击也要能记账；
-            # 历史缺陷：这里的点击被静默丢弃 → 台账缺记录）
-            name, raw = detector.sync_ocr_card_raw(idx)
-        if not name or not kb.valid_augment(name):
-            # 库外名留痕：timeline 记下 OCR 原文随复盘日志落盘（知识库
-            # 落后于游戏版本时才有线索可查）；不进台账、不参与联动推装
             session._log("augment_unverified", f"卡{idx + 1} raw={raw}")
             now = time.time()
             if now - _click_hint_ts[0] > 5.0:
