@@ -268,6 +268,10 @@ class GameSession:
             }
             # 敌方威胁画像实时补全（含敌方装备扫描）
             self.threat = self.rules.threat_profile(self.enemy, enemies)
+            # 死亡实证挂载（/eventdata 谁在杀我 → resist_advice 破平局；
+            # champ_damage 已由 threat_profile 本帧逐敌登记）
+            self.threat.killer_counts = dict(
+                getattr(snap, "killers_of_me", {}) or {})
             # 己方缺口重算（上方已回填阵容时随之更新），并挂到威胁对象上：
             # engine 层接口不透传 gap，借 threat 穿透到 build_sequence
             # （"缺前排 → tank 加分"链路，见 rules_engine.tank_lean）
@@ -836,6 +840,16 @@ class GameSession:
         wind = self._wind_state(snap)
         if wind:
             self._push_coach(f"wind:{wind[0]}", wind[1])
+        # ④ 死亡来源点名：同一英雄已杀你 ≥2 次 → 直接给抗性方向
+        # （key 含次数，每多死一次升级提醒一次；60s 冷却防轰炸）
+        top_kill = self.threat.top_killer() if self.threat else ()
+        if top_kill:
+            champ, n = top_kill
+            side = (getattr(self.threat, "champ_damage", {}) or {}).get(champ, "")
+            what = {"ap": "魔抗", "ad": "护甲"}.get(side, "针对抗性")
+            self._push_coach(
+                f"killer:{champ}:{n}",
+                f"{champ}已{n}次击杀你，优先补{what}针对它")
 
     def _wind_state(self, snap):
         """顺逆风估算：playerlist 双方 KDA 动量差 + 装备成型度差。

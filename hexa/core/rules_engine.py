@@ -110,6 +110,23 @@ class ThreatProfile:
     # gap，GameSession 把它挂到威胁对象上，随 threat 穿透到
     # build_sequence / next_item_candidates（"缺前排→tank 加分"链路）
     ally_gap: object = None
+    # 每敌英雄最终伤害路线（ap/ad/""=坦线或未知，与威胁计数同口径）——
+    # 死亡实证（killer_counts）映射抗性方向用
+    champ_damage: dict = field(default_factory=dict)
+    # 死亡实证（GameSession 从 Live eventdata 附挂）：击杀我的敌方英雄 → 次数。
+    # 被谁砍死谁就是真威胁——人数打平时由它破局（剑圣案）
+    killer_counts: dict = field(default_factory=dict)
+    # 敌方 ap/ad 两侧装备总估值（成型度面板同源口径：占格件 KB 整价求和，
+    # 只计入最终伤害为该侧的英雄）——人数打平时的方向裁判
+    ap_value: float = 0.0
+    ad_value: float = 0.0
+
+    def top_killer(self) -> tuple:
+        """近期击杀我最多的敌方英雄 (champion, 次数)；不足 2 次视为噪音返回 ()"""
+        if not self.killer_counts:
+            return ()
+        champ, n = max(self.killer_counts.items(), key=lambda kv: (kv[1], kv[0]))
+        return (champ, n) if n >= 2 else ()
 
     def summary(self) -> str:
         parts = []
@@ -125,17 +142,39 @@ class ThreatProfile:
             # 去重取前 3（原只显示第一件，克制信息丢了一截）
             names = list(dict.fromkeys(k["item"] for k in self.key_items))
             parts.append("关键装:" + "/".join(names[:3]))
+        top_kill = self.top_killer()
+        if top_kill:
+            parts.append(f"死于:{top_kill[0]}×{top_kill[1]}")
         return " | ".join(parts) or "暂无数据"
 
     def resist_advice(self) -> str:
-        """敌方构成 → 抗性采购方向（候选池加权依据）"""
-        if self.ap_count >= 3:
+        """敌方构成 → 抗性采购方向（候选池加权依据）
+
+        人数仍是第一证据；差一口气/打平时用两条实证破平：
+        ① 死亡来源——被同一英雄杀 ≥2 次，按其实际伤害路线 +1 票
+        （2026-09-29 剑圣案：法伤2v2 打平，肥剑圣连杀用户仍被
+        "双抗均衡"和稀泥，用户被砍死也不推护甲）；② 人数打平时
+        比两侧装备总估值，显著肥（≥20% 且 ≥1500G）的一侧定向。"""
+        ap, ad = self.ap_count, self.ad_count
+        top_kill = self.top_killer()
+        if top_kill:
+            side = self.champ_damage.get(top_kill[0], "")
+            if side == "ap":
+                ap += 1
+            elif side == "ad":
+                ad += 1
+        if ap >= 3:
             return "魔抗优先"
-        if self.ad_count >= 3:
+        if ad >= 3:
             return "护甲优先"
         if self.healers and len(self.healers) >= 2:
             return "重伤考虑"
-        if self.ap_count == 2 and self.ad_count == 2:
+        if ap == ad and ap > 0:
+            v_ap, v_ad = self.ap_value, self.ad_value
+            if v_ad - v_ap >= 1500 and v_ad >= v_ap * 1.2:
+                return "护甲优先"
+            if v_ap - v_ad >= 1500 and v_ap >= v_ad * 1.2:
+                return "魔抗优先"
             return "双抗均衡"
         return ""
 
@@ -284,6 +323,11 @@ class RulesEngine:
         best = max(votes, key=votes.get)
         return best, votes[best]
 
+    def _equip_value(self, items: list) -> float:
+        """装备总估值（成型度面板同源口径：占格件 KB 整价求和）"""
+        return sum(self.kb.items.get(n, {}).get("gold", 0)
+                   for n in self.kb.permanent_items(items))
+
     def threat_profile(self, enemy_champions: list, enemy_players: list = None) -> ThreatProfile:
         """enemy_champions: 敌方英雄中文名列表；
         enemy_players: [PlayerInfo]（Live 快照敌方，可为空 = 游戏早期/无数据）
@@ -301,7 +345,8 @@ class RulesEngine:
             prof = self.kb.champ_profile.get(cn, {})
             damage = prof.get("damage", "")
             is_tank = bool(prof.get("is_tank"))
-            vote, weight = self._item_damage_vote(items_by_champ.get(cn) or [])
+            names = items_by_champ.get(cn) or []
+            vote, weight = self._item_damage_vote(names)
             # 一件传说件或两件小件即认定实际路线；单小件证据不足以推翻默认
             if weight >= 2.0 or (vote and not damage):
                 if vote == "tank":
@@ -316,12 +361,16 @@ class RulesEngine:
                     damage = vote
             if damage == "ap":
                 tp.ap_count += 1
+                tp.ap_value += self._equip_value(names)
             elif damage == "ad":
                 tp.ad_count += 1
+                tp.ad_value += self._equip_value(names)
             if is_tank:
                 tp.tank_count += 1
             if cn in HEALERS:
                 tp.healers.append(cn)
+            # 最终伤害路线登记（死亡实证映射抗性方向用；坦线/未知记 ""）
+            tp.champ_damage[cn] = damage
         for p in (enemy_players or []):
             for it in p.items:
                 note = KEY_ENEMY_ITEMS.get(it.get("name", ""))

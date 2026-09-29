@@ -346,6 +346,54 @@ def test_rules():
           tp_ap_naut.ap_count == 1 and tp_ap_naut.tank_count == 1,
           tp_ap_naut.summary())
 
+    # 威胁加权重定向（真机 2026-09-29 剑圣案）：人数打平时按装备估值定向、
+    # 死亡来源破局——被谁砍死谁才是真威胁
+    tp_fed = rules.threat_profile(
+        ["无极剑圣", "迅捷斥候", "深海泰坦"],
+        [PlayerInfo(champion="无极剑圣",
+                    items=[{"name": "破败王者之刃", "count": 1},
+                           {"name": "鬼索的狂暴之刃", "count": 1},
+                           {"name": "暴食胫甲", "count": 1}]),
+         PlayerInfo(champion="迅捷斥候",
+                    items=[{"name": "增幅典籍", "count": 1}]),
+         PlayerInfo(champion="深海泰坦",
+                    items=[{"name": "日炎圣盾", "count": 1},
+                           {"name": "荆棘之甲", "count": 1}])])
+    check("估值按最终路线累计（坦线泰坦不入两侧）",
+          tp_fed.ad_value >= 5000 and 0 < tp_fed.ap_value < tp_fed.ad_value,
+          f"ad={tp_fed.ad_value:.0f} ap={tp_fed.ap_value:.0f}")
+    check("champ_damage 逐敌登记（坦线记空串）",
+          tp_fed.champ_damage == {"无极剑圣": "ad", "迅捷斥候": "ap",
+                                  "深海泰坦": ""}, str(tp_fed.champ_damage))
+    check("打平+估值悬殊→护甲优先",
+          ThreatProfile(ap_count=2, ad_count=2, ap_value=3000,
+                        ad_value=11000).resist_advice() == "护甲优先")
+    tp_even = ThreatProfile(ap_count=2, ad_count=2,
+                            ap_value=22100, ad_value=23850)
+    check("估值接近（真机 7.5% 差）保持双抗均衡",
+          tp_even.resist_advice() == "双抗均衡", tp_even.resist_advice())
+    tp_even.killer_counts = {"无极剑圣": 3}
+    tp_even.champ_damage = {"无极剑圣": "ad"}
+    check("死亡实证（剑圣连杀×3）破平局→护甲优先",
+          tp_even.resist_advice() == "护甲优先", tp_even.resist_advice())
+    check("摘要显示死亡来源", "死于:无极剑圣×3" in tp_even.summary(),
+          tp_even.summary())
+    check("AP 击杀者反向加票",
+          ThreatProfile(ap_count=2, ad_count=2,
+                        champ_damage={"九尾妖狐": "ap"},
+                        killer_counts={"九尾妖狐": 2}
+                        ).resist_advice() == "魔抗优先")
+    check("单杀1次视为噪音",
+          ThreatProfile(ap_count=2, ad_count=2, ap_value=22100,
+                        ad_value=23850, champ_damage={"九尾妖狐": "ap"},
+                        killer_counts={"九尾妖狐": 1}
+                        ).resist_advice() == "双抗均衡")
+    check("坦线击杀者不映射方向",
+          ThreatProfile(ap_count=2, ad_count=2, ap_value=22100,
+                        ad_value=23850, champ_damage={"深海泰坦": ""},
+                        killer_counts={"深海泰坦": 4}
+                        ).resist_advice() == "双抗均衡")
+
     # 海克斯时刻评级（S/A/B 合成评分）
     top3 = kb.top_augments("暗裔剑魔", 3)
     ranks = rules.rank_augments("暗裔剑魔", top3)
@@ -638,6 +686,32 @@ def test_live_me_match():
     # playerlist 空 / championName 为 null 均安全
     check("空 playerlist 安全", poller._match_me({}, []) == (None, ""))
     check("None 防护", str(poller._norm_champ_raw(None)) == "")
+
+    # 死亡来源（/eventdata ChampionKill → 谁在杀我）：增量去重 + 新局清零
+    poller._my_event_names = {"我我我"}
+    poller._name_to_champ = {"yisum": "无极剑圣", "nautsum": "深海泰坦"}
+    kill_payload = {"events": [
+        {"EventID": 1, "EventName": "GameStart"},
+        {"EventID": 2, "EventName": "ChampionKill",
+         "KillerName": "yisum", "VictimName": "我我我"},
+        {"EventID": 3, "EventName": "ChampionKill",
+         "KillerName": "Turret", "VictimName": "我我我"},
+        {"EventID": 4, "EventName": "ChampionKill",
+         "KillerName": "nautsum", "VictimName": "队友甲"},
+        {"EventID": 5, "EventName": "ChampionKill",
+         "KillerName": "yisum#CN1", "VictimName": "我我我#CN1"},
+    ]}
+    poller._process_kill_events(kill_payload, my_disp="曙光女神")
+    check("击杀者计数（只认英雄+Victim=我，#tag 归一）",
+          poller._kill_counts == {"无极剑圣": 2}, str(poller._kill_counts))
+    poller._process_kill_events(kill_payload, my_disp="曙光女神")
+    check("EventID 单调去重不重复计数",
+          poller._kill_counts == {"无极剑圣": 2}, str(poller._kill_counts))
+    poller._process_kill_events({"events": [
+        {"EventID": 2, "EventName": "ChampionKill",
+         "KillerName": "nautsum", "VictimName": "我我我"}]}, my_disp="x")
+    check("新局 EventID 回退清零重计",
+          poller._kill_counts == {"深海泰坦": 1}, str(poller._kill_counts))
 
 
 # ── 5. 画面检测状态机 / 坐标 / 记账映射（纯逻辑，离线） ──────────

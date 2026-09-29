@@ -48,6 +48,11 @@ class LiveSnapshot:
     # 原始响应（fixtures dump 用）
     raw_active: dict = field(default_factory=dict)
     raw_playerlist: list = field(default_factory=list)
+    raw_events: dict = field(default_factory=dict)
+    # 本局累计：击杀我的敌方英雄（显示名）→ 次数。来源 /eventdata
+    # ChampionKill 事件（KillerName×VictimName），EventID 单调去重；
+    # GameSession 挂到 threat.killer_counts 供 resist_advice 破平局
+    killers_of_me: dict = field(default_factory=dict)
 
     def enemies(self):
         if not self.players or not self.my_team:
@@ -85,6 +90,11 @@ class LivePoller(threading.Thread):
         self._my_summoner = ""        # LCU 召唤师名缓存（非空后不再请求）
         self._me_matched_via = ""     # 本局命中的匹配策略（日志诊断用）
         self._me_miss_logged = False
+        # 死亡来源追踪（/eventdata）状态
+        self._last_event_id = 0
+        self._kill_counts = {}        # 击杀我的英雄显示名 → 次数（本局累计）
+        self._name_to_champ = {}      # 归一化玩家名 → 英雄显示名（playerlist 逐帧合并）
+        self._my_event_names = set()  # 我的名字候选（VictimName 归一化后比对）
         self._running = False
         self._in_game = threading.Event()
         self.last_snapshot: LiveSnapshot | None = None
@@ -99,6 +109,11 @@ class LivePoller(threading.Thread):
         self.last_snapshot = None
         self._me_matched_via = ""
         self._me_miss_logged = False
+        # 新一局死亡计数清零（eventdata 跨局从 EventID 1 重新计）
+        self._last_event_id = 0
+        self._kill_counts = {}
+        self._name_to_champ = {}
+        self._my_event_names = set()
 
     def stop(self):
         self._running = False
@@ -173,6 +188,54 @@ class LivePoller(threading.Thread):
                 return p, "summoner"
         return None, ""
 
+    # ── 死亡来源（/eventdata ChampionKill） ──────────────────────
+
+    @staticmethod
+    def _norm_event_name(raw) -> str:
+        """事件玩家名归一化：去空白/小写/去 #tag（与 _name_set 同口径）"""
+        s = str(raw or "").strip().lower()
+        return s.split("#", 1)[0] if s else ""
+
+    def _process_kill_events(self, payload: dict, my_disp: str = ""):
+        """eventdata 增量 → 谁在杀我（英雄显示名 → 次数，本局累计）。
+
+        EventID 单调去重；整表最大 ID 回退（新一局 eventdata 重新从
+        1 计）时清零重计，防跨局累加。击杀者只认 playerlist 映射出
+        的英雄——Turret/Minion/Monster 等不在映射内自然忽略。"""
+        events = (payload or {}).get("events") or []
+        eids = []
+        for e in events:
+            try:
+                i = int(e.get("EventID") or 0)
+            except (TypeError, ValueError):
+                continue
+            if i > 0:
+                eids.append(i)
+        if eids and max(eids) < self._last_event_id:
+            # 新一局的 eventdata 从头计数 → 清零重计
+            self._kill_counts = {}
+            self._last_event_id = 0
+        top = self._last_event_id
+        for ev in events:
+            try:
+                eid = int(ev.get("EventID") or 0)
+            except (TypeError, ValueError):
+                continue
+            if eid <= self._last_event_id:
+                continue
+            top = max(top, eid)
+            if str(ev.get("EventName") or "").strip().lower() != "championkill":
+                continue
+            if self._norm_event_name(
+                    ev.get("VictimName")) not in self._my_event_names:
+                continue
+            champ = self._name_to_champ.get(
+                self._norm_event_name(ev.get("KillerName")))
+            if not champ or champ == my_disp:
+                continue  # 未知来源/自杀不计
+            self._kill_counts[champ] = self._kill_counts.get(champ, 0) + 1
+        self._last_event_id = top
+
     # ── 单次快照 ──────────────────────────────────────────────────
 
     def _poll_once(self) -> LiveSnapshot | None:
@@ -184,6 +247,8 @@ class LivePoller(threading.Thread):
         snap.ok = True
         snap.raw_active = active or {}
         snap.raw_playerlist = playerlist or []
+        # 死亡来源（游戏内才可用；未在对局/旧版本客户端返回 None → 空表跳过）
+        events = self._get_json("/eventdata")
 
         # activeplayer（免密；只在游戏内可用）
         # 国服实测 championName=null：or "" 防旧写法 .get(k, "") 取到 None 崩线程
@@ -220,6 +285,11 @@ class LivePoller(threading.Thread):
                        for it in (p.get("items") or [])],
                 riot_id=str(p.get("riotId", "")),
             )
+            champ_disp = cn or en
+            if champ_disp:
+                # 事件 KillerName/VictimName → 英雄显示名映射（逐帧合并）
+                for nm in self._name_set(p):
+                    self._name_to_champ[nm] = champ_disp
             snap.players.append(info)
             if p is me:
                 snap.my_champion = cn or en
@@ -234,10 +304,22 @@ class LivePoller(threading.Thread):
             print("[LIVE] WARN: playerlist 中定位不到本地玩家"
                   "（国服字段缺失且召唤师名不可用）——装备/金币追踪将缺失")
 
+        # 我的名字候选（VictimName 归一化后比对；me 定位失败时仍可用
+        # activeplayer / LCU 召唤师名兜底）
+        self._my_event_names = (self._name_set(me or {})
+                                | self._name_set(active or {})
+                                | self._name_set(
+                                    {"summonerName": self._my_summoner}))
+        # 死亡来源增量处理（EventID 去重；击杀者→英雄映射本帧已就绪）
+        self._process_kill_events(events or {}, my_disp=snap.my_champion)
+        snap.killers_of_me = dict(self._kill_counts)
+
         # dump（开关在 dumper 内部判断）
         if self.dumper:
             self.dumper.dump("live_activeplayer", snap.raw_active)
             self.dumper.dump("live_playerlist", snap.raw_playerlist)
+            if snap.raw_events:
+                self.dumper.dump("live_eventdata", snap.raw_events)
         return snap
 
     @staticmethod
