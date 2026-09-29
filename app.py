@@ -100,6 +100,31 @@ def main():
     detector = ScreenDetector(kb, ocr, layout=load_layout(screen_w, screen_h))
     detector.last_cards = None          # 最近一轮稳定卡片名（记账映射用）
 
+    # ── 点击证据落盘（台账排障黑匣子的图像侧） ────────────────────
+    # 每次卡片点击的定格帧写 log/captures/ PNG，文件名进 clicks 记录
+    # （复盘日志）——OCR 读错/矩形错位/界面异常，事后看图即知。
+    # 排障默认开；定位后 settings [diagnostics] click_capture = false 关。
+    _capture_on = bool(settings.get("diagnostics", "click_capture",
+                                    default=True))
+    _cap_dir = BASE_DIR / "log" / "captures"
+
+    def _capture_sink(idx, crop, tag):
+        """capture_sink 钩子：crop → PNG 文件名（失败返回 None 不抛）。"""
+        if not _capture_on:
+            return None
+        import cv2
+        _cap_dir.mkdir(parents=True, exist_ok=True)
+        ts = (time.strftime("%Y%m%d_%H%M%S")
+              + f"_{int(time.time() * 1000) % 1000:03d}")
+        path = _cap_dir / f"{tag}_{ts}_card{idx + 1}.png"
+        ok, buf = cv2.imencode(".png", crop)   # imencode 走内存，绕开
+        if not ok:                             # imwrite 的 ANSI 路径限制
+            return None
+        path.write_bytes(buf.tobytes())
+        return path.name
+
+    detector.capture_sink = _capture_sink
+
     def _on_state(active, round_id):
         if active:
             session.on_hex_ui(True)
@@ -139,23 +164,28 @@ def main():
 
     _click_diag_ts = {}   # 点击链诊断限频（key → 上次打印时刻）
 
-    def _click_diag(key, detail):
+    def _click_diag(key, detail, ev=None):
         """点击链丢弃诊断：3s 限频 print（落日志面板+tee 文件），并写
         session timeline 供复盘日志事后追溯（stdout 无留档时唯一现场）。
 
         2026-09-29 复发案：海克斯识别成功但台账空——旧版 _on_click 三个
         静默 return（reroll 防御/矩形未命中/无海克斯证据）无线索可查，
         本轮全部上诊断。只诊断异常丢弃：正常"点卡片矩形外"的移动/攻击
-        点击（无海克斯证据时不进到这里）不刷屏。"""
+        点击（无海克斯证据时不进到这里）不刷屏。
+        ev：点击上下文（x/y/card），进 clicks 黑匣子（打印限频不限记录）。"""
         now = time.monotonic()
-        if now - _click_diag_ts.get(key, 0.0) < 3.0:
-            return
-        _click_diag_ts[key] = now
-        print(f"[LEDGER] 点击未记账({key}): {detail}")
+        first = now - _click_diag_ts.get(key, 0.0) >= 3.0
+        if first:
+            _click_diag_ts[key] = now
+            print(f"[LEDGER] 点击未记账({key}): {detail}")
         try:
             session._log("click_dropped", f"{key} {detail}")
         except Exception:
             pass
+        if ev:
+            session.log_click({**ev, "branch": "drop",
+                               "result": f"dropped_{key}", "name": None,
+                               "raw": None, "image": None})
 
     def _on_click(x, y):
         # 双保险：MouseLedger 已把刷新按钮命中独占路由给 on_reroll，正常
@@ -163,7 +193,8 @@ def main():
         for rr in _reroll_rects() or []:
             if point_in_rect(x, y, rr):
                 _click_diag("reroll_overlap",
-                            f"({x},{y}) 命中刷新按钮矩形（路由异常?）")
+                            f"({x},{y}) 命中刷新按钮矩形（路由异常?）",
+                            ev={"x": x, "y": y, "card": None})
                 return
         idx = card_ledger.card_at(x, y)
         active = detector.recent_hex_activity()
@@ -172,33 +203,55 @@ def main():
                 rects = card_ledger.rects_provider()
                 _click_diag("rect_miss",
                             f"({x},{y}) 海克斯界面在屏但未命中任何卡片矩形 "
-                            f"{rects}（标定错位嫌疑）")
+                            f"{rects}（标定错位嫌疑）",
+                            ev={"x": x, "y": y, "card": None})
             return   # 常规对局点击（移动/攻击）占绝大多数：静默防刷屏
         if not active:
             _click_diag("no_hex_evidence",
                         f"({x},{y}) 卡{idx + 1} 矩形命中但无海克斯证据"
-                        "（界面刚关 >10s？）")
+                        "（界面刚关 >10s？）",
+                        ev={"x": x, "y": y, "card": idx + 1})
             return   # 卡片矩形命中但无海克斯证据 = 误入
+        # 点击时刻抓帧定格+落盘（毫秒级）；直记/补扫消费同一张 crop，
+        # 保证截图与识别看到的是同一像素（台账对账三方：clicks/截图/日志）
+        t0 = time.time()
+        crop, img = detector.capture_click_evidence(idx)
         # 稳定结果优先；识别尚未稳定时用最近一帧读数兜底（历史缺陷：
         # OCR 逐帧抖动导致永不稳定 → last_cards 空 → 点击被静默丢弃）
         cards = detector.last_cards or detector.last_cards_raw
         name = cards[idx] if cards and idx < len(cards) else None
         if name and kb.valid_augment(name):
-            _record_click(idx, name, None)
+            _record_click(idx, name, None, ev=(t0, x, y, idx, "direct", img))
             return
-        # 点击时刻抓帧定格（毫秒级），识别挪后台线程（迟滞窗口/OCR 迟滞
-        # 期的点击也要能记账；历史缺陷：这里的点击被静默丢弃 → 台账缺
-        # 记录；2026-09-29 起不再同步阻塞记账线程 ~2s，连点两卡不漏）
+        # 识别挪后台线程（迟滞窗口/OCR 迟滞期的点击也要能记账；历史缺陷：
+        # 这里的点击被静默丢弃 → 台账缺记录；2026-09-29 起不再同步阻塞
+        # 记账线程 ~2s，连点两卡不漏）
         detector.async_ocr_card_raw(
-            idx, lambda n, r, i=idx: _record_click(i, n, r))
+            idx, lambda n, r, i=idx: _record_click(
+                i, n, r, ev=(t0, x, y, i, "rescan", img)),
+            crop=crop)
 
-    def _record_click(idx, name, raw):
+    def _record_click(idx, name, raw, ev=None):
         """点击记账落位（稳定名直记 / 后台补扫回调共用）。
 
         库外名留痕：timeline 记下 OCR 原文随复盘日志落盘（知识库
-        落后于游戏版本时才有线索可查）；不进台账、不参与联动推装"""
+        落后于游戏版本时才有线索可查）；不进台账、不参与联动推装。
+        ev=(点击时刻, x, y, 卡号, 分支, 截图文件名)：终点组装 clicks
+        黑匣子记录——direct=稳定名直记，rescan=后台补扫，
+        callback=无上下文兜底（不该出现，出现即上下文丢失线索）。"""
+        if ev is None:
+            ev = (time.time(), None, None, idx, "callback", None)
+        t0, x, y, card, branch, img = ev
+
+        def _blackbox(result, n=None):
+            session.log_click({"ts": t0, "x": x, "y": y,
+                               "card": card + 1 if card is not None else None,
+                               "branch": branch, "result": result,
+                               "name": n, "raw": raw, "image": img})
+
         if not name or not kb.valid_augment(name):
             session._log("augment_unverified", f"卡{idx + 1} raw={raw}")
+            _blackbox("unverified")
             now = time.time()
             if now - _click_diag_ts.get("unverified", 0.0) > 5.0:
                 _click_diag_ts["unverified"] = now
@@ -208,20 +261,26 @@ def main():
                                        "可能是知识库落后于游戏版本，"
                                        "请刷新 augments.json"))
             return
-        if session.record_augment(name, card_idx=idx):
+        ok = session.record_augment(name, card_idx=idx)
+        _blackbox("recorded" if ok else "duplicate", name)
+        if ok:
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
         else:
             ui(lambda n=name: print(f"[LEDGER] {n} 已在台账，忽略重复记录"))
 
-    def _on_reroll():
+    def _on_reroll(x, y):
         if not detector.recent_hex_activity():
             _click_diag("reroll_no_evidence",
-                        f"({MouseLedger.cursor_pos()}) 刷新按钮命中但无海克斯证据")
+                        f"({x},{y}) 刷新按钮命中但无海克斯证据",
+                        ev={"x": x, "y": y, "card": None})
             return   # 界面关闭 >10s 后的对局点击不再触发重扫/刷日志（同 _on_click 门）
         detector.force_rescan()
         detector.last_cards = None  # 重扫稳定前点击不记账（防按旧卡片名记录）
         detector.last_cards_raw = None
         session.on_hex_reroll()     # 浮窗回"识别中"，选中标记作废
+        session.log_click({"x": x, "y": y, "card": None, "branch": "reroll",
+                           "result": "reroll_rescan", "name": None,
+                           "raw": None, "image": None})
         ui(lambda: print("[LEDGER] reroll → 已触发重扫"))
 
     ledger = MouseLedger(

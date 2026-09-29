@@ -144,6 +144,7 @@ class GameSession:
             self.hex_last = ""            # 上一轮识别结果（界面关闭后保留展示）
             self.history = []             # 建议历史（复盘日志）
             self._review_flushed = False  # 本局复盘已落盘标记（双兜底防丢）
+            self.clicks = []              # 点击链黑匣子（台账排障，见 log_click）
             self._game_t0 = time.time()
             self._log("session_reset")
 
@@ -358,6 +359,20 @@ class GameSession:
             self._suggest_next_items(reason="periodic")
 
     # ── 海克斯记账（P1 mouse_ledger 调用入口；冒烟测试直接调用） ───
+
+    def log_click(self, record: dict):
+        """点击链黑匣子（2026-09-29 台账复发案）：每次卡片点击/丢弃/reroll
+        的完整终点记录（坐标/卡号/分支/结果/OCR原文/定格截图文件名），
+        随复盘日志落盘——台账缺记录时与截图、诊断日志三方对账。
+
+        环形上限 300 条防失控（正常一局 <10 条，异常刷屏时保尾部）；
+        调用方分布在 MouseLedger/补扫回调线程，锁内追加。"""
+        with self._lock:
+            record = dict(record)
+            record.setdefault("ts", time.time())
+            self.clicks.append(record)
+            if len(self.clicks) > 300:
+                del self.clicks[:len(self.clicks) - 300]
 
     def record_augment(self, name: str, tier: str = "", card_idx=None):
         """记账入口。card_idx：点击的卡片序号（0-2），供 overlay"✓已选"标记。
@@ -1017,6 +1032,10 @@ class GameSession:
                 "timeline": [
                     {"ts": round(t, 1), "event": e, "detail": d}
                     for t, e, d in self.timeline[-200:]],
+                # 点击链黑匣子（台账排障对账：与 log/captures/ 截图、
+                # [LEDGER] 诊断日志三方互证）
+                "clicks": [dict(c, ts=round(c["ts"], 3))
+                           for c in self.clicks[-200:]],
             }
             path = out_dir / f"{ts}_{safe_hero}.json"
             path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
@@ -1045,7 +1064,10 @@ class GameSession:
                 return
             has_unverified = any(e[1] == "augment_unverified"
                                  for e in self.timeline)
-            if not (self.augments or self.history or has_unverified):
+            # 纯点击留痕局（点击全被丢/全 unverified，台账建议双空）也要
+            # 落盘——clicks 黑匣子正是这类局的唯一现场（2026-09-29 台账案）
+            if not (self.augments or self.history or has_unverified
+                    or self.clicks):
                 return
             self._log("review_flush", "终局事件丢失，兜底补写复盘日志")
             self._write_review_log()

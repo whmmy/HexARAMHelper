@@ -178,8 +178,9 @@ print("属性家族交集:", inter, "→ _is_fullstat_item:", _is_fullstat_item(
 hits = sorted(n for n in kb.items if _is_fullstat_item(kb, n))
 expect("守卫命中集 = 属性加成/金铲铲（全库仅 2 条，正常件交集 ≤5）",
        hits == ["属性加成", "金铲铲"], hits)
-expect("金铲铲仍在 KB/可买口径（守卫只进推荐池，不删数据）",
-       kb.valid_item("金铲铲") and kb.item_available("金铲铲", "12"))
+expect("金铲铲仍在 KB（守卫只进推荐池，不删数据；dd332df 起与虚空献祭"
+       "同为任务件 maps=[]，可买口径不再要求 map12）",
+       kb.valid_item("金铲铲") and info.get("gold") and info.get("sell"))
 expect("金铲铲不进 next_item_candidates",
        "金铲铲" not in [c.name for c in rules.next_item_candidates(
            [], "tank", threat_b, hero=hero_b, game_map="12")])

@@ -249,6 +249,17 @@ det.async_ocr_card_raw(9, lambda n, r: _cb2.append((n, r)))
 check("P1-6b 抓帧越界当场回调 (None, None)（不丢回调）",
       _cb2 == [(None, None)], str(_cb2))
 
+# crop 透传（2026-09-29 台账黑匣子）：点击链先 capture_click_evidence
+# 抓帧+落盘，补扫复用同一张 crop——不再内部抓帧，截图与识别同像素
+_grab_calls = []
+det._grab_card_crop = lambda i: _grab_calls.append(i) or None
+_big = np.zeros((100, 80, 3), np.uint8)
+_thru = det.sync_ocr_card_raw(0, crop=_big)
+check("P1-6c crop 透传：外部定格帧直接分析、不再内部抓帧",
+      _grab_calls == [] and _thru == ("不祥契约", "「不祥契约」"),
+      f"grabs={_grab_calls} thru={_thru}")
+del det._grab_card_crop          # 去掉实例遮蔽，恢复真方法
+
 # app.py 源码断言：丢弃分支调 raw 版 + 写 timeline + 提示语含刷新指引；退出 flush
 app_src = (ROOT / "app.py").read_text(encoding="utf-8")
 seg = app_src[app_src.index("def _on_click"):app_src.index("def _on_reroll")]
@@ -284,6 +295,16 @@ check("库外名点击不进台账、不设 hex_picked", len(s_click.augments) =
 ev = [e for e in s_click.timeline if e[1] == "augment_unverified"]
 check("timeline 留痕 augment_unverified（detail 含 raw 原文）",
       len(ev) == 1 and ev[0][2] == "卡1 raw=无漆安途", str(s_click.timeline[-3:]))
+# clicks 黑匣子（2026-09-29 台账案）：同一次 unverified 点击在终点
+# （app._record_click）会 log_click 完整记录——镜像同款调用验证字段
+s_click.log_click({"ts": _T0, "x": 100, "y": 200, "card": 1,
+                   "branch": "rescan", "result": "unverified",
+                   "name": None, "raw": "无漆安途", "image": None})
+ck = [c for c in s_click.clicks if c["result"] == "unverified"]
+check("clicks 黑匣子记录 unverified 终点（坐标/卡号/分支/raw 齐全）",
+      len(ck) == 1 and ck[0]["x"] == 100 and ck[0]["card"] == 1
+      and ck[0]["branch"] == "rescan" and ck[0]["raw"] == "无漆安途",
+      str(s_click.clicks))
 # 纯留痕局（零台账零建议）也要落盘：flush 非空门含 augment_unverified
 # （否则知识库落后案的线索随 App 退出丢失；2026-09-29 核验后扩门）
 n3 = len(log_files())
@@ -300,7 +321,7 @@ det.force_rescan = lambda: rescans.append(1)
 rerolled = []
 
 
-def _on_reroll_mirror():                      # app.py:177-184 同逻辑
+def _on_reroll_mirror(x=0, y=0):              # app.py 同逻辑（v2: 带坐标）
     if not det.recent_hex_activity():
         return
     det.force_rescan()

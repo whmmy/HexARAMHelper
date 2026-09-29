@@ -36,7 +36,7 @@ class MouseLedger(threading.Thread):
                  reroll_rect_provider=lambda: None):
         super().__init__(daemon=True, name="MouseLedger")
         self.on_click = on_click            # fn(x, y)
-        self.on_reroll = on_reroll          # fn() —— reroll 矩形命中
+        self.on_reroll = on_reroll          # fn(x, y) —— reroll 矩形命中
         self.reroll_rect_provider = reroll_rect_provider  # fn() -> 矩形|列表|None
         self._running = False
         self._prev_down = False
@@ -77,7 +77,7 @@ class MouseLedger(threading.Thread):
                     rr = self.reroll_rect_provider() if self.reroll_rect_provider else None
                     if any(point_in_rect(x, y, r) for r in self._as_rect_list(rr)):
                         if self.on_reroll:
-                            self.on_reroll()
+                            self.on_reroll(x, y)
                     elif self.on_click:
                         self.on_click(x, y)
                 self._prev_down = down

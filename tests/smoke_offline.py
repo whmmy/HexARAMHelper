@@ -17,6 +17,8 @@
    System1 防幻觉/复盘日志
 10. 点击链丢弃诊断（rect_miss/no_hex_evidence/reroll_no_evidence 限频上
     报+timeline 留痕）+ LogRedirector tee 文件留档（2026-09-29 台账复发案）
+11. 点击链黑匣子：clicks 终点记录随复盘落盘（环形上限/纯点击局 flush 门）
+    + 定格截图 capture_sink 落库 + 补扫 crop 透传（2026-09-29 二阶段）
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -934,6 +936,38 @@ def test_detect_and_layout():
     check("点击补扫库外名：raw 留原文（不再恒 None）",
           got_miss == (None, "无漆安途"), str(got_miss))
     check("补扫越界安全", det_a.sync_ocr_card(9) is None)
+
+    # 点击证据黑匣子（2026-09-29 台账复发案）：定格帧经 capture_sink
+    # 落盘（IO 策略在 app 侧，核心层只回调）；补扫 crop 透传复用同一
+    # 张——截图与识别消费同一像素；sink 抛异常不影响返回 crop
+    _sunk = []
+
+    def _sink(idx, crop, tag):
+        _sunk.append((idx, tag))
+        return f"{tag}_stub_card{idx + 1}.png"
+
+    det_a.capture_sink = _sink
+    crop_e, img_e = det_a.capture_click_evidence(1, tag="click")
+    check("capture_click_evidence：sink 回调并返回文件名",
+          crop_e is not None and img_e == "click_stub_card2.png"
+          and _sunk == [(1, "click")], str(_sunk))
+    det_a.capture_sink = lambda *a: (_ for _ in ()).throw(RuntimeError("x"))
+    crop_x, img_x = det_a.capture_click_evidence(0)
+    check("sink 抛异常不崩：返回 (crop, None)", crop_x is not None
+          and img_x is None)
+    det_a.capture_sink = None
+    crop_n, img_n = det_a.capture_click_evidence(0)
+    check("sink 未接（None）：返回 (crop, None)", crop_n is not None
+          and img_n is None)
+
+    _grab_seen = []
+    det_a._grab_card_crop = lambda i: _grab_seen.append(i) or None
+    _SyncOcr.out = _raw_hit      # 前面用例切到了 miss mock，恢复命中口径
+    thru = det_a.sync_ocr_card_raw(2, crop=crop_e)
+    check("补扫 crop 透传：外部定格帧直接分析、不再内部抓帧",
+          _grab_seen == [] and thru == (_cards3[0], "「有始有终」"),
+          f"grabs={_grab_seen} thru={thru}")
+    del det_a._grab_card_crop
 
     # save_layout 并发原子性（检测线程自愈 × 手动标定线程两写者回归）：
     # 交错写后文件必须仍是完整 JSON，且无 .tmp 残留
@@ -2369,6 +2403,105 @@ def test_click_diag_and_tee():
           and "app_{time.strftime('%Y%m%d_%H%M%S')}" in app_src)
 
 
+# ── 11. 点击链黑匣子（clicks 记录 + 定格截图落库） ────────────────
+
+def test_click_blackbox():
+    """台账排障黑匣子（2026-09-29 复发案二阶段）：每次卡片点击的终点
+    记录（坐标/卡号/分支/结果/OCR 原文/截图文件名）进 session.clicks
+    随复盘日志落盘；点击时刻定格帧经 capture_sink 写 log/captures/ PNG。
+    台账缺记录时三方对账：clicks × 截图 × [LEDGER] 诊断日志。"""
+    import json as _json
+    import numpy as _np2
+
+    print("\n[11] 点击链黑匣子（clicks 落盘 + 截图 sink）")
+
+    s = GameSession(kb, rules)
+    for i in range(310):
+        s.log_click({"x": i, "y": i, "card": 1, "branch": "direct",
+                     "result": "recorded", "name": "不祥契约"})
+    check("log_click 环形上限 300（保尾部）", len(s.clicks) == 300
+          and s.clicks[-1]["x"] == 309 and s.clicks[0]["x"] == 10)
+    check("log_click 自动补 ts 且不改写调用方 dict",
+          all("ts" in c for c in s.clicks))
+    s.reset()
+    check("reset 清空 clicks", s.clicks == [])
+
+    # 纯点击留痕局（台账/建议双空、无 augment_unverified）也必须落盘：
+    # "点击全被丢"的局 clicks 正是唯一现场（flush 非空门含 clicks）
+    s2 = GameSession(kb, rules)
+    s2._game_t0 = time.time() - 1000
+    s2.stage = "in_game"
+    s2.log_click({"x": 640, "y": 720, "card": 1, "branch": "drop",
+                  "result": "dropped_rect_miss", "name": None,
+                  "raw": None, "image": None})
+    games_dir = _SMOKE_BASE / "log" / "games"
+    n0 = len(list(games_dir.glob("*.json"))) if games_dir.exists() else 0
+    s2.flush_pending_review()
+    files = sorted(games_dir.glob("*.json"))
+    want_prefix = time.strftime("%Y%m%d_%H%M%S", time.localtime(s2._game_t0))
+    mine = [p for p in files if p.name.startswith(want_prefix)]
+    check("纯点击留痕局 flush 兜底落盘（非空门含 clicks）",
+          len(mine) == 1, f"n0={n0} files={[p.name for p in files]}")
+    doc = _json.loads(mine[-1].read_text(encoding="utf-8"))
+    check("复盘 doc 含 clicks 字段（记录完整字段）",
+          len(doc.get("clicks", [])) == 1
+          and doc["clicks"][0]["result"] == "dropped_rect_miss"
+          and doc["clicks"][0]["x"] == 640
+          and isinstance(doc["clicks"][0]["ts"], float), str(doc.get("clicks")))
+
+    # app.py 源码断言：终点接线齐全
+    app_src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    seg_diag = app_src[app_src.index("def _click_diag")
+                       :app_src.index("def _on_click")]
+    seg_click = app_src[app_src.index("def _on_click")
+                        :app_src.index("def _record_click")]
+    seg_rec = app_src[app_src.index("def _record_click")
+                      :app_src.index("def _on_reroll")]
+    seg_rr = app_src[app_src.index("def _on_reroll")
+                     :app_src.index("ledger = MouseLedger")]
+    check("_on_click 点击时刻 capture_click_evidence 定格+落盘，"
+          "直记/补扫消费同一 crop（截图与识别同像素）",
+          "capture_click_evidence(idx)" in seg_click
+          and "crop=crop" in seg_click)
+    check("_record_click 终点组装 clicks（ev 上下文/direct/rescan 分支）",
+          "session.log_click" in seg_rec and '"branch": branch' in seg_rec
+          and '_blackbox("recorded" if ok else "duplicate"' in seg_rec)
+    check("_on_reroll 带坐标且终点 log_click（reroll_rescan）",
+          "def _on_reroll(x, y)" in seg_rr
+          and '"result": "reroll_rescan"' in seg_rr)
+    check("丢弃分支 clicks 记录（打印限频不限记录）",
+          '"result": f"dropped_{key}"' in seg_diag
+          and seg_diag.index("if first") < seg_diag.index("session.log_click"))
+    check("capture_sink 接线 + 开关（diagnostics.click_capture 默认开）",
+          "detector.capture_sink = _capture_sink" in app_src
+          and 'settings.get("diagnostics", "click_capture"' in app_src)
+    check("截图写 log/captures/ PNG（imencode 绕 ANSI 路径限制）",
+          '"captures"' in app_src and "cv2.imencode" in app_src)
+
+    # MouseLedger.on_reroll 带坐标回调（app._on_reroll 坐标来源）
+    ml_src = (Path(__file__).resolve().parent.parent
+              / "hexa" / "core" / "mouse_ledger.py").read_text(
+                  encoding="utf-8")
+    check("MouseLedger 路由 reroll 时传 (x, y)",
+          "self.on_reroll(x, y)" in ml_src)
+
+    # GameSession.review doc 的 clicks 序列化不含 numpy/不可 JSON 类型
+    s3 = GameSession(kb, rules)
+    s3.log_click({"x": 1, "y": 2, "card": 2, "branch": "rescan",
+                  "result": "recorded", "name": "不祥契约",
+                  "raw": None,
+                  "image": "click_20260929_120000_000_card3.png",
+                  "extra": _np2.zeros(3, dtype=_np2.float32).tolist()})
+    try:
+        blob = _json.dumps(
+            [dict(c, ts=round(c["ts"], 3)) for c in s3.clicks],
+            ensure_ascii=False)
+        check("clicks 可 JSON 序列化（复盘落盘不炸）", "不祥契约" in blob)
+    except TypeError as e:
+        check("clicks 可 JSON 序列化（复盘落盘不炸）", False, repr(e))
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -2388,6 +2521,7 @@ if __name__ == "__main__":
     test_review_fixes()
     test_thinking_params()
     test_click_diag_and_tee()
+    test_click_blackbox()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

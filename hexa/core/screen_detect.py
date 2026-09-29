@@ -421,6 +421,10 @@ class ScreenDetector(threading.Thread):
         self._canvas_loaded = None        # 当前画布尺寸（变更时重读标定/模板）
         self._last_tpl_score = 0.0        # 最近一帧模板预筛分（0=无模板）
         self._last_hex_evidence = 0.0     # 最近海克斯证据时刻（点击记账门）
+        # 点击证据落盘钩子（fn(idx, crop, tag) -> filename|None；None=不落）。
+        # IO 策略在 app 侧（写 log/captures/ PNG），核心层只回调——
+        # 2026-09-29 台账案：点击时刻定格帧落库，与 clicks 记录对账用
+        self.capture_sink = None
 
     # ── 控制 ──────────────────────────────────────────────────────
 
@@ -789,6 +793,22 @@ class ScreenDetector(threading.Thread):
             print(f"[WARN] 点击抓帧异常: {e}")
         return None
 
+    def capture_click_evidence(self, idx: int, tag: str = "click") -> tuple:
+        """点击时刻定格第 idx 张卡 → (crop|None, 截图文件名|None)。
+
+        抓帧（毫秒级定格）+ 经 capture_sink 落盘一气呵成——台账排障
+        黑匣子的图像侧：每次卡片矩形命中的点击都留一张点击瞬间的卡面
+        （OCR 读错/矩形错位/界面状态异常，事后看图即知）。落盘失败只
+        警告不抛（截图是排障辅助，不能拖垮记账主链路）。"""
+        crop = self._grab_card_crop(idx)
+        filename = None
+        if crop is not None and self.capture_sink is not None:
+            try:
+                filename = self.capture_sink(idx, crop, tag)
+            except Exception as e:  # noqa: BLE001 —— 落盘失败不影响记账
+                print(f"[WARN] 点击截图落盘异常: {e}")
+        return crop, filename
+
     def _analyze_card_crop(self, crop) -> tuple:
         """卡面裁剪 → (库名|None, 原始OCR文本|None)（sync/async 补扫共用）。
 
@@ -825,15 +845,17 @@ class ScreenDetector(threading.Thread):
             return name[0], name[3]
         return None, best_raw
 
-    def async_ocr_card_raw(self, idx: int, on_done) -> None:
+    def async_ocr_card_raw(self, idx: int, on_done, crop=None) -> None:
         """点击时刻抓帧定格 → 后台线程识别 → on_done(库名|None, raw|None)。
 
         用户案 2026-09-29：系统已知点击的卡位（坐标→card_at），点击只需
         截图，识别（最长 ~2s）挪后台 daemon 线程——记账线程不再被同步
         补扫阻塞，连续快速点两张卡不再漏第二张。抓帧失败/越界当场回调
         (None, None)；OCR 经 recognize 内部锁与检测线程串行，不并发读数。
-        """
-        crop = self._grab_card_crop(idx)
+        crop 可传外部已定格的帧（点击链先 capture_click_evidence 抓帧+
+        落盘，补扫复用同一张，保证截图与识别消费的是同一像素）。"""
+        if crop is None:
+            crop = self._grab_card_crop(idx)
         if crop is None:
             on_done(None, None)
             return
@@ -849,12 +871,14 @@ class ScreenDetector(threading.Thread):
         threading.Thread(target=_work, daemon=True,
                          name=f"click-ocr-{idx}").start()
 
-    def sync_ocr_card_raw(self, idx: int) -> tuple:
+    def sync_ocr_card_raw(self, idx: int, crop=None) -> tuple:
         """点击时刻同步补扫第 idx 张卡 → (库名|None, 原始OCR文本|None)。
 
         async_ocr_card_raw 的同步形态（同一分析体，阻塞至识别完成），
-        供合成测试/离线断言直调；产品路径走 async 版。"""
-        crop = self._grab_card_crop(idx)
+        供合成测试/离线断言直调；产品路径走 async 版。crop 语义同 async
+        （None=内部抓帧）。"""
+        if crop is None:
+            crop = self._grab_card_crop(idx)
         if crop is None:
             return None, None
         try:
