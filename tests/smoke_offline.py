@@ -154,6 +154,20 @@ def test_kb():
           and kb.item_available("无尽之刃", "")  # 空图=宽松兜底
           and not kb.item_available("魔切", "11"),  # 自动升级件不可直购，不推荐
           "")
+    # 虚空献祭案 2026-09-29：海斗任务合成件（升级祭献/提亚马特任务等海克斯
+    # 解锁，商店货架没有）——DD 标 map12 可买，守卫摘除可买地图；库内保留
+    # （任务合成后会上身，台账/幻觉校验/卖价要用）。大乱斗货架真卖的专属
+    # 件（救生索/幽魂弯刀/毁坏仪式，带 from 合成链）不误伤
+    check("任务合成件入库但不可推荐",
+          all(kb.valid_item(n) for n in
+              ("虚空献祭", "终极九头蛇", "沃格勒特的巫师帽"))
+          and not kb.item_available("虚空献祭", "12")
+          and not kb.item_available("虚空献祭", "")
+          and not kb.item_available("终极九头蛇", "12")
+          and not kb.item_available("沃格勒特的巫师帽", "12"), "")
+    check("大乱斗货架专属件不受任务件守卫误伤",
+          all(kb.item_available(n, "12")
+              for n in ("救生索", "幽魂弯刀", "毁坏仪式")), "")
     check("拼音搜索", kb.search_hero("ayjm") == (["暗裔剑魔"], True))
     check("英中转换", kb.champion_cn("Aatrox") == "暗裔剑魔")
     check("英雄校验模糊", kb.validate_hero("剑魔") == "暗裔剑魔")
@@ -272,6 +286,16 @@ def test_rules():
     check("大乱斗局不推峡谷专属件",
           all(kb.item_available(n, "12") for n in got12),
           str(sorted(got12 - got11)[:8]))
+    # 虚空献祭案 2026-09-29：任务合成件混进 System2 方案池也必须被
+    # item_available 拦下（真机曾把它推成主线②"还差4956"，
+    # 商店里根本搜不到）
+    seq_task = rules.build_sequence(
+        [], "tank", ThreatProfile(), hero="曙光女神", game_map="12",
+        pool=["虚空献祭", "钢铁烈阳之匣", "石像鬼石板甲"])
+    check("任务合成件不进主线（方案池过滤）",
+          seq_task and seq_task[0].name == "钢铁烈阳之匣"
+          and "虚空献祭" not in [c.name for c in seq_task],
+          str([c.name for c in seq_task]))
 
     # 小件合成：爆裂魔杖 → 某个 AP 传说件
     target, note = rules.component_advice(["爆裂魔杖"], "ap")

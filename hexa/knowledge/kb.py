@@ -190,6 +190,7 @@ class KnowledgeBase:
         # 2500 vs 8010 峡谷 2900），必须先按地图分层再比 id。
         best = {}
         buy_maps = {}   # 名字 -> 在 11/12 哪些图有可买条目
+        from12 = {}     # 名字 -> map12 可买条目是否带 from 合成链
         for _iid, it in data.get("data", {}).items():
             name = (it.get("name") or "").strip()
             if not name:
@@ -203,6 +204,8 @@ class KnowledgeBase:
                 for m in ("11", "12"):
                     if maps.get(m):
                         buy_maps.setdefault(name, set()).add(m)
+                if maps.get("12") and it.get("from"):
+                    from12[name] = True
             # 入库看地图标记（魔切/炽天使之拥等商店不可直购的自动升级件
             # 保留在库里供台账/路线推断，可推荐性由 buy_maps/item_available 管）
             tier = 0 if (non77 and maps.get("11")) else (
@@ -211,6 +214,18 @@ class KnowledgeBase:
             cur = best.get(name)
             if cur is None or key < cur[0]:
                 best[name] = (key, _iid, it)
+        # 海斗"任务合成件"守卫（虚空献祭案 2026-09-29）：DD 把终极任务件
+        # 标成 map12 可买（虚空献祭/终极九头蛇/沃格勒特的巫师帽，全 6000G），
+        # 但商店常规货架根本没有——它们由任务海克斯（升级祭献/提亚马特
+        # 任务等）合成/解锁，真机商店里搜不到（用户实证），直推"还差X金"
+        # 等于推荐一件买不到的装。判据用结构不用名单：峡谷（map11）从无
+        # 可买主张 + map12 可买条目无 from 合成链 → 任务/特殊件；大乱斗
+        # 货架真卖的专属件（救生索/幽魂弯刀/毁坏仪式）带组件链，不受影响。
+        # 仍入库（任务合成后会上身，台账/幻觉校验/卖价要用），仅从可买
+        # 地图摘除——推荐性由 item_available 管，同魔切/炽天使之拥口径。
+        for name, maps in list(buy_maps.items()):
+            if maps == {"12"} and not from12.get(name):
+                buy_maps[name] = set()
         # 峡谷+大乱斗都不可买 = 斗魂竞技场/KIWI 专属（飞升护符、黑洞护手、
         # 麦瑞德裂血手套等），本作商店里根本没有，推荐出去等于幻觉，
         # 直接不入库（幻觉校验随之收紧）；id→名全量映射保留供合成链换算。
@@ -227,8 +242,9 @@ class KnowledgeBase:
                 "plaintext": it.get("plaintext", ""),
                 "from": it.get("from", []) or [],   # 组件 item id 列表
                 "into": it.get("into", []) or [],   # 升级目标 item id 列表
-                # 可买地图：名字任一非 KIWI 条目在 11/12 可买即算，
-                # 供 item_available 按当前对局地图过滤
+                # 常规货架可买地图：名字任一非 KIWI 条目在 11/12 可买即算
+                # （任务合成件已摘除，见上方守卫），供 item_available 按
+                # 当前对局地图过滤
                 "maps": sorted(buy_maps.get(name, set())),
             }
         # id -> name 索引（组件/升级链换算用）：全量 id 都映射到规范名，
@@ -313,7 +329,8 @@ class KnowledgeBase:
         """装备在指定地图商店是否可买（"11"=召唤师峡谷 / "12"=极地大乱斗）。
 
         map_id 缺失/未知时退化为"任一支持地图可买"（宽松兜底，行为同
-        未按图过滤）；竞技场/KIWI 专属件已不入库，任一图都查不到。
+        未按图过滤）；竞技场/KIWI 专属件不入库、任务合成件（虚空献祭案）
+        可买地图已摘空，任一图都查不到。
         """
         info = self.items.get(name)
         if not info:
