@@ -98,7 +98,7 @@ def gen_damage_profile():
         profile[c["name"]] = {  # 键 = 中文名（与 champions.json/LCU 一致）
             "key": key,
             "damage": damage,
-            "is_tank": "Tank" in tags,
+            "is_tank": is_tank,  # 覆写生效（旧笔误写死 tags 推断，特例失效）
             "tags": tags,
         }
     out = {

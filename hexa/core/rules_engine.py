@@ -359,6 +359,12 @@ class RulesEngine:
                         damage = ""
                 elif vote:
                     damage = vote
+            # 坦克底板无实证不计伤害威胁（泰坦案口径推广到名字先验：
+            # 2026-09-29 小火龙局祖安狂人案——底板 ap+is_tank 早期无出装
+            # 时双计 法伤+坦克，法伤×3 实为×2；≥2 票重的非坦出装才允许
+            # 坦克计回伤害侧）
+            if is_tank and not (weight >= 2.0 and vote not in ("", "tank")):
+                damage = ""
             if damage == "ap":
                 tp.ap_count += 1
                 tp.ap_value += self._equip_value(names)
@@ -938,14 +944,37 @@ class RulesEngine:
                 1 if want_tag and want_tag not in self.kb.items.get(
                     p[1], {}).get("tags", []) else 0))
             item, target = pairs[0]
-            note = f"身上【{item}】可合成【{target}】，与当前路线一致"
-            if want_tag and want_tag in self.kb.items.get(
-                    target, {}).get("tags", []):
+            tags_t = self.kb.items.get(target, {}).get("tags", [])
+            direction = ""
+            if want_tag and want_tag in tags_t:
                 side, dmg = (("魔抗", "法") if want_tag == "SpellBlock"
                              else ("护甲", "物"))
-                note += f"（敌方{dmg}伤成型，优先补{side}）"
-            return target, note
-        return None, "无待合成小件，攒钱即可"
+                direction = f"（敌方{dmg}伤成型，优先补{side}）"
+            # 防御件让位核心（真机 2026-09-29 小火龙案：长剑→饮魔刀置顶
+            # 压过未成型的核心三件套——"哪怕对面 AP 多也应先出核心"）。
+            # 坦克/战士防御件本就是主线不退让；核心已成型或 builds 缺失
+            # 恢复置顶。返回 (None, 提示语)，由调用方降级为附注行。
+            if (("SpellBlock" in tags_t or "Armor" in tags_t)
+                    and self._core_pending_for_carry(hero, current_path,
+                                                     owned)):
+                head = next((n for n in self.kb.core_build_line(
+                                 hero, current_path) if n not in owned), "")
+                where = f"先出主线【{head}】" if head else "先出主线"
+                return None, (f"核心优先：{where}；身上【{item}】可合成"
+                              f"【{target}】{direction}，核心成型后再补")
+            return target, (f"身上【{item}】可合成【{target}】，"
+                            f"与当前路线一致{direction}")
+        return None, ""
+
+    def _core_pending_for_carry(self, hero: str, path: str,
+                                owned: set) -> bool:
+        """输出型英雄核心线未成型（坦克/战士/英雄未知一律 False，不退让）。"""
+        prof = self.kb.champ_profile.get(hero, {})
+        if (not hero or prof.get("is_tank")
+                or "Fighter" in (prof.get("tags") or [])):
+            return False
+        line = self.kb.core_build_line(hero, path)
+        return any(n not in owned for n in line)
 
     # ── 3f. 攒钱决策（v4.5：这波回城攒大件 vs 先买小件） ──────────
 

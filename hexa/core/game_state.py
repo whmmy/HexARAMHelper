@@ -564,6 +564,7 @@ class GameSession:
                 self.my_items, self.current_path, game_map=self.game_map,
                 prefer=[c.name for c in seq], hero=self.my_hero or "",
                 threat=self.threat)
+            synth_hint = ""
             if target:
                 if seq and seq[0].name == target:
                     # 目标本就是主线第一件：合成提示并入理由，不重排不重复占位
@@ -574,10 +575,17 @@ class GameSession:
                     tprice = self.kb.items.get(target, {}).get("gold", 0)
                     seq = [Candidate(target, note, price=tprice)] + [
                         c for c in seq if c.name != target][:2]
+            elif note:
+                # 防御合成让位核心（component_advice 返回 None+提示语，
+                # 20260929 小火龙案）：不置顶覆盖主线，降级为附注行
+                synth_hint = note
             # 攒钱决策附注（v4.5）：这波回城攒大件直购 vs 先买小件；
             # 同时入军师滚动列表（攒钱提醒），key 按目标件名去重防刷
             save_note = self.rules.saving_advice(self.my_items, self._my_gold,
                                                  seq, game_map=self.game_map)
+            if synth_hint:
+                save_note = (f"{synth_hint}；{save_note}" if save_note
+                             else synth_hint)
             if save_note and seq:
                 self._push_coach(f"save:{seq[0].name}", save_note)
         # AI 模式：把军师提示（阵容缺口/顺逆风/攒钱/满装替换等，含本帧

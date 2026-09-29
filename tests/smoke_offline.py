@@ -293,6 +293,30 @@ def test_rules():
     check("数据序兜底同样排除已拥有",
           target_f and target_f != "心之钢", str(target_f))
 
+    # 防御件让位核心（真机 2026-09-29 小火龙案：长剑→饮魔刀置顶压过未成型
+    # 核心三件套——"哪怕对面 AP 多也应先出核心"）。坦克/战士与核心已成型
+    # 者不退让；让位时返回 (None, 提示语)，由 GameSession 降级为附注行。
+    # 威胁给"魔抗优先"使防御件排到合成候选首位（双抗均衡时进攻向小件
+    # 会先胜出，让位分支不触发——那是另一条正确路径）
+    tp_mr = ThreatProfile(ap_count=3, ad_count=1)
+    tgt_def, note_def = rules.component_advice(["长剑"], "ad",
+                                               hero="炽炎雏龙", threat=tp_mr)
+    check("输出英雄核心未成型：防御合成让位核心（饮魔刀）",
+          tgt_def is None and "核心优先" in note_def and "饮魔刀" in note_def,
+          (tgt_def, note_def))
+    tgt_off, _ = rules.component_advice(["考尔菲德的战锤"], "ad",
+                                        hero="炽炎雏龙", threat=tp_mr)
+    check("进攻向合成不退让（照常置顶）",
+          tgt_off is not None, str(tgt_off))
+    tgt_tk, _ = rules.component_advice(["巨人腰带"], "tank",
+                                       hero="曙光女神", threat=tp_mr)
+    check("坦克防御合成不退让（防御件本就是主线）",
+          tgt_tk is not None, str(tgt_tk))
+    line_sm = kb.core_build_line("炽炎雏龙", "ad")
+    tgt_done, _ = rules.component_advice(["长剑"] + line_sm, "ad",
+                                         hero="炽炎雏龙", threat=tp_mr)
+    check("核心已成型恢复防御置顶", tgt_done is not None, str(tgt_done))
+
     # 威胁画像：敌方英雄 + 装备扫描
     tp = rules.threat_profile(
         ["九尾妖狐", "皎月女神", "黑暗之女", "盲僧", "众星之子"],
@@ -345,6 +369,20 @@ def test_rules():
     check("泰坦出法伤装仍计法伤",
           tp_ap_naut.ap_count == 1 and tp_ap_naut.tank_count == 1,
           tp_ap_naut.summary())
+    # 坦克底板无实证不计伤害（泰坦案口径推广到名字先验，2026-09-29 小火龙
+    # 局祖安狂人案）：底板 ap+is_tank 早期无出装时双计 法伤+坦克，法伤×3
+    # 实为×2；≥2 票重的非坦出装才允许坦克计回伤害侧
+    tp_mundo = rules.threat_profile(["祖安狂人", "发条魔灵"])
+    check("坦克底板无出装实证只计坦克不计法伤",
+          tp_mundo.ap_count == 1 and tp_mundo.tank_count == 1,
+          tp_mundo.summary())
+    tp_mundo_ap = rules.threat_profile(
+        ["祖安狂人"],
+        [PlayerInfo(champion="祖安狂人",
+                    items=[{"name": "灭世者的死亡之帽", "count": 1}])])
+    check("坦克出法伤传说件仍计法伤",
+          tp_mundo_ap.ap_count == 1 and tp_mundo_ap.tank_count == 1,
+          tp_mundo_ap.summary())
 
     # 威胁加权重定向（真机 2026-09-29 剑圣案）：人数打平时按装备估值定向、
     # 死亡来源破局——被谁砍死谁才是真威胁
