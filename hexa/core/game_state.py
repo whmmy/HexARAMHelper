@@ -524,12 +524,15 @@ class GameSession:
         """
         threat = self.threat or self.rules.threat_profile(self.enemy)
         serial = self._new_serial()
-        # 规则底线预演：与引擎派发走同一规则实现，序列确定性一致
+        # 规则底线预演：与引擎派发走同一规则实现，序列确定性一致；
+        # pool 同源自引擎（AI 适配方案池，ctx 未就绪为 None 回 OP.GG）
         rule_engine = getattr(self.engine, "delegate", self.engine)
         seq = rule_engine.next_candidates(self.my_items, self._my_gold,
                                           self.current_path, threat, serial,
                                           reason=reason,
-                                          augments=list(self.augments))
+                                          augments=list(self.augments),
+                                          pool=self.engine.pool_for(
+                                              self.current_path))
         full_build = self._is_full_build()
         save_note = ""
         if full_build:
@@ -694,58 +697,73 @@ class GameSession:
     # ── AI 精修结果（引擎后台线程回调） ────────────────────────────
 
     def _on_engine_result(self, kind, payload, serial):
+        ctx_refresh = False
         with self._lock:
             if kind == KIND_CTX:
                 self._log("engine_ctx", str(payload.get("source")))
-                return
-            if kind == KIND_RANKS:
+                # 适配方案就绪 → 刷新下一件建议，规则底线从 OP.GG 兜底切到
+                # 方案池。仅下一件模式刷新：出门装态（opening 建议在展示，
+                # 不消费方案池）与满装替换态（replacement_candidates 不吃
+                # pool）刷新只会打乱流程/白烧预算。必须锁外执行——
+                # _suggest_next_items 内部 _new_serial 要拿同一把锁
+                # （threading.Lock 不可重入，锁内直调死锁）。
+                if self.opening_state == "offered" and self.my_items:
+                    # 出门装期间已购装：与 periodic 同款翻转
+                    self.opening_state = "bypassed"
+                    self._log("opening_bypassed", "已购装备，转入下一件模式")
+                in_next_mode = ((self.first_augment or self.my_items)
+                                and self.opening_state != "offered")
+                ctx_refresh = bool(in_next_mode
+                                   and not self._is_full_build())
+            elif kind == KIND_RANKS:
                 if serial == self._card_serial and payload:
                     self.card_ranks = payload
                     self._log("card_ranks_ai", str(len(payload)))
-                return
-            # opening / next_items：serial 匹配当前建议且类型一致才覆盖
-            cur = self.suggestion
-            if serial != self._sug_serial or cur is None:
-                return
-            if kind == KIND_OPENING and cur.kind == "opening":
-                if payload:
-                    cur.candidates = payload
-                    cur.source = "ai"
-                    cur.ts = time.time()
-                    self._log("opening_ai", f"{len(payload)} 项")
-            elif kind == KIND_NEXT and cur.kind == "next_items":
-                if payload:
-                    cur.candidates = payload
-                    cur.source = "ai"
-                    cur.ts = time.time()
-                    # AI 重排后需按当前金币重算可买性（保序累计）
-                    self._apply_afford(cur.candidates)
-                    # System1 可选 coach 字段 → 覆盖最新一条军师文案
-                    self._apply_ai_coach()
-                    self._log("next_items_ai", f"{len(payload)} 项")
-            elif kind == KIND_NEXT and cur.kind == "swap_items":
-                # 替换模式 AI 精修：payload 是 Candidate(买件名, AI理由)，
-                # 映射回当前替换对（按 buy 名，集合内），重排 + 换理由；
-                # 差价/净差等事实字段保持规则版（数据出事实，模型出判断）
-                if payload:
-                    by_buy = {c.buy: c for c in cur.candidates
-                              if isinstance(c, SwapCandidate)}
-                    merged, seen = [], set()
-                    for pc in payload:
-                        m = by_buy.get(pc.name)
-                        if m is not None and m.buy not in seen:
-                            if pc.reason:
-                                m.reason = pc.reason
-                            merged.append(m)
-                            seen.add(m.buy)
-                    merged += [m for b, m in by_buy.items() if b not in seen]
-                    if merged:
-                        cur.candidates = merged[:3]
+            elif serial == self._sug_serial and self.suggestion is not None:
+                # opening / next_items：serial 匹配当前建议且类型一致才覆盖
+                cur = self.suggestion
+                if kind == KIND_OPENING and cur.kind == "opening":
+                    if payload:
+                        cur.candidates = payload
                         cur.source = "ai"
                         cur.ts = time.time()
+                        self._log("opening_ai", f"{len(payload)} 项")
+                elif kind == KIND_NEXT and cur.kind == "next_items":
+                    if payload:
+                        cur.candidates = payload
+                        cur.source = "ai"
+                        cur.ts = time.time()
+                        # AI 重排后需按当前金币重算可买性（保序累计）
+                        self._apply_afford(cur.candidates)
                         # System1 可选 coach 字段 → 覆盖最新一条军师文案
                         self._apply_ai_coach()
-                        self._log("swap_ai", f"{len(merged)} 对")
+                        self._log("next_items_ai", f"{len(payload)} 项")
+                elif kind == KIND_NEXT and cur.kind == "swap_items":
+                    # 替换模式 AI 精修：payload 是 Candidate(买件名, AI理由)，
+                    # 映射回当前替换对（按 buy 名，集合内），重排 + 换理由；
+                    # 差价/净差等事实字段保持规则版（数据出事实，模型出判断）
+                    if payload:
+                        by_buy = {c.buy: c for c in cur.candidates
+                                  if isinstance(c, SwapCandidate)}
+                        merged, seen = [], set()
+                        for pc in payload:
+                            m = by_buy.get(pc.name)
+                            if m is not None and m.buy not in seen:
+                                if pc.reason:
+                                    m.reason = pc.reason
+                                merged.append(m)
+                                seen.add(m.buy)
+                        merged += [m for b, m in by_buy.items()
+                                   if b not in seen]
+                        if merged:
+                            cur.candidates = merged[:3]
+                            cur.source = "ai"
+                            cur.ts = time.time()
+                            # System1 可选 coach 字段 → 覆盖最新一条军师文案
+                            self._apply_ai_coach()
+                            self._log("swap_ai", f"{len(merged)} 对")
+        if ctx_refresh:
+            self._suggest_next_items(reason="event")
 
     # ── 触发器评估（死亡 / 敌方关键装备 / KDA 起飞） ───────────────
 

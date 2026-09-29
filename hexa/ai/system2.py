@@ -3,29 +3,32 @@
 输入：英雄 + 双方阵容（含敌方伤害构成）+ OP.GG builds + 海克斯先验 top20
   （逐条带 KB 语义标签：path_bias/tags/升级型——新模式海克斯基座模型多无
   先验，喂事实把"评亲和"从考幻觉变成按事实+阵容做语境排序）
-输出：ChampionContext（海克斯亲和/出门装方案/内部多路线/海克斯→出装联动）
+输出：ChampionContext（海克斯亲和/出门装方案/多流派出装方案/海克斯→出装联动）
 质量链：JSON 解析 → schema 校验 → 装备/海克斯名过 B 层校验（防幻觉）
       → 失败重试 1 次（附上次失败原因）→ 再失败降级规则版 Context（离线兜底）。
 """
 import threading
 
 from hexa.ai.client import LLMError, parse_json
+from hexa.core.rules_engine import _is_fullstat_item
 
 SYSTEM_PROMPT = """你是英雄联盟「海克斯大乱斗（ARAM Mayhem）」的版本军师。\
 你的任务：为指定英雄预生成一局的知识上下文（ChampionContext），供局内快速裁决使用。
 
 铁律：
-1. 输出中出现的装备名/海克斯名必须严格使用我提供的《候选装备名单》和《海克斯候选名单》中的原名，禁止编造、改写、缩写。
-2. 版本答案以《OP.GG 数据》为准，你可以基于英雄机制、敌方阵容构成和海克斯语义标签做适配性微调并写明理由。
-3. "升级型"海克斯的决策语义是"升级哪件已购装备"，写亲和 note 时据此与普通海克斯区分。
-4. 只输出 JSON，不输出任何其他文字。
+1. 海克斯名必须严格使用《海克斯候选名单》中的原名；装备名必须是《OP.GG 数据》中的原名或英雄联盟国服真实装备名（输出会逐名校验，无效名直接丢弃），禁止编造、改写、缩写。
+2. 出装方案以《OP.GG 数据》为核心锚点：每个方案的核心三件取自 OP.GG 高频组合；在此基础上结合双方阵容构成做适配性权衡并写进 note——例如敌方坦克多/堆护甲时考虑破甲或百分比伤害件、敌方堆魔抗时考虑法穿件、敌方治疗体系强时考虑重伤件、敌方爆发/刺客威胁高时考虑保命件。针对方向由你自行判断，方案里不需要的就不加。
+3. 方案是"流派"而非伤害类型：同一伤害类型可以有多个流派方案（如 AP 的灼烧消耗流/金身容错流/爆发流），也要覆盖其他伤害类型的方案；每个方案是一套完整出装序列，供局内按战局切换。
+4. "升级型"海克斯的决策语义是"升级哪件已购装备"，写亲和 note 时据此与普通海克斯区分。
+5. 只输出 JSON，不输出任何其他文字。
 
 输出 JSON schema（字段缺一不可）：
 {
  "augment_affinity": [{"name":"海克斯名","bias":"ad|ap|tank|none","note":"<=18字"}],   // 12~20 个，按该英雄适配度降序
  "opening_items":    [{"combo":["装备名"],"when":"<=10字适用场景"}],                    // 恰好 3 组
- "build_paths":      {"ap":{"items":["装备名"],"skill_order":"主X副Y","note":"<=20字"},  // 2~3 条路线
-                      "ad":{...}, "tank":{...}},
+ "builds":           [{"name":"<=8字流派名","path":"ap|ad|tank","items":["装备名"],      // 2~4 个方案
+                       "note":"<=24字本局适配理由"}],
+ "skill_order":      "主X副Y",
  "augment_item_links":[{"augment":"海克斯名","shift":"出装影响<=20字","reason":"<=24字"}] // 0~5 条
 }"""
 
@@ -78,26 +81,22 @@ def _fmt_teams(ally: list, enemy: list) -> str:
 
 
 def _fmt_enemy_comp(kb, enemy: list) -> str:
-    """敌方伤害构成一行（champ_damage_profile 现成画像）。
+    """敌方构成一行（champ_damage_profile 现成画像，数据直出）。
 
-    tank 路线的抗性方向（堆甲 vs 堆魔抗）在加载期就要定，只给英雄名
-    等于让模型自己背每个英雄的伤害类型。坦克按 is_tank 标志计数
-    （damage 字段只有 ad/ap，如牛头酋长 damage=ap + is_tank=True）。
+    每敌喂 damage + Role 标签原文（如 Tank/Support/Mage），治疗系、
+    坦克、刺客威胁的识别与针对方向全部交给模型判断——代码侧不写
+    任何语义表（泰坦案口径推广：数据出事实，模型出判断）。
     """
-    counts = {}
-    tanks = 0
+    bits = []
     for name in enemy or []:
         info = kb.champ_profile.get(name, {})
         dmg = info.get("damage")
-        if dmg:
-            counts[dmg] = counts.get(dmg, 0) + 1
-        if info.get("is_tank"):
-            tanks += 1
-    label = {"ap": "法伤", "ad": "物伤"}
-    bits = [f"{label[k]}×{counts[k]}" for k in ("ap", "ad") if counts.get(k)]
-    if tanks:
-        bits.append(f"坦克×{tanks}")
-    return "敌方构成：" + "、".join(bits) if bits else ""
+        tags = info.get("tags") or []
+        if not dmg and not tags:
+            continue
+        role = "/".join(tags) if tags else "?"
+        bits.append(f"{name}({dmg or '?'},{role})")
+    return "敌方构成：" + "；".join(bits) if bits else ""
 
 
 class ChampionContext:
@@ -110,7 +109,8 @@ class ChampionContext:
         self.meta = meta or {}
         self.augment_affinity = data.get("augment_affinity", [])
         self.opening_items = data.get("opening_items", [])
-        self.build_paths = data.get("build_paths", {})
+        self.builds = data.get("builds", [])          # 出装方案列表（流派制）
+        self.skill_order = data.get("skill_order", "")
         self.augment_item_links = data.get("augment_item_links", [])
 
     # ── 查询接口（System1 / GameSession 消费） ────────────────────
@@ -147,13 +147,33 @@ class ChampionContext:
                 out.append(grp)
         return out[:3]
 
+    def pool_for(self, path: str) -> list:
+        """path 匹配方案 items 并集（第一匹配方案序优先，其余方案独有件
+        按序追加）——规则底线 build_sequence 的主池数据源。无匹配 → []。"""
+        path = (path or "").lower()
+        out, seen = [], set()
+        for b in self.builds:
+            if (b.get("path") or "").lower() != path:
+                continue
+            for n in (b.get("items") or []):
+                if n not in seen:
+                    seen.add(n)
+                    out.append(n)
+        return out
+
+    def all_pools(self) -> list:
+        """全方案 items 并集（跨方案权衡白名单的数据源）"""
+        out, seen = [], set()
+        for b in self.builds:
+            for n in (b.get("items") or []):
+                if n not in seen:
+                    seen.add(n)
+                    out.append(n)
+        return out
+
     def skill_order_text(self) -> str:
-        """加点一行（build_paths 中第一条有效路线）"""
-        for path in self.build_paths.values():
-            so = (path or {}).get("skill_order") or ""
-            if so:
-                return so
-        return ""
+        """加点一行（顶层单值）"""
+        return self.skill_order or ""
 
 
 # ── 校验（防幻觉：名字必须过 B 层） ──────────────────────────────────
@@ -183,16 +203,31 @@ def validate_and_clean(data: dict, kb, hero: str) -> dict:
     if len(openings) < 2:
         raise LLMError(f"出门装有效组不足（{len(openings)}/2）")
 
-    paths = {}
-    for key in ("ap", "ad", "tank"):
-        p = (data.get("build_paths") or {}).get(key) or {}
-        items = [n for n in (p.get("items") or []) if kb.valid_item(n)]
-        if items:
-            paths[key] = {"items": items[:6],
-                          "skill_order": str(p.get("skill_order") or "")[:16],
-                          "note": str(p.get("note") or "")[:24]}
-    if not paths:
-        raise LLMError("build_paths 无有效路线")
+    builds = []
+    seen_keys = set()
+    for b in (data.get("builds") or [])[:4]:
+        if not isinstance(b, dict):
+            continue
+        path = str(b.get("path") or "").lower()
+        if path not in ("ap", "ad", "tank"):
+            continue
+        items = []
+        for n in (b.get("items") or []):
+            if (isinstance(n, str) and kb.valid_item(n) and n not in items
+                    and not _is_fullstat_item(kb, n)):
+                items.append(n)
+        if len(items) < 3:
+            continue  # 流派方案至少要成线（核心+后续），碎件组不收
+        key = (path, tuple(items))
+        if key in seen_keys:
+            continue
+        seen_keys.add(key)
+        builds.append({"name": str(b.get("name") or "")[:8] or "流派",
+                       "path": path, "items": items[:8],
+                       "note": str(b.get("note") or "")[:24]})
+    if not builds:
+        raise LLMError("builds 无有效方案")
+    skill_order = str(data.get("skill_order") or "")[:16]
 
     links = []
     for l in (data.get("augment_item_links") or [])[:6]:
@@ -205,7 +240,8 @@ def validate_and_clean(data: dict, kb, hero: str) -> dict:
     # component_rules 已从 schema 移除：全项目零消费（小件持有决策由规则层
     # component_advice/saving_advice 承担），每局白烧 ~150 输出 token。
     return {"augment_affinity": affinity, "opening_items": openings,
-            "build_paths": paths, "augment_item_links": links}
+            "builds": builds, "skill_order": skill_order,
+            "augment_item_links": links}
 
 
 # ── 规则版 Context（离线兜底，全部确定性） ───────────────────────────
@@ -222,18 +258,34 @@ def rule_context(kb, hero: str, rules=None) -> dict:
                     {"combo": ["多兰之戒"], "when": "AP"},
                     {"combo": ["红水晶"], "when": "防守"}]
     profile = kb.champ_profile.get(hero, {})
-    # 路线键须与 infer_current_path 的取值域（ap/ad/tank）对齐：坦克英雄
-    # （如牛头 damage=ap + is_tank=True）的主线是坦装，OP.GG 核心件投票为
-    # tank——键若仍按 damage 落 ap/ad，降级局 current_path=tank 时
-    # _route_line 查不到，整条路线上下文静默丢失。完整版
-    # validate_and_clean 的键集即 ("ap", "ad", "tank")，无其他遗漏。
-    dmg = "tank" if profile.get("is_tank") else (profile.get("damage") or "ad")
-    main_items = kb.core_item_pool(hero)[:6]
-    paths = {}
-    if main_items:
-        paths[dmg] = {"items": main_items,
-                      "skill_order": kb.skill_advice(hero)["priority"],
-                      "note": "OP.GG 主线"}
+    # 方案 path 须与 infer_current_path 的取值域（ap/ad/tank）对齐：
+    # OP.GG core_builds 每组组合按组内件 bias 投票定 path（坦克英雄
+    # damage=ap 的组合组内坦件占多 → 投 tank，降级局 current_path=tank
+    # 时 pool_for(tank) 仍能查到）；同票/零票回落英雄画像。
+    fallback = ("tank" if profile.get("is_tank")
+                else (profile.get("damage") or "ad"))
+    builds = []
+    b = kb.build_for(hero)
+    for i, combo in enumerate((b.get("core_builds") if b else []) or []):
+        items = [n for n in combo if kb.valid_item(n)]
+        if len(items) < 3:
+            continue
+        votes = {"ap": 0, "ad": 0, "tank": 0}
+        for n in items:
+            bias = kb.item_path_bias(n)
+            if bias:
+                votes[bias] += 1
+        path = (max(votes, key=votes.get)
+                if any(votes.values()) else fallback)
+        builds.append({"name": f"OP.GG高频{i + 1}", "path": path,
+                       "items": items[:8], "note": "OP.GG 高频组合"})
+        if len(builds) >= 3:
+            break
+    if not builds:
+        main_items = kb.core_item_pool(hero)[:8]
+        if main_items:
+            builds.append({"name": "主线", "path": fallback,
+                           "items": main_items, "note": "OP.GG 主线"})
     # 联动不硬编码海克斯名（曾写死"心之刚"，不在 kb.augment_names 229 名单
     # 内——AI 路径有 validate_and_clean 过滤、规则降级路径没有，恰在最需要
     # 兜底时产出无效名）。改取知识层 augments.json 的 opening_shift 事实，
@@ -252,7 +304,8 @@ def rule_context(kb, hero: str, rules=None) -> dict:
         if len(links) >= 5:
             break
     return {"augment_affinity": affinity, "opening_items": openings,
-            "build_paths": paths, "augment_item_links": links}
+            "builds": builds, "skill_order": kb.skill_advice(hero)["priority"],
+            "augment_item_links": links}
 
 
 # ── 生成入口 ─────────────────────────────────────────────────────────
@@ -287,7 +340,7 @@ def generate(kb, rules, client, hero: str, ally: list, enemy: list,
             if attempt and last_err is not None:
                 user += (f"\n\n注意：上一次输出未通过校验（{last_err}）。"
                          "请严格按 schema 输出，名字必须逐字取自名单。")
-            text, meta = client.chat(SYSTEM_PROMPT, user, max_tokens=1600)
+            text, meta = client.chat(SYSTEM_PROMPT, user, max_tokens=2000)
             data = validate_and_clean(parse_json(text), kb, hero)
             return ChampionContext(data, hero, source="ai", meta=meta)
         except (LLMError, AttributeError, TypeError) as e:

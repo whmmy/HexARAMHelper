@@ -15,7 +15,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
-from hexa.core.rules_engine import Candidate
+from hexa.core.rules_engine import Candidate, _is_fullstat_item
 
 KIND_CTX = "ctx"                    # System2 上下文就绪（UI 刷新提示）
 KIND_OPENING = "opening"
@@ -57,6 +57,14 @@ class DecisionEngine(ABC):
     def skill_order(self, hero: str) -> str:
         """静态加点顺序一行（overlay 常驻）"""
 
+    def pool_for(self, current_path: str):
+        """当前路线的 AI 适配出装池（None=无，规则层回 OP.GG 池）。
+
+        base 类默认 None：规则引擎无 System2 上下文。AIDecisionEngine 覆盖。
+        GameSession 规则底线预演与本类内部派发各调一次，同源同参保一致。
+        """
+        return None
+
     @abstractmethod
     def stats(self) -> dict:
         """费用仪表/状态（ui settings 面板消费）"""
@@ -81,10 +89,10 @@ class RuleDecisionEngine(DecisionEngine):
                                              threat, game_map=self.game_map)
 
     def next_candidates(self, my_items, gold, current_path, threat,
-                        serial, reason="event", augments=None):
+                        serial, reason="event", augments=None, pool=None):
         return self.rules.build_sequence(my_items, current_path, threat,
                                          hero=self._hero,
-                                         game_map=self.game_map)
+                                         game_map=self.game_map, pool=pool)
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
         return self.rules.rank_augments(hero, card_names, taken)
@@ -174,15 +182,51 @@ class AIDecisionEngine(DecisionEngine):
     # ── 生命周期 ──────────────────────────────────────────────────
 
     def _enemy_detail(self) -> list:
-        """敌方明细行 ["名(伤害画像)"]：start_game 名单 + champ_damage_profile。
+        """敌方明细行 ["名(伤害,Role)"]：start_game 名单 + champ_damage_profile。
 
         _fmt_snapshot 的 enemy 管道此前恒为空（死参数），威胁只有计数摘要；
         补上名字+画像后 System1 才能做"全 AD 局早护甲"级别的语境判断。
+        Role 标签（Tank/Support/Mage…）数据直出，治疗系/坦克识别交给模型。
         """
         out = []
         for name in self._enemy[:5]:
-            dmg = self.delegate.kb.champ_profile.get(name, {}).get("damage") or "?"
-            out.append(f"{name}({dmg})")
+            prof = self.delegate.kb.champ_profile.get(name, {})
+            dmg = prof.get("damage") or "?"
+            tags = prof.get("tags") or []
+            role = "/".join(tags[:2]) if tags else ""
+            out.append(f"{name}({dmg}" + (f",{role})" if role else ")"))
+        return out
+
+    # ── AI 适配出装池（System2 产物 → 规则底线/System1 白名单） ────
+
+    def pool_for(self, current_path: str):
+        """ctx 就绪时返回当前路线适配方案池（pool_for 并集）；否则 None。
+
+        供规则底线 build_sequence 作 pool 数据源（GameSession 预演与本类
+        派发各调一次，同源同参）；ctx 未就绪/路线无匹配方案 → None 回落
+        OP.GG 池。
+        """
+        ctx = self.cache.get()
+        if ctx is None or self.cache.pending:
+            return None
+        return ctx.pool_for(current_path) or None
+
+    def _extra_allowed(self) -> list:
+        """System1 跨方案权衡白名单：全方案池并集（过滤地图不可买/杂项）。
+
+        模型可把其他方案里的件（如另一流派的保命件/破甲件）提到 picks——
+        名字仍全部来自 System2 方案（过 kb.valid_item），防幻觉边界不破。
+        """
+        ctx = self.cache.get()
+        if ctx is None or self.cache.pending:
+            return []
+        kb = self.delegate.kb
+        gm = self.game_map
+        out = []
+        for n in ctx.all_pools():
+            if (n not in out and kb.item_available(n, gm)
+                    and not _is_fullstat_item(kb, n)):
+                out.append(n)
         return out
 
     def start_game(self, hero, ally, enemy, game_map=""):
@@ -234,7 +278,7 @@ class AIDecisionEngine(DecisionEngine):
                 self.cache.set(ctx)
                 src = "AI 上下文已生成" if ctx.source == "ai" else "AI 失败，规则版上下文"
                 print(f"[AI] System2 完成（{ctx.source}）：亲和{len(ctx.augment_affinity)}"
-                      f" 出门{len(ctx.opening_items)} 路线{len(ctx.build_paths)} — {src}")
+                      f" 出门{len(ctx.opening_items)} 方案{len(ctx.builds)} — {src}")
                 if self.on_result:
                     self.on_result(KIND_CTX, {"source": ctx.source}, 0)
             finally:
@@ -281,8 +325,10 @@ class AIDecisionEngine(DecisionEngine):
 
     def next_candidates(self, my_items, gold, current_path, threat,
                         serial, reason="event", augments=None):
+        pool = self.pool_for(current_path)
         base = self.delegate.next_candidates(my_items, gold, current_path,
-                                             threat, serial, reason)
+                                             threat, serial, reason,
+                                             pool=pool)
         if not (self._ctx_ready() and self._interval_ok(KIND_NEXT, reason)
                 and self._try_reserve()):
             return base
@@ -295,7 +341,8 @@ class AIDecisionEngine(DecisionEngine):
         def fn():
             picks = self.s1.suggest_next(
                 self.client_s1, ctx, my_items, gold, current_path, summary,
-                taken, base, enemy=self._enemy_detail())
+                taken, base, enemy=self._enemy_detail(),
+                extra_allowed=self._extra_allowed())
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
                     for p in picks
@@ -376,9 +423,10 @@ class JevEngine(DecisionEngine):
         return self.delegate.opening_candidates(first_augment, threat, serial)
 
     def next_candidates(self, my_items, gold, current_path, threat,
-                        serial, reason="event", augments=None):
+                        serial, reason="event", augments=None, pool=None):
         return self.delegate.next_candidates(my_items, gold, current_path,
-                                             threat, serial, reason, augments)
+                                             threat, serial, reason, augments,
+                                             pool=pool)
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
         return self.delegate.rank_cards(hero, card_names, taken, my_items,

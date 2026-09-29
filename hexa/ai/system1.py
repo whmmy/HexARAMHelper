@@ -18,7 +18,8 @@ from hexa.ai.client import LLMError, parse_json
 from hexa.core.rules_engine import SwapCandidate
 
 SYSTEM_PROMPT = """你是英雄联盟海克斯大乱斗的局内快讯参谋。给你当前对局快照、\
-预生成的英雄上下文（ChampionContext）和层 0 规则引擎已筛出的候选清单。\
+预生成的英雄上下文（ChampionContext，含 System2 按双方阵容适配的多流派出装方案）\
+和层 0 规则引擎已筛出的候选清单。\
 你的任务：结合当下局面，在候选内排序/微调档位，并写精炼理由。
 
 铁律：
@@ -80,21 +81,33 @@ def _clean_coach(text) -> str:
     return str(text or "").strip()[:30]
 
 
-def _route_line(ctx, current_path: str) -> str:
-    """ChampionContext 当前路线 → 一行规划上下文。
+def _builds_line(ctx, current_path: str) -> str:
+    """ChampionContext 出装方案 → 语境段（全部方案，当前路线方案置前）。
 
-    build_paths 此前无 System1 下游（ctx 在 suggest_next/suggest_swap 里
-    是死参数），路线只剩三字标签；把该路线的完整顺序和 AI 适配 note 喂
-    进来，模型才知道"后面还有什么、为什么这么排"。
+    方案 = System2 基于双方阵容预生成的完整流派出装（含情境件，是否放
+    破甲/重伤等由预生成侧判断）。模型在此语境上做方案权衡：优先当前
+    方案主线，敌情/海克斯指向其他方案时可跨方案取件（allowed 已含
+    全方案并集，见 suggest_next 的 extra_allowed）。
     """
-    if not ctx or not current_path:
+    builds = getattr(ctx, "builds", None) if ctx else None
+    if not builds:
         return ""
-    p = (ctx.build_paths or {}).get(current_path.lower()) or {}
-    items = "→".join(p.get("items") or [])
-    if not items:
+    cur = (current_path or "").lower()
+    ordered = sorted(builds, key=lambda b: 0 if (b.get("path") or "").lower() == cur
+                     else 1)  # stable：同路线方案保持预生成序
+    lines = []
+    for b in ordered:
+        items = "→".join(b.get("items") or [])
+        if not items:
+            continue
+        note = b.get("note") or ""
+        lines.append(f"{b.get('name') or '方案'}"
+                     f"（{(b.get('path') or '?').upper()}）：{items}"
+                     + (f"——{note}" if note else ""))
+    if not lines:
         return ""
-    note = p.get("note") or ""
-    return f"本局路线规划（预生成）：{items}" + (f"（{note}）" if note else "")
+    return ("《本局适配出装方案（优先当前方案，敌情/已选海克斯指向"
+            "其他方案时可跨方案取件）》\n" + "\n".join(lines))
 
 
 def _cand_line(c) -> str:
@@ -187,13 +200,16 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
 
 def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
                  threat_summary: str, augments: list,
-                 rule_candidates: list, coach_lines=None, enemy=None) -> list:
+                 rule_candidates: list, coach_lines=None, enemy=None,
+                 extra_allowed: list = None) -> list:
     """下一件三选重排+写理由。返回 [{"name","reason"}]；失败/有效<2 → 规则版。
 
     rule_candidates: 层 0 Candidate 列表（已带规则理由，作降级文案）。
     满六神装时层 0 传 SwapCandidate 替换对 → 自动切 suggest_swap。
     coach_lines: 军师上下文（None=读模块态；GameSession 已写入）。
-    enemy: 敌方明细行 ["名(伤害)"]。ctx：当前路线规划进 prompt（_route_line）。
+    enemy: 敌方明细行 ["名(伤害,Role)"]。ctx：出装方案段进 prompt。
+    extra_allowed: 跨方案权衡白名单（全方案池并集，engine 已过校验/
+    地图可买性/杂项过滤）——模型可从其他方案取件，防幻觉边界不变。
     模型可选输出 coach 字段（≤30字）→ 模块态 last_coach，由
     GameSession._apply_ai_coach 消费覆盖规则军师文案。
     """
@@ -204,13 +220,14 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
                             threat_summary, augments, rule_candidates,
                             coach_lines=coach_lines, enemy=enemy)
     allowed = {c.name for c in rule_candidates}
+    allowed |= {n for n in (extra_allowed or []) if isinstance(n, str)}
     parts = [
         _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
                       enemy=enemy or [], coach=coach_lines),
         "《候选清单（只能从中选）》\n" + "\n".join(
             _cand_line(c) for c in rule_candidates),
     ]
-    route = _route_line(ctx, current_path)
+    route = _builds_line(ctx, current_path)
     if route:
         parts.append(route)
     parts.append(PICKS_FORMAT)
@@ -255,7 +272,7 @@ def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
         f"- 卖[{c.sell}] → 买[{c.buy}]（卖回{c.sell_price}G / 买价{c.price}G）：{c.reason}"
         for c in swap_candidates
     ]
-    route = _route_line(ctx, current_path)
+    route = _builds_line(ctx, current_path)
     if route:
         parts.append(route)
     parts += [

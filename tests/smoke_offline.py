@@ -1081,8 +1081,9 @@ def test_ai_engine():
         "opening_items": [{"combo": pool[:1] or ["长剑"], "when": "标准"},
                           {"combo": ["多兰之刃"], "when": "进攻"},
                           {"combo": ["红水晶"], "when": "防守"}],
-        "build_paths": {"ad": {"items": pool[:4], "skill_order": "主Q副E",
-                               "note": "主线"}},
+        "builds": [{"name": "爆杀流", "path": "ad", "items": pool[:4],
+                    "note": "主线"}],
+        "skill_order": "主Q副E",
         "component_rules": [{"item": "考尔菲德的战锤",
                              "upgrade_to": pool[0] if pool else "星蚀",
                              "hold_when": "钱不够先留"}],
@@ -1100,12 +1101,18 @@ def test_ai_engine():
     ctx = eng.cache.get()
     check("System2 上下文生成", ctx is not None and ctx.source == "ai")
     check("亲和表有效", ctx and len(ctx.augment_affinity) == 10)
-    check("加点来自 ctx", eng.skill_order(hero) == "主Q副E")
+    check("加点来自 ctx（顶层单值）", eng.skill_order(hero) == "主Q副E")
     check("规则模式无 ctx 时加点", RuleDecisionEngine(kb, rules)
           .skill_order(hero) == "主Q副E")
+    check("方案池查询（pool_for 首方案序）",
+          ctx and ctx.pool_for("ad") == pool[:4],
+          str(ctx.pool_for("ad") if ctx else None))
     # ---- Prompt 强化回归：敌方明细管道 / 幽灵字段清除 / 语义标签 ----
-    check("engine 敌方明细（名+伤害画像）",
-          eng._enemy_detail() == ["黑暗之女(ap)"], str(eng._enemy_detail()))
+    check("engine 敌方明细（名+伤害+Role 画像数据直出）",
+          eng._enemy_detail() == ["黑暗之女(ap,Mage/Support)"],
+          str(eng._enemy_detail()))
+    check("engine 适配池查询（ctx 就绪；路线无匹配→None 回落）",
+          eng.pool_for("ad") == pool[:4] and eng.pool_for("tank") is None)
     from hexa.ai import system2 as _s2
     check("System2 无幽灵字段指令（is_upgrade/置信度指向不存在的 schema 字段）",
           "is_upgrade 标记" not in _s2.SYSTEM_PROMPT
@@ -1114,14 +1121,37 @@ def test_ai_engine():
     check("海克斯名单带 KB 语义标签（bias 等，防零先验考幻觉）",
           "bias=" in aug_line, aug_line[:80])
     comp_line = _s2._fmt_enemy_comp(kb, ["九尾妖狐", "暗裔剑魔", "牛头酋长"])
-    # 牛头酋长 damage=ap 且 is_tank=True → 法伤×2；坦克按 is_tank 另计
-    check("敌方构成行（含 is_tank 计数）",
-          "法伤×2" in comp_line and "物伤×1" in comp_line
-          and "坦克×1" in comp_line, comp_line)
+    # 画像原样直出（damage+Role），治疗/坦克识别交给模型判断
+    check("敌方构成行（画像数据直出，零语义加工）",
+          "九尾妖狐(ap,Mage/Assassin)" in comp_line
+          and "暗裔剑魔(ad,Fighter)" in comp_line
+          and "牛头酋长(ap,Tank/Support)" in comp_line, comp_line)
     cleaned = _s2.validate_and_clean(_json.loads(_json.dumps(ctx_json)),
                                      kb, hero)
     check("component_rules 已移除（零消费输出不再生成；旧输入键被忽略）",
           "component_rules" not in cleaned)
+    # ---- builds 方案校验（防幻觉/碎件/坏 path/杂项守卫/去重） ----
+    bad_builds = _s2.validate_and_clean({
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "t"}
+                             for n in top],
+        "opening_items": [{"combo": ["长剑"], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "builds": [
+            {"name": "杂项流", "path": "ad",
+             "items": ["属性加成", "长剑", "焚天", "星蚀"], "note": "x"},
+            {"name": "碎件流", "path": "ad", "items": ["长剑"], "note": "x"},
+            {"name": "坏path流", "path": "apx",
+             "items": ["长剑", "焚天", "星蚀"], "note": "x"},
+            {"name": "幻觉流", "path": "ad",
+             "items": ["不存在的装备", "长剑", "焚天"], "note": "x"},
+        ],
+        "skill_order": "主Q副E",
+        "augment_item_links": []}, kb, hero)
+    got_b = bad_builds["builds"]
+    check("builds 校验：杂项守卫/碎件剔除/坏path剔除/幻觉名过滤",
+          len(got_b) == 1 and got_b[0]["name"] == "杂项流"
+          and got_b[0]["items"] == ["长剑", "焚天", "星蚀"], str(got_b))
     # ---- System1 出门装精修（异步回调） ----
     threat = ThreatProfile(ap_count=2)
     base = eng.opening_candidates(top[0], threat, serial=1)
@@ -1237,6 +1267,137 @@ def test_ai_engine():
     check("System2 重试上下文附上次失败原因",
           len(c2rt.calls) == 2 and "上一次输出未通过校验" in c2rt.calls[1],
           f"calls={len(c2rt.calls)}")
+
+
+def test_ai_build_pool():
+    print("\n[6c] AI 适配出装方案池（方案制 schema → 规则底线/System1 权衡）")
+    import json as _json
+    hero = "暗裔剑魔"
+    tp = ThreatProfile()
+
+    # ---- 规则层 pool 参数：池序即主线；模型产出仍过杂项/幻觉/异路线过滤 ----
+    pool = ["不存在的装备", "属性加成", "焚天", "星蚀", "死亡之舞", "荆棘之甲"]
+    seq = rules.build_sequence([], "ad", tp, hero=hero, pool=pool)
+    names = [c.name for c in seq]
+    check("方案池主线过滤幻觉/杂项",
+          "不存在的装备" not in names and "属性加成" not in names
+          and seq and seq[0].name == "焚天"
+          and "核心装" in seq[0].reason, str(names))
+    cands = rules.next_item_candidates([], "ad", tp, hero=hero, limit=5,
+                                       pool=pool)
+    check("方案池下一件带适配序文案（区别于 OP.GG 高频）",
+          cands and cands[0].name == "焚天" and "适配方案" in cands[0].reason,
+          str([(c.name, c.reason) for c in cands[:2]]))
+    seq_none = rules.build_sequence([], "ad", tp, hero=hero)
+    check("pool=None 回 OP.GG 现状（规则兜底不变）",
+          seq_none and seq_none[0].name == "锯齿短匕",
+          str([c.name for c in seq_none]))
+
+    # ---- 降级 rule_context 同步方案制（OP.GG 组合 → 方案） ----
+    from hexa.ai import system2 as _s2x
+    rcx = _s2x.ChampionContext(_s2x.rule_context(kb, hero), hero,
+                               source="rule")
+    check("降级 Context 方案制（path 投票 + pool_for 可查）",
+          rcx.builds and rcx.builds[0]["path"] == "ad"
+          and rcx.pool_for("ad") and rcx.skill_order_text() == "主Q副E",
+          str(rcx.builds)[:120])
+    from hexa.ai import system1
+    from hexa.core.rules_engine import Candidate as _Cand
+    line = system1._builds_line(rcx, "ad")
+    check("降级上下文方案段照常渲染",
+          "本局适配出装方案" in line and "（AD）" in line, line[:100])
+
+    # ---- engine 接线：ctx 就绪后 base 跟随 current_path 切方案池 ----
+    two_builds = {
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "t"}
+                             for n in kb.top_augments(hero, 8)],
+        "opening_items": [{"combo": ["长剑"], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "builds": [
+            {"name": "爆杀流", "path": "ad",
+             "items": ["焚天", "星蚀", "死亡之舞"], "note": "主线"},
+            {"name": "消耗流", "path": "ap",
+             "items": ["黯炎火炬", "瑞莱的冰晶节杖", "灭世者的死亡之帽"],
+             "note": "海克斯偏AP时切换"}],
+        "skill_order": "主Q副E",
+        "augment_item_links": []}
+    eng, _c1, _c2 = build_ai_engine(script_s2=[_json.dumps(two_builds)])
+    check("ctx 未就绪 pool_for 为 None（回 OP.GG 池）",
+          eng.pool_for("ad") is None and eng._extra_allowed() == [])
+    eng.bind(lambda *a: None)
+    eng.start_game(hero, [hero], ["黑暗之女"])
+    deadline = time.time() + 6
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    check("engine.pool_for 当前路线方案池",
+          eng.pool_for("ad")[:3] == ["焚天", "星蚀", "死亡之舞"],
+          str(eng.pool_for("ad")))
+    base_ap = eng.next_candidates(["长剑"], 0, "ap", ThreatProfile(),
+                                  serial=1, reason="event")
+    check("base 跟随 current_path 切池（海克斯偏 AP 场景）",
+          base_ap and [c.name for c in base_ap][:2]
+          == ["黯炎火炬", "瑞莱的冰晶节杖"],
+          str([c.name for c in base_ap]))
+    base_ad = eng.next_candidates(["长剑"], 0, "ad", ThreatProfile(),
+                                  serial=2, reason="event")
+    check("base 回切 AD 方案池", base_ad and base_ad[0].name == "焚天",
+          str([c.name for c in base_ad]))
+    extra = eng._extra_allowed()
+    check("跨方案白名单=全方案并集（杂项过滤）",
+          "黯炎火炬" in extra and "焚天" in extra, str(extra))
+
+    # ---- System1 跨方案改选：extra_allowed 进 allowed，防幻觉边界不变 ----
+    class _CapX:
+        configured = True
+        usage = UsageStats()
+
+        def __init__(self):
+            self.user = ""
+
+        def chat(self, system, user, max_tokens=None, json_mode=True):
+            self.user = user
+            return (_json.dumps({"picks": [
+                {"name": "黯炎火炬", "reason": "海克斯全偏AP"},
+                {"name": "焚天", "reason": "主线"}]}), {})
+    ctx2b = _s2x.ChampionContext(two_builds, hero)
+    capx = _CapX()
+    out = system1.suggest_next(capx, ctx2b, ["长剑"], 900, "ad", "威胁", [],
+                               [_Cand("焚天", "r", price=3000)],
+                               extra_allowed=extra)
+    check("System1 跨方案取件（其他方案件进 picks）",
+          out and out[0]["name"] == "黯炎火炬", str(out))
+    capx2 = _CapX()
+    out2 = system1.suggest_next(capx2, ctx2b, ["长剑"], 900, "ad", "威胁", [],
+                                [_Cand("焚天", "r", price=3000)],
+                                extra_allowed=[])
+    # 无 extra_allowed：模型给的黯炎火炬不在候选内 → 有效项<2 → 回规则版
+    check("无白名单时跨方案名触发规则版回退",
+          out2 and out2[0]["name"] == "焚天", str(out2))
+
+    # ---- 会话级：KIND_CTX 就绪自动刷新建议（方案池替换 OP.GG 兜底） ----
+    s7 = GameSession(kb, rules)
+    eng7, _f1, _f2 = build_ai_engine(script_s2=[_json.dumps(two_builds)])
+    s7.engine = eng7
+    eng7.bind(s7._on_engine_result)
+    s7.on_game_start({"ally": [hero], "enemy": ["黑暗之女"],
+                      "my_hero": hero, "source": "test"})
+    s7.on_in_progress()
+    s7.record_augment(REAL_AUG)
+    s7.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["长剑"],
+                             my_gold=800))
+    deadline = time.time() + 8
+    while time.time() < deadline:
+        s = s7.suggestion
+        if (s and s.kind == "next_items" and s.candidates
+                and s.candidates[0].name == "焚天"):
+            break
+        time.sleep(0.02)
+    s = s7.suggestion
+    check("KIND_CTX 就绪自动刷新（规则底线切方案池）",
+          s and s.kind == "next_items"
+          and s.candidates and s.candidates[0].name == "焚天",
+          s.render() if s else "no suggestion")
 
 
 def test_session_ai_serial():
@@ -1417,8 +1578,9 @@ def test_swap_mode():
         "opening_items": [{"combo": pool2[:1] or ["多兰之戒"], "when": "标准"},
                           {"combo": ["多兰之戒"], "when": "进攻"},
                           {"combo": ["红水晶"], "when": "防守"}],
-        "build_paths": {"ap": {"items": pool2[:3], "skill_order": "主Q副W",
-                               "note": "主线"}},
+        "builds": [{"name": "灼烧流", "path": "ap", "items": pool2[:3],
+                    "note": "主线"}],
+        "skill_order": "主Q副W",
         "component_rules": [], "augment_item_links": []})
     buy_top = [c.buy for c in session.suggestion.candidates]
     eng, c1, _c2 = build_ai_engine(
@@ -1668,8 +1830,9 @@ def test_coach_save_gap():
           and "《输出格式》" in system1.PICKS_FORMAT)
     ctx_r = _s2c.ChampionContext(
         {"augment_affinity": [], "opening_items": [],
-         "build_paths": {"ad": {"items": ["星蚀"], "skill_order": "主Q副E",
-                                "note": "poke 局先穿甲"}},
+         "builds": [{"name": "穿甲流", "path": "ad", "items": ["星蚀"],
+                     "note": "poke 局先穿甲"}],
+         "skill_order": "主Q副E",
          "augment_item_links": []}, "暗裔剑魔")
     cap = _Cap()
     system1.suggest_next(cap, ctx_r, ["长剑"], 900, "ad", "威胁", [],
@@ -1679,8 +1842,9 @@ def test_coach_save_gap():
           "《输出格式》" in cap.user and '"picks"' not in cap.system)
     check("候选行带价格（金币判断有依据）",
           "3200G" in cap.user, cap.user[-200:])
-    check("路线规划进 prompt（ctx 死参数接上）",
-          "本局路线规划" in cap.user and "poke 局先穿甲" in cap.user)
+    check("出装方案进 prompt（当前路线方案置前）",
+          "本局适配出装方案" in cap.user and "穿甲流（AD）" in cap.user
+          and "poke 局先穿甲" in cap.user)
     check("敌方明细进 prompt（死管道复活）",
           "敌方明细" in cap.user and "黑暗之女(ap)" in cap.user)
     cap2 = _Cap()
@@ -1702,8 +1866,9 @@ def test_coach_save_gap():
         "opening_items": [{"combo": pool_a[:1], "when": "标准"},
                           {"combo": ["多兰之刃"], "when": "进攻"},
                           {"combo": ["红水晶"], "when": "防守"}],
-        "build_paths": {"ad": {"items": pool_a[:3], "skill_order": "主Q副E",
-                               "note": "主线"}},
+        "builds": [{"name": "爆杀流", "path": "ad", "items": pool_a[:3],
+                    "note": "主线"}],
+        "skill_order": "主Q副E",
         "component_rules": [], "augment_item_links": []})
     s6 = GameSession(kb, rules)
     eng6, _c16, _c26 = build_ai_engine(
@@ -1807,8 +1972,9 @@ def test_review_fixes():
             "opening_items": [{"combo": pool[:1], "when": "标准"},
                               {"combo": ["多兰之刃"], "when": "进攻"},
                               {"combo": ["红水晶"], "when": "防守"}],
-            "build_paths": {"ad": {"items": pool[:3], "skill_order": "主Q副E",
-                                   "note": "主线"}},
+            "builds": [{"name": "爆杀流", "path": "ad", "items": pool[:3],
+                        "note": "主线"}],
+            "skill_order": "主Q副E",
             "component_rules": [],
             "augment_item_links": []})
 
@@ -1898,7 +2064,7 @@ def test_review_fixes():
         {"augment_affinity": [], "opening_items": [
             {"combo": ["长剑"], "when": "1"}, {"combo": ["多兰之刃"], "when": "2"},
             {"combo": ["红水晶"], "when": "3"}],
-         "build_paths": {}, "component_rules": [], "augment_item_links": []},
+         "builds": [], "skill_order": "", "augment_item_links": []},
         hero)
     out = system1.suggest_opening(_C(), ctx_o, hero, "", "", [])
     check("opening 保留模型排序", [o["name"] for o in out] ==
@@ -2134,6 +2300,7 @@ if __name__ == "__main__":
     test_live_me_match()
     test_detect_and_layout()
     test_ai_engine()
+    test_ai_build_pool()
     test_ai_inflight()
     test_session_ai_serial()
     test_swap_mode()

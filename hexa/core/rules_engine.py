@@ -509,15 +509,18 @@ class RulesEngine:
     def next_item_candidates(self, my_items: list, current_path: str,
                              threat: ThreatProfile, hero: str = "",
                              limit: int = 3, game_map: str = "",
-                             gap=None) -> list:
+                             gap=None, pool=None) -> list:
         """在 current_path 内、排除已拥有、按敌方构成加权的传说件候选。
 
         P1 候选池 = 英雄 OP.GG 高频核心装（顺序即登场率），坦克路线另开放
-        DD 抗性件全库扫描（输出位不因敌方构成推抗性装）。分数 = OP.GG 高频
+        DD 抗性件全库扫描（输出位不因敌方构成推抗性装）。分数 = 池内高频
         (3→0) + 路线匹配(2) + 敌方抗性方向(2) + 正在合成(3)。
         game_map: "11"/"12"，当前地图不可买的名字直接出局。
         gap: 己方阵容缺口（缺前排且英雄可扛 → 坦向件 +tank_lean 分）；
         显式传入优先，否则从 threat.ally_gap 取（engine 层经 threat 穿透）。
+        pool: 显式候选池（AI 适配方案并集，pool_for 产出）——传入时池序即
+        模型优先级序，频率代理分与文案按它标；None 回 OP.GG 池（规则兜底
+        现状不变）。仍过 bias/已拥有/地图/杂项过滤，模型产出不做免检。
         """
         if gap is None and threat is not None:
             gap = getattr(threat, "ally_gap", None)
@@ -532,8 +535,10 @@ class RulesEngine:
                     building_into.add(tname)
 
         advice = threat.resist_advice()
-        opgg_pool = self.kb.core_item_pool(hero)
+        ai_pool = [n for n in (pool or []) if isinstance(n, str)]
+        opgg_pool = ai_pool or self.kb.core_item_pool(hero)
         opgg_rank = {name: i for i, name in enumerate(opgg_pool)}
+        rank_label = "适配方案" if ai_pool else "OP.GG 高频"
         # 抗性件池：仅坦克路线开放全库扫描。输出位（ad/ap）对抗敌方构成的
         # 方式是继续出伤害装/走位，OP.GG 池自带的顺带抗性件（如中娅）足够；
         # 真机反馈 2026-09-27：AD 小丑被"对面物伤多"推护甲装，方向反了
@@ -601,7 +606,7 @@ class RulesEngine:
             if name in building_into:
                 reason_bits.insert(0, "身上小件正在往它合")
             if name in opgg_rank:
-                reason_bits.append(f"OP.GG 高频（第{opgg_rank[name] + 1}位）")
+                reason_bits.append(f"{rank_label}（第{opgg_rank[name] + 1}位）")
             elif bias == current_path:
                 reason_bits.append(f"当前{current_path.upper()}路线")
             out.append(Candidate(name, "；".join(reason_bits) or "通用推荐"))
@@ -610,7 +615,7 @@ class RulesEngine:
     def build_sequence(self, my_items: list, current_path: str,
                        threat: ThreatProfile, hero: str = "",
                        limit: int = 3, game_map: str = "",
-                       gap=None) -> list:
+                       gap=None, pool=None) -> list:
         """出装主线序列（v4.3）：英雄核心套装线优先，敌情评分补位。
 
         v4.2 按"敌情加权评分"直接排会出"还没出核心就被阵容带偏"的序列；
@@ -623,6 +628,9 @@ class RulesEngine:
         先按价差计 net_cost，GameSession 收到后补减金币并按台账联动重排。
         gap: 己方阵容缺口，经 next_item_candidates 参与坦向件加分；
         缺省从 threat.ally_gap 取（GameSession 挂载，穿透 engine 层）。
+        pool: AI 适配方案池（ChampionContext.pool_for 产出，当前路线方案
+        并集）——传入时主线即池序（第一匹配方案=核心线），None 回
+        core_build_line（OP.GG 规则兜底现状不变）。
         """
         if gap is None and threat is not None:
             gap = getattr(threat, "ally_gap", None)
@@ -632,12 +640,15 @@ class RulesEngine:
                 augments=None, hero=hero, limit=limit, game_map=game_map)
         owned = set(my_items)
         seq, seen = [], set()
-        line = self.kb.core_build_line(hero, current_path)
+        line = list(pool) if pool else self.kb.core_build_line(hero,
+                                                               current_path)
         for idx, name in enumerate(line, 1):
             if name in owned or name in seen:
                 continue
             if not self.kb.item_available(name, game_map):
                 continue
+            if _is_fullstat_item(self.kb, name):
+                continue  # 模型产出的方案池也过杂项守卫（属性加成全家桶）
             seen.add(name)
             seq.append(Candidate(
                 name,
@@ -648,7 +659,8 @@ class RulesEngine:
                 return seq
         for c in self.next_item_candidates(my_items, current_path, threat,
                                            hero=hero, limit=limit * 2,
-                                           game_map=game_map, gap=gap):
+                                           game_map=game_map, gap=gap,
+                                           pool=pool):
             if c.name in seen:
                 continue
             seen.add(c.name)
