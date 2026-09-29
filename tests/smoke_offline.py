@@ -606,6 +606,62 @@ def test_session():
     check("新鲜度字段", "date" in fresh and fresh["dd_version"].startswith("16."))
 
 
+# ── 3.5 引擎开局兜底② ────────────────────────────────────────────
+
+def test_engine_late_start_net():
+    """2026-09-29 曙光女神案：选人期已锁定英雄的局错过 GameStart 转换后，
+    中途启动兜底（hero 未知分支）因 my_hero 早有值而永不触发，引擎整局
+    空转（复盘 ctx_source="-"、calls=0、费用 ¥0.0000）。快照兜底②按
+    "本局引擎未启动"判据补 start_game，英雄已知也救，且幂等。"""
+    print("\n[3.5] 引擎开局快照兜底（选人直进对局案）")
+    session = GameSession(kb, rules)
+
+    calls = []
+
+    class RecordingEngine:
+        """记录 start_game，其余全部委托规则引擎"""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def start_game(self, hero, ally, enemy, game_map=""):
+            calls.append((hero, tuple(ally), tuple(enemy), game_map))
+            self._inner.start_game(hero, ally, enemy, game_map=game_map)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    session.engine = RecordingEngine(session.engine)
+
+    # 选人拿到英雄 → GameStart 被跳过 → 直接对局
+    session.on_champ_select({"ally": ["暗裔剑魔"], "enemy": [],
+                             "my_hero": "暗裔剑魔", "source": "test"})
+    session.on_in_progress()
+    check("跳过开局时引擎未启动", not calls, str(calls))
+
+    # 首个快照：英雄已知也必须补 start_game
+    session.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=[]))
+    check("快照兜底补开局", len(calls) == 1 and calls[0][0] == "暗裔剑魔",
+          str(calls))
+
+    # 后续快照幂等，不重复开局（System2/预算计数不被反复清零）
+    session.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"]))
+    check("兜底幂等不重复开局", len(calls) == 1, str(calls))
+
+    session.on_end_of_game("EndOfGame")
+    check("局终复位开局标记", not session._engine_started, session._engine_started)
+
+    # 新局同路径再来一次（防"兜底只对第一局生效"）
+    session.on_champ_select({"ally": ["黑暗之女"], "enemy": [],
+                             "my_hero": "黑暗之女", "source": "test"})
+    session.on_in_progress()
+    session.on_snapshot(make_snap(my_hero_en="Annie", my_items=[]))
+    check("新局可再开局", len(calls) == 2 and calls[1][0] == "黑暗之女",
+          str(calls))
+
+
+
+
 # ── 4. PhaseMachine ──────────────────────────────────────────────
 
 class FakeLCU:
@@ -697,6 +753,31 @@ def test_phase_machine():
     check("PreEndOfGame 即局终（真机序列）",
           kinds3 == ["in_progress", "end_of_game"]
           and events[1][1] == "PreEndOfGame", str(events))
+
+    # 回归（2026-09-29 曙光女神/战争之影案）：GameStart 阶段一闪而过被 2s
+    # 轮询跳过——ChampSelect 直进 InProgress 时 on_game_start 永不触发，
+    # System2 整局空转（复盘 ctx_source="-"、calls=0、¥0.0000）
+    events.clear()
+    pm4 = PhaseMachine(FakeLCU(), callbacks={
+        "on_champ_select": lambda t: events.append(("champ_select",)),
+        "on_game_start": lambda t: events.append(("game_start",)),
+        "on_in_progress": lambda: events.append(("in_progress",)),
+    })
+    pm4._handle("ChampSelect")
+    pm4._handle("InProgress")     # GameStart 被跳过
+    kinds4 = [e[0] for e in events]
+    check("选人直进对局补发开局",
+          kinds4 == ["champ_select", "game_start", "in_progress"], str(events))
+
+    # 启动即已在对局（首见阶段就是 InProgress）同样补发开局
+    events.clear()
+    pm5 = PhaseMachine(FakeLCU(), callbacks={
+        "on_game_start": lambda t: events.append(("game_start",)),
+        "on_in_progress": lambda: events.append(("in_progress",)),
+    })
+    pm5._handle("InProgress")
+    check("启动即在对局补发开局",
+          [e[0] for e in events] == ["game_start", "in_progress"], str(events))
 
     # 断连（In game 中连续取不到 phase）
     class DeadLCU(FakeLCU):
@@ -2508,6 +2589,7 @@ if __name__ == "__main__":
     test_kb()
     test_rules()
     test_session()
+    test_engine_late_start_net()
     test_phase_machine()
     test_live_me_match()
     test_detect_and_layout()

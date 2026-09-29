@@ -436,6 +436,12 @@ class PhaseMachine(threading.Thread):
         if cur == "GameStart":
             self._fire("on_game_start", self._safe_teams())
         elif cur == "InProgress":
+            if prev in (None, "ChampSelect"):
+                # GameStart 阶段一闪而过（2s 轮询粒度抓不住）或国服直接跳过：
+                # 选人直进对局/启动即已在对局时补发开局。20260929 曙光女神案
+                # ——on_game_start 永不触发，System2 整局空转（ctx_source="-"
+                # 、calls=0、¥0.0000），System1 预算守门全被 _ctx_ready 挡死。
+                self._fire("on_game_start", self._safe_teams())
             self._fire("on_in_progress")
         elif prev == "InProgress" and cur in IDLE_PHASES:
             self._fire("on_end_of_game", cur)

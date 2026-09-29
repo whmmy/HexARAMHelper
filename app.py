@@ -141,7 +141,13 @@ def main():
         names = [n for n in stable_cards if n]
         print(f"[DETECT] 本轮卡片: {names}")
         ranks = session.rank_augment_cards(stable_cards)  # 同步基准 + AI 异步精修
-        ui(lambda: print("[AI] 海克斯评级: " +
+        # 打印标注 ctx 来源：ctx 未就绪时这行只是规则基准，此前顶着 [AI]
+        # 前缀被当成 AI 返回，对账时无从分辨（20260929 曙光女神案）
+        try:
+            ctx_tag = session.engine.stats().get("ctx_source") or "-"
+        except Exception:
+            ctx_tag = "?"
+        ui(lambda: print(f"[AI] 海克斯评级[ctx:{ctx_tag}]: " +
                          ", ".join(f"{r['name']}[{r['grade']}]" for r in ranks)))
 
     def _on_calibrate_hint():

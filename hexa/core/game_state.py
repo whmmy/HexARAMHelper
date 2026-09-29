@@ -144,6 +144,7 @@ class GameSession:
             self.hex_last = ""            # 上一轮识别结果（界面关闭后保留展示）
             self.history = []             # 建议历史（复盘日志）
             self._review_flushed = False  # 本局复盘已落盘标记（双兜底防丢）
+            self._engine_started = False  # 引擎本局已 start_game（快照兜底判据）
             self.clicks = []              # 点击链黑匣子（台账排障，见 log_click）
             self._game_t0 = time.time()
             self._log("session_reset")
@@ -202,6 +203,7 @@ class GameSession:
 
         # 引擎回调在锁外启动（内部再起线程，避免持锁起线程）
         self.engine.start_game(hero or "", ally, enemy, game_map=game_map)
+        self._engine_started = True
 
     def replace_engine(self, new_engine):
         """设置保存后热切换引擎（重建 AI 客户端/预算态；规则↔AI 即时生效）"""
@@ -261,6 +263,16 @@ class GameSession:
                 self.enemy = [p.champion for p in enemies if p.champion]
                 self.ally = [p.champion for p in snap.allies()
                              if p.champion and p.champion != self.my_hero]
+            # 引擎开局兜底②：上面的中途启动兜底只救"快照时英雄未知"——
+            # 选人期已锁定英雄的局（my_hero 早有值）错过 GameStart 转换后
+            # 永远轮不到它，引擎整局空转（20260929 曙光女神案：复盘
+            # ctx_source="-"、calls=0、费用 ¥0.0000）。按"本局引擎未启动"
+            # 判据补 start_game，英雄已知也救；_engine_started 幂等防重入。
+            if (self.stage == "in_game" and not self._engine_started
+                    and self.my_hero):
+                late_start = (self.engine, self.my_hero, list(self.ally),
+                              list(self.enemy), self.game_map)
+                self._engine_started = True
             # 成型度对比（v4.6）：playerlist 全员六神装进度（传说件 x/6 +
             # 装备总价值），敌我分组供主窗口面板；放阵容回填之后保证分组完整
             self.build_progress = {
