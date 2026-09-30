@@ -4,12 +4,22 @@
 温度 / max_tokens / 思考强度 / 价格 / 测试连接）→ 全局（预算 / 精修间隔）→ 触发器开关 →
 数据面板（DD 版本 / builds 版本与抓取日期，>7 天黄标）。
 保存即写 settings.json 并回调 rebuild_engine（热切换规则/AI 模式）。
+
+2026-09-30 UI 重构（Quiet Dark v3）——**只换皮肤，骨架不动**：
+- `ttk.LabelFrame` 全部换成 `theme.card_frame` + 标题轨。clam 下 LabelFrame 的
+  标题压在边框上、背景与卡片不同源，是主窗口「卡内标题深色补丁」同源问题
+- 字段区放进 surface_inset 凹陷底；base_url / api_key 用等宽字体（便于核对
+  key，掩码行为不变）
+- 「测试连接」结果字符串与后台线程逻辑一行未动，只换呈现（绿/红/灰）
+- 「保存并生效」用 accent 主按钮
+- 控件、字段、保存/读取/测试逻辑、`_ProbeSettings` 语义全部原样
 """
 import tkinter as tk
 from tkinter import ttk
 
 from hexa.config import DEFAULTS
-from hexa.ui.theme import Theme
+from hexa.ui.theme import (Metrics, Palette, Theme, Type, card_frame,
+                           strip_emoji, version_label)
 
 MODEL_PRESETS = ["qwen3.8-max", "qwen3.7-plus", "qwen3.8-flash",
                  "deepseek-v4-pro", "deepseek-v4.1-flash", "kimi-k3", "glm-5.3"]
@@ -20,8 +30,8 @@ THINKING_OPTIONS = [("关闭", "off"), ("低", "low"), ("中", "medium"),
 THINKING_LABELS = [label for label, _v in THINKING_OPTIONS]
 _THINKING_BY_LABEL = dict(THINKING_OPTIONS)
 
+# (key, label, width, is_number)  数值字段空/非法保存时回落 DEFAULTS
 SLOT_FIELDS = [
-    # (key, label, width, is_number)  数值字段空/非法保存时回落 DEFAULTS
     ("base_url", "Base URL", 46, False),
     ("api_key", "API Key（留空读环境变量）", 46, False),
     ("api_key_env", "Key 环境变量名", 14, False),
@@ -31,6 +41,12 @@ SLOT_FIELDS = [
     ("price_in", "输入价 ¥/M tok", 8, True),
     ("price_out", "输出价 ¥/M tok", 8, True),
 ]
+
+# 这些字段用等宽字体（核对 base_url / key 串更易，已是掩码的 api_key 除外）
+MONO_KEYS = ("base_url", "api_key", "api_key_env")
+
+# 卡片统一 pack 参数（card_frame 自己 pack 外层，见 theme.card_frame 注释）
+SECTION_PACK = dict(fill=tk.X, pady=(10, 0))
 
 
 class _ProbeSettings:
@@ -85,118 +101,153 @@ class SettingsWindow(tk.Toplevel):
         self.rebuild_engine_fn = rebuild_engine_fn  # fn() 保存后热切换引擎
         self.vars = {}
         self._test_results = {}
-        self.title("设置 — HexARAMHelper")
+        self._test_labels = {}     # slot -> 结果标签（两个槽位各一个，不能共用）
+        self.title(f"设置 — HexARAMHelper {version_label()}")
         self.geometry("720x860")
-        self.configure(bg=Theme.BG)
+        self.configure(bg=Palette["bg"])
         Theme.style_root(self)
         self._build()
+        # 卡片内距让内容比旧 LabelFrame 版略高，按内容请求高度自适应（下限 860），
+        # 否则数据面板与保存行会被挤出窗口（固定 860 时底部两卡在 1080p 屏外）
+        self.update_idletasks()
+        self.geometry(f"720x{max(860, self.winfo_reqheight())}")
         self._load_values()
         self._poll_stats()
 
     # ── 控件构建 ──────────────────────────────────────────────────
 
+    def _section(self, parent, title, note=None, pack=None):
+        """统一卡片：标题轨（+右侧注记）+ 内容容器（替掉 ttk.LabelFrame）"""
+        return card_frame(parent, title=title, note=note, pack=pack)
+
     def _build(self):
+        P = Palette
         outer = ttk.Frame(self)
         outer.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
 
-        # AI 总开关
-        top = ttk.Frame(outer)
-        top.pack(fill=tk.X)
+        # AI 总开关（视觉权重最高，单独成卡）
+        top = card_frame(outer, title="AI 总开关", pack=dict(fill=tk.X))
         self.vars["ai.enabled"] = tk.BooleanVar()
         ttk.Checkbutton(top, text="启用 AI（关闭 = 纯规则模式，无 Key 可用）",
-                        variable=self.vars["ai.enabled"]).pack(side=tk.LEFT)
+                        variable=self.vars["ai.enabled"]).pack(anchor=tk.W,
+                                                              pady=(4, 0))
 
         # 双槽位
-        self._slot_frame(outer, "system2", "System 2 — ChampionContext 生成（每局 1 次）")
-        self._slot_frame(outer, "system1", "System 1 — 快照建议器（每局 8~11 次）")
+        self._slot_frame(outer, "system2", "System 2 — ChampionContext 生成",
+                         "每局 1 次")
+        self._slot_frame(outer, "system1", "System 1 — 快照建议器", "每局 8~11 次")
 
         # 全局预算/间隔
-        gb = ttk.LabelFrame(outer, text="全局守门", style="Card.TFrame")
-        gb.pack(fill=tk.X, pady=(10, 0))
-        row = ttk.Frame(gb)
-        row.pack(fill=tk.X, padx=8, pady=6)
+        gb = self._section(outer, "全局守门", pack=SECTION_PACK)
+        row = tk.Frame(gb, bg=P["surface"])
+        row.pack(anchor=tk.W, pady=(4, 0))
         self.vars["ai.budget_per_game"] = tk.StringVar()
         self.vars["ai.min_interval"] = tk.StringVar()
-        ttk.Label(row, text="每局 System1 上限(0=不限):").pack(side=tk.LEFT)
+        self._field_label(row, "每局 System1 上限(0=不限):")
         ttk.Entry(row, textvariable=self.vars["ai.budget_per_game"],
                   width=6).pack(side=tk.LEFT, padx=(4, 16))
-        ttk.Label(row, text="periodic 精修最小间隔(秒):").pack(side=tk.LEFT)
+        self._field_label(row, "periodic 精修最小间隔(秒):")
         ttk.Entry(row, textvariable=self.vars["ai.min_interval"],
-                  width=6).pack(side=tk.LEFT, padx=4)
+                  width=6).pack(side=tk.LEFT, padx=(4, 0))
 
         # 触发器
-        tg = ttk.LabelFrame(outer, text="局内触发器", style="Card.TFrame")
-        tg.pack(fill=tk.X, pady=(10, 0))
-        row = ttk.Frame(tg)
-        row.pack(fill=tk.X, padx=8, pady=6)
+        tg = self._section(outer, "局内触发器", pack=SECTION_PACK)
+        row = tk.Frame(tg, bg=P["surface"])
+        row.pack(anchor=tk.W, pady=(4, 0))
         for key, label in [("death_next_item", "死亡刷下一件"),
                            ("periodic_recheck", "快照 diff 重算"),
                            ("enemy_key_item", "敌方关键装提示"),
                            ("enemy_kda", "敌方起飞提示")]:
             self.vars[f"triggers.{key}"] = tk.BooleanVar()
             ttk.Checkbutton(row, text=label,
-                            variable=self.vars[f"triggers.{key}"]).pack(side=tk.LEFT,
-                                                                        padx=(0, 12))
-        ttk.Label(row, text="KDA 阈值:").pack(side=tk.LEFT)
+                            variable=self.vars[f"triggers.{key}"]).pack(
+                                side=tk.LEFT, padx=(0, 12))
+        self._field_label(row, "KDA 阈值:")
         self.vars["triggers.kda_threshold"] = tk.StringVar()
         ttk.Entry(row, textvariable=self.vars["triggers.kda_threshold"],
                   width=5).pack(side=tk.LEFT, padx=4)
 
         # 费用仪表
-        cg = ttk.LabelFrame(outer, text="费用仪表（本局 / 累计）", style="Card.TFrame")
-        cg.pack(fill=tk.X, pady=(10, 0))
-        self.lbl_cost = ttk.Label(cg, text="-", style="Dim.TLabel")
-        self.lbl_cost.pack(anchor=tk.W, padx=8, pady=6)
+        cg = self._section(outer, "费用仪表", "本局 / 累计", pack=SECTION_PACK)
+        self.lbl_cost = tk.Label(cg, text="-", font=Theme.FONT,
+                                 bg=P["surface"], fg=P["text_dim"],
+                                 anchor=tk.W, justify=tk.LEFT)
+        self.lbl_cost.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
 
         # 数据面板
-        dg = ttk.LabelFrame(outer, text="数据面板（版本翻译器底线：新鲜度常显）",
-                            style="Card.TFrame")
-        dg.pack(fill=tk.X, pady=(10, 0))
-        self.lbl_data = ttk.Label(dg, text="-", style="Dim.TLabel", justify=tk.LEFT)
-        self.lbl_data.pack(anchor=tk.W, padx=8, pady=6)
+        dg = self._section(outer, "数据面板", "版本翻译器底线：新鲜度常显",
+                          pack=SECTION_PACK)
+        self.lbl_data = tk.Label(dg, text="-", font=Theme.FONT,
+                                 bg=P["surface"], fg=P["text_dim"],
+                                 anchor=tk.W, justify=tk.LEFT)
+        self.lbl_data.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
 
         # 保存
         btns = ttk.Frame(outer)
         btns.pack(fill=tk.X, pady=(12, 0))
-        ttk.Button(btns, text="保存并生效", command=self._save).pack(side=tk.RIGHT)
-        ttk.Label(btns, text="Key 仅存本地 settings.json（gitignore 排除）",
-                  style="Dim.TLabel").pack(side=tk.LEFT)
+        ttk.Button(btns, text="保存并生效", style="Accent.TButton",
+                   command=self._save).pack(side=tk.RIGHT)
+        tk.Label(btns, text="Key 仅存本地 settings.json（gitignore 排除）",
+                 font=(Theme.FAMILY, Type["small"]), bg=P["bg"],
+                 fg=P["text_mute"]).pack(side=tk.LEFT)
+        tk.Label(btns, text=version_label(),
+                 font=(Theme.FAMILY, Type["small"]), bg=P["bg"],
+                 fg=P["text_mute"]).pack(side=tk.LEFT, padx=(10, 0))
 
-    def _slot_frame(self, parent, slot, title):
-        g = ttk.LabelFrame(parent, text=title, style="Card.TFrame")
-        g.pack(fill=tk.X, pady=(10, 0))
-        row0 = ttk.Frame(g)
-        row0.pack(fill=tk.X, padx=8, pady=(8, 2))
+    def _field_label(self, parent, text):
+        """字段名：三级文本（与 design 稿一致，字段本身才是主信息）"""
+        tk.Label(parent, text=text, font=(Theme.FAMILY, Type["small"]),
+                 bg=Palette["surface"], fg=Palette["text_mute"]).pack(side=tk.LEFT)
+
+    def _slot_frame(self, parent, slot, title, note=None):
+        P = Palette
+        box = card_frame(parent, title=title, note=note,
+                         pack=dict(fill=tk.X, pady=(10, 0)))
+
+        # 首行：模型 / 降级模型 / 测试连接
+        row0 = tk.Frame(box, bg=P["surface"])
+        row0.pack(fill=tk.X, pady=(6, 0))
         self.vars[f"{slot}.model"] = tk.StringVar()
         cb = ttk.Combobox(row0, textvariable=self.vars[f"{slot}.model"],
                           values=MODEL_PRESETS, width=20)
         cb.pack(side=tk.LEFT)
         self.vars[f"{slot}.fallback_model"] = tk.StringVar()
-        ttk.Label(row0, text="降级模型:").pack(side=tk.LEFT, padx=(14, 0))
+        self._field_label(row0, "降级模型:")
         ttk.Entry(row0, textvariable=self.vars[f"{slot}.fallback_model"],
                   width=16).pack(side=tk.LEFT, padx=4)
         btn = ttk.Button(row0, text="测试连接", command=lambda s=slot: self._test(s))
         btn.pack(side=tk.RIGHT)
         self.vars[f"{slot}._test"] = tk.StringVar(value="")
-        ttk.Label(row0, textvariable=self.vars[f"{slot}._test"],
-                  style="Dim.TLabel").pack(side=tk.RIGHT, padx=8)
-        grid = ttk.Frame(g)
-        grid.pack(fill=tk.X, padx=8, pady=(2, 8))
+        lbl = tk.Label(row0, textvariable=self.vars[f"{slot}._test"],
+                       font=(Theme.FAMILY, Type["small"]),
+                       bg=P["surface"], fg=P["text_mute"])
+        lbl.pack(side=tk.RIGHT, padx=8)
+        self._test_labels[slot] = lbl
+
+        # 字段网格：底色下沉到 inset，与卡片面分层
+        grid_holder = tk.Frame(box, bg=P["surface_inset"], padx=Metrics["gap_m"],
+                               pady=Metrics["gap_s"])
+        grid_holder.pack(fill=tk.X, pady=(6, 0))
+        grid = tk.Frame(grid_holder, bg=P["surface_inset"])
+        grid.pack(fill=tk.X)
         for i, (key, label, width, is_num) in enumerate(SLOT_FIELDS):
             r, c = divmod(i, 2)
-            ttk.Label(grid, text=label + ":").grid(row=r, column=c * 2,
-                                                   sticky=tk.W, padx=(0, 4),
-                                                   pady=2)
+            tk.Label(grid, text=label + ":", font=(Theme.FAMILY, Type["small"]),
+                     bg=P["surface_inset"], fg=P["text_mute"]).grid(
+                         row=r, column=c * 2, sticky=tk.W, pady=2)
             self.vars[f"{slot}.{key}"] = tk.StringVar()
             ent = ttk.Entry(grid, textvariable=self.vars[f"{slot}.{key}"],
                             width=width)
             if key == "api_key":
                 ent.config(show="*")
+            if key in MONO_KEYS:
+                ent.config(font=(Theme.MONO_FAMILY, Type["small"]))
             ent.grid(row=r, column=c * 2 + 1, sticky=tk.W, padx=(0, 18), pady=2)
         # 思考强度（紧跟字段网格下一格；off=关闭 low/medium/high=思考档 auto=跟默认）
         r, c = divmod(len(SLOT_FIELDS), 2)
-        ttk.Label(grid, text="思考强度:").grid(row=r, column=c * 2,
-                                               sticky=tk.W, padx=(0, 4), pady=2)
+        tk.Label(grid, text="思考强度:", font=(Theme.FAMILY, Type["small"]),
+                 bg=P["surface_inset"], fg=P["text_mute"]).grid(
+                     row=r, column=c * 2, sticky=tk.W, pady=2)
         self.vars[f"{slot}.thinking"] = tk.StringVar()
         ttk.Combobox(grid, textvariable=self.vars[f"{slot}.thinking"],
                      values=THINKING_LABELS, width=14,
@@ -270,6 +321,9 @@ class SettingsWindow(tk.Toplevel):
 
     def _test(self, slot):
         self.vars[f"{slot}._test"].set("测试中…")
+        lbl = self._test_labels.get(slot)
+        if lbl is not None:
+            lbl.config(fg=Palette["text_mute"])
         import threading
         threading.Thread(target=self._test_bg, args=(slot,),
                          daemon=True, name=f"Test-{slot}").start()
@@ -282,12 +336,20 @@ class SettingsWindow(tk.Toplevel):
         result = LLMClient(probe, slot).test_connection()
         def done():
             try:
+                lbl = self._test_labels.get(slot)
+                color = Palette["text_mute"]
+                # ✓/✗ 单色字形（原为彩色 emoji，与全链去 emoji 口径一致）；
+                # 成功/失败由文字色承担
                 if result.get("ok"):
                     self.vars[f"{slot}._test"].set(
-                        f"✅ {result['latency']}s ({result['model']})")
+                        f"✓ {result['latency']}s ({result['model']})")
+                    color = Palette["success"]
                 else:
                     self.vars[f"{slot}._test"].set(
-                        f"❌ {result.get('error', '失败')[:40]}")
+                        f"✗ {result.get('error', '失败')[:40]}")
+                    color = Palette["error"]
+                if lbl is not None:
+                    lbl.config(fg=color)
             except tk.TclError:
                 pass  # 窗口已关闭
         try:
@@ -327,12 +389,12 @@ class SettingsWindow(tk.Toplevel):
             mtime = kb.data_dir.joinpath("builds").stat().st_mtime
             date = datetime.date.fromtimestamp(mtime).isoformat()
             age = (datetime.date.today() - datetime.date.fromtimestamp(mtime)).days
-            color = Theme.WARNING if age > 7 else Theme.TEXT_DIM
+            color = Palette["warning"] if age > 7 else Palette["text_dim"]
         except OSError:
-            date, age, color = "未知", None, Theme.WARNING
+            date, age, color = "未知", None, Palette["warning"]
         self.lbl_data.config(text=(
             f"DD 装备库: {kb.dd_version or '-'}   OP.GG builds: "
             f"{kb.builds_patch or '-'}（抓取 {kb.builds_fetched or date}）\n"
             f"英雄先验: {len(kb.hero_augments)}   海克斯名单: {len(kb.augment_names)}"
             f"   语义标签: {len(kb.augment_tags)}   装备: {len(kb.items)}"),
-            foreground=color)
+            fg=color)

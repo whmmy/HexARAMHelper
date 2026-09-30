@@ -1,6 +1,8 @@
 [project]
 name = "hexaramhelper"
-version = "0.1.0"
+# 与 hexa/__init__.py 的 __version__ 手工同步（package = false，uv 不读包元信息）；
+# 一致性由 tests/smoke_offline.py 断言锁住
+version = "0.2.0"
 description = "海克斯大乱斗 AI 助手（版本翻译器）"
 readme = "README.md"
 requires-python = ">=3.12,<3.13"

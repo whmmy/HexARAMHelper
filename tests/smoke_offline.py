@@ -2697,6 +2697,155 @@ def test_click_blackbox():
         check("clicks 可 JSON 序列化（复盘落盘不炸）", False, repr(e))
 
 
+# ── 12. UI 设计系统（Quiet Dark v3，2026-09-30 重构） ─────────────
+
+def test_ui_design_system():
+    """UI 层离线断言（无 Tk 窗口、无显示环境要求）：
+
+    1. 调色板单源 —— `#rrggbb` 只允许出现在 theme.py（overlay 曾自带一套
+       重复色值与 theme 分叉，UI 改色时最易两处各改一处）
+    2. 档位色覆盖 S/A/B/C/? 且全部取自 Palette
+    3. `fit_height` 纯函数：贴内容 / 夹屏内 / 收缩迟滞（overlay 死区与抖动）
+    4. token 完整性：UI 里 `Palette["x"]` 的每个 x 都真实存在（typo 在
+       运行时才炸，冒烟提前拦）
+    5. emoji 清洗：剥掉彩色 emoji、保留 ①②③ 与 ✓✗（卡序/识别标记）
+    6. 「路线」行不再出现在 UI（用户口径：路线不是 ad/ap/坦克三键）
+    """
+    import re as _re
+    from hexa.ui import theme as _theme
+    from hexa.ui.overlay import fit_height as _fit
+    from hexa.ui.theme import GRADES, Metrics, Palette, Type, _is_emoji, strip_emoji
+
+    print("\n[12] UI 设计系统（token / 档位色 / 贴内容高度 / 去 emoji）")
+    ui_dir = Path(__file__).resolve().parent.parent / "hexa" / "ui"
+    srcs = {p.name: p.read_text(encoding="utf-8")
+            for p in sorted(ui_dir.glob("*.py"))}
+
+    def literals(src, skip_names=()):
+        """取"真正会被渲染/参与逻辑"的字符串字面量：跳过 docstring 与
+        指定名字的赋值（emoji 剥离集合自身含被禁字符，须豁免）。
+        注释里写旧色值/旧 emoji 做说明是合理的，不该被断言误伤。"""
+        import ast as _ast
+        tree = _ast.parse(src)
+        skip = set()
+        for node in _ast.walk(tree):
+            body = getattr(node, "body", None)
+            if isinstance(node, (_ast.Module, _ast.ClassDef, _ast.FunctionDef,
+                                 _ast.AsyncFunctionDef)) and body:
+                head = body[0]
+                if (isinstance(head, _ast.Expr)
+                        and isinstance(head.value, _ast.Constant)
+                        and isinstance(head.value.value, str)):
+                    skip.add(id(head.value))
+            if isinstance(node, _ast.Assign):
+                names = [t.id for t in node.targets if isinstance(t, _ast.Name)]
+                if any(n in skip_names for n in names):
+                    for c in _ast.walk(node):
+                        if isinstance(c, _ast.Constant):
+                            skip.add(id(c))
+        return [n.value for n in _ast.walk(tree)
+                if isinstance(n, _ast.Constant) and isinstance(n.value, str)
+                and id(n) not in skip]
+
+    # 1) 调色板单源
+    hexpat = _re.compile(r"#[0-9a-fA-F]{6}\b")
+    hits = {}
+    for name, text in srcs.items():
+        if name == "theme.py":
+            continue
+        found = []
+        for lit in literals(text):
+            found += hexpat.findall(lit)
+        if found:
+            hits[name] = found
+    check("调色板单源：色值只出现在 theme.py（UI 改色不许就地写死）",
+          not hits, str(hits))
+    check("Palette 本身为合法 6 位 hex 且键数 >= 15",
+          all(_re.fullmatch(r"#[0-9A-Fa-f]{6}", v) for v in Palette.values())
+          and len(Palette) >= 15, f"{len(Palette)} keys")
+
+    # 2) 档位色
+    check("档位色覆盖 S/A/B/C/?", set(GRADES) >= {"S", "A", "B", "C", "?"},
+          str(sorted(GRADES)))
+    check("档位色全部取自 Palette（不另立色值）",
+          all(v in Palette.values() for v in GRADES.values()))
+    check("档位 S>A>B 各自不同色（避免整块同色回归）",
+          len({GRADES["S"], GRADES["A"], GRADES["B"]}) == 3)
+
+    # 3) fit_height：贴内容 / 夹屏内 / 收缩迟滞
+    floor, screen = 150, 1440
+    check("fit_height 内容不足时贴内容（不再强撑 560 下限）",
+          _fit(430, floor, screen, 560) == 430, str(_fit(430, floor, screen, 560)))
+    check("fit_height 内容超屏时夹到 屏-40",
+          _fit(2000, floor, screen, 0) == screen - 40)
+    check("fit_height 低于下限时保留下限",
+          _fit(60, floor, screen, 0) == floor)
+    check("fit_height 收缩迟滞 16px（内容忽长忽短不抖窗）",
+          _fit(545, floor, screen, 560) == 560      # 差 15 → 不动
+          and _fit(544, floor, screen, 560) == 544)  # 差 16 → 收缩
+    check("fit_height 增长立即生效（内容多了马上看得到）",
+          _fit(700, floor, screen, 560) == 700)
+
+    # 4) token 完整性
+    tokpat = _re.compile(r'\bP(?:alette)?\["(\w+)"\]')
+    used = set()
+    for text in srcs.values():
+        used |= set(tokpat.findall(text))
+    missing = sorted(used - set(Palette))
+    check(f"token 完整性：UI 引用的 {len(used)} 个色 token 全部存在",
+          not missing, str(missing))
+    check("Type/Metrics 键齐全（字号与间距标尺被引用）",
+          {"title", "body", "small", "ov_hero", "ov_body", "ov_meta"} <= set(Type)
+          and {"pad_card", "rail_w", "badge"} <= set(Metrics),
+          f"Type={sorted(Type)} Metrics={sorted(Metrics)}")
+
+    # 5) emoji 清洗
+    check("strip_emoji 剥掉彩色 emoji（逻辑层文案经渲染边界清洗）",
+          strip_emoji("🔄 卖无尽 → 买星蚀") == "卖无尽 → 买星蚀"
+          and strip_emoji("💰 距星蚀还差 400，可攒") == "距星蚀还差 400，可攒",
+          repr(strip_emoji("🔄 卖无尽 → 买星蚀")))
+    check("strip_emoji 保留卡序与识别标记（①②③ / ✓ / ✗）",
+          strip_emoji("① [S] 贪欲束缚 ✓已选") == "① [S] 贪欲束缚 ✓已选")
+    check("strip_emoji 空值安全", strip_emoji("") == "" and strip_emoji(None) == "")
+    bad = []
+    for name, text in srcs.items():
+        for lit in literals(text, skip_names=("_EMOJI_BMP",)):
+            hit = [c for c in lit if _is_emoji(c)]
+            if hit:
+                bad.append(f"{name}:{''.join(hit)}")
+    check("UI 字符串无彩色 emoji（简约约束的永久守卫）", not bad, str(bad[:5]))
+
+    # 6) 路线行已下线（用户口径：路线不是 ad/ap/坦克三键）
+    route = [n for n in ("overlay.py", "main_window.py")
+             if any("路线" in v for v in literals(srcs[n]))]
+    check("UI 不再显示「路线」行（current_path 仍在引擎内供选候选/复盘）",
+          not route, str(route))
+
+    # 7) 应用版本号单一来源（hexa.__version__ ↔ pyproject 不得漂移）
+    import tomllib as _toml
+    from hexa import __version__
+    from hexa.ui.theme import version_label as _vlabel
+    root = Path(__file__).resolve().parent.parent
+    try:
+        pp = _toml.loads((root / "pyproject.toml").read_text(encoding="utf-8"))
+        pp_ver = pp.get("project", {}).get("version", "")
+    except Exception as e:  # noqa: BLE001
+        pp_ver = f"<读不到: {e}>"
+    check("应用版本号：hexa.__version__ 与 pyproject 一致",
+          pp_ver == __version__, f"pyproject={pp_ver} __version__={__version__}")
+    check("版本号格式为 vX.Y.Z", _vlabel() == f"v{__version__}"
+          and __version__.count(".") == 2, _vlabel())
+    titles = " ".join(v for n in ("main_window.py", "settings_window.py")
+                      for v in literals(srcs[n]))
+    check("两处窗口标题/角标都引用 version_label()（不各自硬写版本串）",
+          "version_label()" in srcs["main_window.py"]
+          and "version_label()" in srcs["settings_window.py"]
+          and not [v for v in literals(srcs["main_window.py"])
+                   + literals(srcs["settings_window.py"])
+                   if __version__ in v],
+          titles[:60])
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -2718,6 +2867,7 @@ if __name__ == "__main__":
     test_thinking_params()
     test_click_diag_and_tee()
     test_click_blackbox()
+    test_ui_design_system()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

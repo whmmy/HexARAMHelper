@@ -1,0 +1,610 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>HexARAMHelper — Quiet Dark v3 视觉稿</title>
+<style>
+/* ══════════════════════════════════════════════════════════════
+   Quiet Dark v3 — 设计 token（与 hexa/ui/theme.py 一一对应）
+   ══════════════════════════════════════════════════════════════ */
+:root{
+  --bg:#0B0F13;          /* 页面底色 */
+  --surface:#131A21;     /* 卡片 */
+  --inset:#0E141A;       /* 卡内凹陷区 */
+  --line:#1E2831;        /* 1px 发丝边框 */
+  --line-soft:#171F27;   /* 卡内分隔线 */
+  --text:#E4EAF0;
+  --dim:#8B98A6;
+  --mute:#64717F;
+  --accent:#58A6FF;
+  --accent-dim:#2C4257;
+  --ok:#3FB950;
+  --warn:#D29922;
+  --err:#F85149;
+  --grade-b:#B7C3CE;
+  --ui:"Microsoft YaHei UI","Microsoft YaHei","Segoe UI",sans-serif;
+  --mono:Consolas,"Courier New",monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+/* 分节出图用：URL 带 #sN 锚点时只显示该节（正常打开无锚点 → 全部显示）。
+   纯截图辅助，不影响视觉稿本身的呈现。 */
+body:has(section:target) section:not(:target){display:none}
+body{
+  background:#07090C;color:var(--text);font-family:var(--ui);
+  font-size:13px;line-height:1.6;padding:28px 32px 60px;
+}
+h1{font-size:19px;font-weight:700;letter-spacing:.3px}
+h2{font-size:14px;font-weight:700;margin:34px 0 4px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.lead{color:var(--dim);font-size:12px;margin:6px 0 16px;max-width:1000px}
+.note{color:var(--mute);font-size:11.5px;margin-top:8px}
+code{font-family:var(--mono);font-size:11px;color:var(--accent);background:var(--inset);padding:1px 5px;border:1px solid var(--line-soft)}
+.row{display:flex;gap:18px;align-items:flex-start;flex-wrap:wrap}
+.lab{color:var(--mute);font-size:11px;margin-bottom:6px;letter-spacing:.4px}
+
+/* ── §1 色卡 ───────────────────────────────────────────── */
+.sw{width:132px}
+.chip{height:44px;border:1px solid var(--line);display:flex;align-items:flex-end;padding:4px 7px;
+      font-family:var(--mono);font-size:9.5px;margin-bottom:5px}
+.chip span{background:rgba(0,0,0,.55);color:#E4EAF0;padding:1px 4px;border-radius:2px}
+.sw b{display:block;font-weight:400;font-size:11.5px;color:var(--text)}
+.sw i{display:block;font-style:normal;color:var(--mute);font-size:10.5px;font-family:var(--mono)}
+
+/* 字号阶梯 */
+.tsample{display:flex;align-items:baseline;gap:14px;padding:7px 0;border-bottom:1px dashed var(--line-soft)}
+.tsample span:first-child{width:112px;color:var(--mute);font-family:var(--mono);font-size:10.5px;flex:none}
+
+/* ── 通用控件（模拟 ttk 新样式） ─────────────────────────── */
+.t-entry{display:inline-block;background:var(--inset);border:1px solid var(--line);
+        color:var(--text);font-family:var(--ui);font-size:10px;padding:3px 6px;min-width:70px}
+.t-entry.focus{border-color:var(--accent)}
+.t-entry.mono{font-family:var(--mono);font-size:9.5px;letter-spacing:.2px}
+.t-btn{display:inline-block;background:var(--surface);border:1px solid var(--line);color:var(--text);
+      font-size:10px;padding:3px 10px;cursor:default}
+.t-btn.hover{background:#1A222B}
+.t-btn.primary{border-color:var(--accent-dim);color:var(--accent);background:#101820}
+.t-combo{display:inline-block;background:var(--inset);border:1px solid var(--line);color:var(--text);
+         font-size:10px;padding:3px 20px 3px 6px;min-width:80px;position:relative}
+.t-combo::after{content:"▾";position:absolute;right:6px;color:var(--mute);font-size:9px}
+.t-check{display:inline-flex;align-items:center;gap:5px;font-size:10px;color:var(--text);margin-right:14px}
+.t-check::before{content:"";width:11px;height:11px;border:1px solid var(--line);background:var(--inset);flex:none}
+.t-check.on::before{background:var(--accent);border-color:var(--accent)}
+
+/* ── §2 Overlay（1:1 236px） ────────────────────────────── */
+.scene{position:relative;width:520px;height:390px;border:1px solid var(--line);overflow:hidden}
+.scene.dark{background:
+  radial-gradient(120% 90% at 22% 18%, #24343A 0%, #16232A 42%, #0A1216 100%),
+  linear-gradient(160deg,#12222A,#0A1116);}
+.scene.bright{background:
+  radial-gradient(110% 80% at 30% 20%, #7C8A5E 0%, #4C5F3E 40%, #243021 100%),
+  linear-gradient(180deg,#6E7C52,#26301F);}
+.scene .fake{position:absolute;color:rgba(255,255,255,.16);font-size:11px;font-weight:700;letter-spacing:1px}
+.scene .bar{position:absolute;height:7px;background:rgba(255,255,255,.14)}
+.ov{position:absolute;right:12px;top:50%;transform:translateY(-50%);
+    width:236px;background:rgba(16,21,28,.88);color:var(--text);
+    font-size:9px;line-height:1.45;padding:8px;font-family:var(--ui);display:flex;flex-direction:column;gap:6px}
+.ov .hero{font-size:12px;font-weight:700;line-height:1.3}
+.ov .hero small{font-size:9px;font-weight:400;color:var(--mute);margin-left:4px}
+.ov .idle{font-size:12px;font-weight:700;color:var(--accent)}
+.ov .meta{font-size:8px;color:var(--mute)}
+.ov .body{font-size:9px;color:var(--dim)}
+.ov .body b{color:var(--text);font-weight:400}
+.ov .rule{display:flex;align-items:center;gap:6px}
+.ov .rule span{font-size:8px;color:var(--mute);white-space:nowrap}
+.ov .rule i{flex:1;height:1px;background:var(--line-soft)}
+.ov .dot{width:5px;height:5px;border-radius:50%;background:var(--ok);display:inline-block;margin-right:5px;vertical-align:1px}
+.ov .dot.warn{background:var(--warn)}
+.ov .dot.acc{background:var(--accent)}
+
+/* 档位行：15px 徽章 + 名称 + 理由 */
+.grade{display:flex;align-items:flex-start;gap:5px;margin-top:3px}
+.badge{width:15px;height:15px;flex:none;font-size:8px;font-weight:700;line-height:15px;
+       text-align:center;color:#0B0F13;margin-top:1px}
+.gs{background:var(--ok)} .ga{background:var(--accent)} .gb{background:var(--grade-b)}
+.gx{background:transparent;border:1px dashed var(--line);color:var(--mute);line-height:13px}
+.grade .txt{flex:1;min-width:0}
+.grade .nm{color:var(--text);font-size:9px}
+.grade .nm.s{color:var(--ok)} .grade .nm.a{color:var(--accent)} .grade .nm.b{color:var(--grade-b)}
+.grade .rs{color:var(--mute);font-size:8px;line-height:1.4}
+.pick{color:var(--ok);font-size:8px}
+
+/* 建议卡：2px 左轨 */
+.rail{display:flex;gap:7px;background:var(--inset);border-left:2px solid var(--accent);padding:5px 6px;margin-top:2px}
+.rail.warn{border-left-color:var(--warn)}
+.rail div{flex:1;min-width:0;color:var(--text);font-size:9px;line-height:1.5}
+
+/* 改造前对照 */
+.ov-old{width:236px;background:rgba(16,21,28,.88);color:#e6edf3;font-family:var(--ui);
+        font-size:9px;line-height:1.5;padding:8px 8px 90px;display:flex;flex-direction:column;gap:6px}
+.ov-old .sep{height:1px;background:#21262d;margin:2px 0}
+.ov-old .ttl{font-size:12px;font-weight:700;color:#58a6ff}
+.ov-old .sec{font-size:8px;color:#8b949e}
+.ov-old .blk{color:#3fb950;font-size:9px;line-height:1.5}
+.ov-old .dead{height:78px;background:repeating-linear-gradient(45deg,rgba(255,255,255,.03) 0 6px,transparent 6px 12px);
+              border:1px dashed #30363d;display:flex;align-items:center;justify-content:center;
+              color:#64717F;font-size:8px}
+
+/* ── §3/§4 窗口（1:1） ──────────────────────────────────── */
+.win{background:var(--bg);border:1px solid var(--line);border-radius:2px;overflow:hidden;
+     font-family:var(--ui);color:var(--text)}
+.win.w560{width:562px}
+.win.w720{width:722px}
+.tbar{background:#12161B;border-bottom:1px solid var(--line);height:26px;display:flex;
+      align-items:center;padding:0 9px;gap:6px;font-size:10px;color:var(--dim)}
+.tbar .dot3{margin-left:auto;display:flex;gap:10px;color:#3A434D;font-size:11px}
+.body560{padding:10px;display:flex;flex-direction:column;gap:8px;width:560px}
+.body720{padding:12px;display:flex;flex-direction:column;gap:10px;width:720px}
+
+/* 状态行 */
+.stat{display:flex;align-items:center;gap:10px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.pill{font-size:9px;padding:2px 8px;border:1px solid var(--accent-dim);color:var(--accent);background:#101820}
+.pill.live{border-color:#1F3A26;color:var(--ok);background:#0F1712}
+.dimline{font-size:10px;color:var(--dim)}
+.dimline b{color:var(--text);font-weight:400}
+
+/* 卡片 */
+.card{background:var(--surface);border:1px solid var(--line);display:flex}
+.card .body{padding:9px 10px;flex:1;min-width:0}
+.card.accent{border-left:2px solid var(--accent);border-left-color:var(--accent)}
+.ctitle{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+.ctitle .tick{width:2px;height:10px;background:var(--line);flex:none}
+.ctitle.on .tick{background:var(--accent)}
+.ctitle b{font-size:10px;font-weight:700;color:var(--dim);letter-spacing:.2px}
+.ctitle i{font-style:normal;font-size:8.5px;color:var(--mute);margin-left:auto}
+.cbody{font-size:10px;color:var(--text);line-height:1.55}
+.cbody.dim{color:var(--dim)}
+.cbody.warn{color:var(--warn)}
+.cbody.mute{color:var(--mute);font-size:9.5px}
+.cbody .n{color:var(--mute);font-family:var(--mono);font-size:9.5px}
+
+/* 阵容两列 */
+.teams{display:flex;gap:10px;background:var(--surface);border:1px solid var(--line);padding:8px 10px}
+.team{flex:1;min-width:0}
+.team + .team{border-left:1px solid var(--line-soft);padding-left:10px}
+.team em{font-style:normal;font-size:9px;color:var(--mute);display:block;margin-bottom:2px}
+.team span{font-size:10px;color:var(--text);line-height:1.6}
+
+/* 成型度 */
+.bp{display:flex;gap:12px}
+.bpc{flex:1;min-width:0}
+.bprow{display:flex;align-items:center;gap:5px;padding:1.5px 0}
+.bprow .nm{width:52px;font-size:9.5px;color:var(--text);flex:none;
+           white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.track{flex:1;height:4px;background:var(--inset);min-width:30px;display:block}
+.fill{display:block;height:4px;background:var(--ok)}
+.bprow .x{width:26px;font-family:var(--mono);font-size:9px;color:var(--dim);text-align:right;flex:none}
+.bprow .g{width:42px;font-family:var(--mono);font-size:9px;color:var(--mute);text-align:right;flex:none}
+.bprow .g.hot{color:var(--warn)}
+
+/* 台账 */
+.led{display:flex;align-items:center;padding:2px 0}
+.led em{font-style:normal;font-size:10px;color:var(--text);flex:1}
+.led .ix{font-family:var(--mono);font-size:9px;color:var(--mute);margin-right:6px}
+.mini{border:1px solid var(--line);background:var(--surface);color:var(--mute);font-size:9px;padding:1px 7px}
+
+/* 日志 */
+.log{background:var(--inset);border:1px solid var(--line);height:118px;position:relative;
+     font-family:var(--mono);font-size:9px;line-height:1.65;color:var(--dim);padding:6px 8px;overflow:hidden}
+.log .sb{position:absolute;right:2px;top:2px;bottom:2px;width:9px;background:var(--line-soft)}
+.log .sb i{position:absolute;left:2px;right:2px;top:12px;height:44px;background:#26313C;display:block}
+.log b{color:var(--ok);font-weight:400}
+.log em{font-style:normal;color:var(--accent)}
+
+/* footer */
+.foot{display:flex;gap:12px;font-size:9px;color:var(--mute);line-height:1.5}
+.foot div{flex:1;min-width:0}
+.foot em{font-style:normal;color:var(--dim)}
+
+/* 设置窗口 */
+.sec-card{background:var(--surface);border:1px solid var(--line)}
+.sec-card > .hd{display:flex;align-items:center;gap:6px;padding:7px 10px;border-bottom:1px solid var(--line-soft)}
+.sec-card > .hd .tick{width:2px;height:11px;background:var(--accent);flex:none}
+.sec-card > .hd b{font-size:10px;font-weight:700;color:var(--text)}
+.sec-card > .hd i{font-style:normal;font-size:8.5px;color:var(--mute);margin-left:auto}
+.sec-card > .in{padding:9px 10px}
+.grid{display:grid;grid-template-columns:auto 1fr auto 1fr;gap:5px 8px;align-items:center}
+.grid .fk{font-size:9.5px;color:var(--mute);white-space:nowrap}
+.grid .t-entry{width:100%}
+.row0{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.row0 .sp{flex:1}
+.result{font-size:9px}
+.result.ok{color:var(--ok)} .result.err{color:var(--err)} .result.wait{color:var(--mute)}
+.inbox{background:var(--inset);border:1px solid var(--line-soft);padding:8px}
+.note-s{font-size:9px;color:var(--mute)}
+</style>
+</head>
+<body>
+
+<h1>HexARAMHelper — Quiet Dark v3 视觉稿</h1>
+<p class="lead">
+  目标：只换皮肤不动骨架。内容条目、显示顺序、文案、数据源一字不改；直角 + 1px 发丝线、
+  单一强调色（蓝）、语义色只给档位与告警、去 emoji。overlay <b>画面优先</b>——不靠降透明度，
+  靠缩小占屏面积。下面所有窗口均为 <b>1:1 像素</b>，字体族与 Tk 一致，可与真实渲染逐项对齐。
+</p>
+
+<!-- ══════════ §1 色板与字号 ══════════ -->
+<section id="s1">
+<h2>§1　色板与字号</h2>
+<p class="lead">沿用现有色相，只降饱和、补层级；新增三级文字（text / dim / mute）与两级表面（surface / inset）。</p>
+<div class="row">
+  <div class="sw"><div class="chip" style="background:#0B0F13"><span>bg</span></div><b>页面底色</b><i>#0B0F13</i></div>
+  <div class="sw"><div class="chip" style="background:#131A21"><span>surface</span></div><b>卡片</b><i>#131A21</i></div>
+  <div class="sw"><div class="chip" style="background:#0E141A"><span>inset</span></div><b>卡内凹陷</b><i>#0E141A</i></div>
+  <div class="sw"><div class="chip" style="background:#1E2831"><span>line</span></div><b>发丝边框</b><i>#1E2831</i></div>
+  <div class="sw"><div class="chip" style="background:#E4EAF0;color:#0B0F13"><span>text</span></div><b>主文本</b><i>#E4EAF0</i></div>
+  <div class="sw"><div class="chip" style="background:#8B98A6;color:#0B0F13"><span>dim</span></div><b>次级文本</b><i>#8B98A6</i></div>
+  <div class="sw"><div class="chip" style="background:#64717F;color:#0B0F13"><span>mute</span></div><b>三级文本</b><i>#64717F</i></div>
+  <div class="sw"><div class="chip" style="background:#58A6FF;color:#0B0F13"><span>accent</span></div><b>唯一强调色</b><i>#58A6FF</i></div>
+  <div class="sw"><div class="chip" style="background:#3FB950;color:#0B0F13"><span>ok</span></div><b>成功 / 档位 S</b><i>#3FB950</i></div>
+  <div class="sw"><div class="chip" style="background:#D29922;color:#0B0F13"><span>warn</span></div><b>告警 / 档位 C</b><i>#D29922</i></div>
+  <div class="sw"><div class="chip" style="background:#B7C3CE;color:#0B0F13"><span>grade-b</span></div><b>档位 B（原为白）</b><i>#B7C3CE</i></div>
+</div>
+
+<div class="row" style="margin-top:18px">
+  <div style="flex:1;min-width:300px">
+    <div class="lab">桌面字号（YaHei UI）</div>
+    <div class="tsample"><span>display 13 bold</span><b style="font-size:13px;font-weight:700">当前建议</b></div>
+    <div class="tsample"><span>title 10 bold</span><b style="font-size:10px;font-weight:700">海克斯台账（点名字撤销纠错）</b></div>
+    <div class="tsample"><span>body 10</span><span style="font-size:10px">法伤×3 | 物伤×2 | 坦克×1 | 治疗·琴瑟仙女</span></div>
+    <div class="tsample"><span>small 9</span><span style="font-size:9px;color:#8B98A6">数据版本: 16.19.1 | 抓取日期: 2026-09-24（1 天前）</span></div>
+    <div class="tsample"><span>mono 9</span><span style="font-family:var(--mono);font-size:9px">2026-09-30 10:16 [OK] 数据就绪: 16.19.1 | builds: 16.19 | AI: 开</span></div>
+  </div>
+  <div style="width:236px">
+    <div class="lab">Overlay 字号（× 分辨率缩放）</div>
+    <div class="tsample" style="border:0;padding:3px 0"><span>hero 12 bold</span><b style="font-size:12px">暗裔剑魔</b></div>
+    <div class="tsample" style="border:0;padding:3px 0"><span>body 9</span><span style="font-size:9px">贪欲束缚</span></div>
+    <div class="tsample" style="border:0;padding:3px 0"><span>badge 8 bold</span><span class="badge gs" style="display:inline-block;vertical-align:-2px">S</span></div>
+    <div class="tsample" style="border:0;padding:3px 0"><span>meta 8</span><span style="font-size:8px;color:#64717F">── 海克斯台账</span></div>
+  </div>
+</div>
+
+<!-- ══════════ §2 Overlay ══════════ -->
+</section>
+<section id="s2">
+<h2>§2　游戏内 Overlay（1:1，236px 宽）</h2>
+<p class="lead">
+  三个要点：<b>① 档位逐行分色 + 15px 徽章</b>（现状整块被第一张的档位色涂满，S/A/B 看不出差别，是真 bug）；
+  <b>② 去 emoji</b>（🧠⟳⏳⚠ 全是彩色字形，是"干扰游戏元素"的主要来源）；
+  <b>③ 高度贴内容</b>，不再强撑 560px 下限。
+</p>
+<p class="lead">
+  <b>④ 删掉「路线: AD」整行</b>——路线不是 ad/ap/坦克三键，而是不同装备玩法（同一路 AD 里也有多种出法），
+  拿伤害类型键当"路线"显示既没用又与系统自身的方案制矛盾。具名方案目前只喂给模型当语境、未进 UI，
+  所以这行直接去掉；<code>current_path</code> 本身仍留在引擎里用于选候选与复盘，只是不再显示。
+  主窗口状态行同步去掉。
+</p>
+
+<div class="row">
+  <!-- 态 1：识别中 -->
+  <div>
+    <div class="lab">态 1 · 识别中（叠在暗场景上）</div>
+    <div class="scene dark">
+      <span class="fake" style="left:18px;top:16px">TFT 战斗进行中</span>
+      <div class="bar" style="left:18px;top:40px;width:120px"></div>
+      <div class="bar" style="left:18px;top:220px;width:70px"></div>
+      <div class="ov">
+        <div class="hero">暗裔剑魔<small>· 对局中</small></div>
+        <div class="body">军师 <b>敌方 3 坦克堆甲，先把破甲件提上日程</b></div>
+        <div class="meta">加点 主Q副E</div>
+        <div class="rule"><i class="dot warn"></i><span>海克斯时刻</span><i></i></div>
+        <div class="body" style="color:#8B98A6">识别中…（读取三张卡面）</div>
+        <div class="rule"><span>建议</span><i></i></div>
+        <div class="rail"><div>出装主线<br>① 星蚀 —— 契合 AD 主线<br>② 夜之锋刃</div></div>
+        <div class="rule"><span>海克斯台账</span><i></i></div>
+        <div class="body">-</div>
+        <div class="rule"><span>敌方威胁</span><i></i></div>
+        <div class="body">法伤×3 | 物伤×2 | 坦克×1 | 治疗·琴瑟仙女</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 态 2：已识别已选 -->
+  <div>
+    <div class="lab">态 2 · 已识别 + 已选 + AI 在途（最拥挤的一屏）</div>
+    <div class="scene dark">
+      <span class="fake" style="left:18px;top:16px">海克斯选择</span>
+      <div class="bar" style="left:18px;top:40px;width:150px"></div>
+      <div class="ov">
+        <div class="hero">暗裔剑魔<small>· 对局中</small></div>
+        <div class="meta">加点 主Q副E</div>
+        <div class="rule"><i class="dot acc"></i><span>海克斯时刻 · AI 评级中…</span><i></i></div>
+        <div class="grade"><div class="badge gx"></div><div class="txt"><div class="nm">贪欲束缚</div><div class="rs">等待 AI 评级</div></div></div>
+        <div class="grade"><div class="badge gx"></div><div class="txt"><div class="nm">升级: 死亡之舞</div><div class="rs">等待 AI 评级</div></div><span class="pick">✓已选</span></div>
+        <div class="grade"><div class="badge gx"></div><div class="txt"><div class="nm">漏血</div><div class="rs">等待 AI 评级</div></div></div>
+        <div class="rule"><span>建议</span><i></i></div>
+        <div class="rail"><div>出装主线<br>① 星蚀 —— 契合 AD 主线</div></div>
+        <div class="rule"><span>海克斯台账</span><i></i></div>
+        <div class="body">1. 升级: 死亡之舞</div>
+        <div class="rule"><span>敌方威胁</span><i></i></div>
+        <div class="body">法伤×3 | 物伤×2 | 坦克×1 | 治疗·琴瑟仙女</div>
+        <div class="body" style="color:#D29922">替换预告: 已出破甲，可考虑补补伤害</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="row" style="margin-top:18px">
+  <!-- 态 3：评级已回 -->
+  <div>
+    <div class="lab">态 3 · 评级已回（S / A / B 逐行分色）</div>
+    <div class="scene bright">
+      <span class="fake" style="left:18px;top:16px">亮场景叠图 · 判断干扰</span>
+      <div class="bar" style="left:18px;top:40px;width:130px"></div>
+      <div class="ov">
+        <div class="hero">暗裔剑魔<small>· 对局中</small></div>
+        <div class="meta">加点 主Q副E</div>
+        <div class="rule"><i class="dot"></i><span>海克斯时刻 · 已识别</span><i></i></div>
+        <div class="grade"><div class="badge gs">S</div><div class="txt"><div class="nm s">贪欲束缚</div><div class="rs">契合出装主线</div></div></div>
+        <div class="grade"><div class="badge ga">A</div><div class="txt"><div class="nm a">升级: 死亡之舞</div><div class="rs">开级型: 效果取决于已购装备</div></div><span class="pick">✓</span></div>
+        <div class="grade"><div class="badge gb">B</div><div class="txt"><div class="nm b">漏血</div><div class="rs">泛用</div></div></div>
+        <div class="rule"><span>建议</span><i></i></div>
+        <div class="rail"><div>出装主线<br>① 星蚀 —— 契合 AD 主线</div></div>
+        <div class="rule"><span>海克斯台账</span><i></i></div>
+        <div class="body">1. 升级: 死亡之舞</div>
+        <div class="rule"><span>敌方威胁</span><i></i></div>
+        <div class="body">法伤×3 | 物伤×2 | 坦克×1 | 治疗·琴瑟仙女</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 改造前对照 -->
+  <div>
+    <div class="lab">改造前对照（同内容）</div>
+    <div class="scene dark" style="width:300px;height:480px">
+      <div class="ov-old" style="position:absolute;right:12px;top:16px;transform:none">
+        <div class="ttl">暗裔剑魔·对局中</div>
+        <div style="color:#8b949e">路线: -</div>
+        <div class="sep"></div>
+        <div style="color:#8b949e">加点: 主Q副E</div>
+        <div class="sep"></div>
+        <div class="sec">── 海克斯时刻 ──</div>
+        <div class="blk">① [S] 贪欲束缚 该英雄海克斯第1位<br>② [S] 升级: 死亡之舞 该英雄海克斯第2位<br>③ [S] 漏血 该英雄海克斯第3位</div>
+        <div class="sec">── 建议 ──</div>
+        <div>对局内自动触发</div>
+        <div class="sep"></div>
+        <div class="sec">── 海克斯台账 ──</div>
+        <div>-</div>
+        <div class="sep"></div>
+        <div class="sec">── 敌方威胁 ──</div>
+        <div style="color:#d29922">法伤×3 | 物伤×2 | 坦克×1 | 治疗·琴瑟仙女</div>
+        <div class="dead">死区 ≈ 130px（内容只有 ~430，却强撑 560）</div>
+      </div>
+    </div>
+    <p class="note">
+      左：改造前——三行 S/A/B 被第一张的绿色整块涂满、纯文本流无层级、底部 130px 死区。<br>
+      上：新版——徽章分色 + 左轨定优先级 + 贴内容高度，占屏面积约少 <b>25%</b>。
+    </p>
+  </div>
+</div>
+
+<!-- ══════════ §3 主窗口 ══════════ -->
+</section>
+<section id="s3">
+<h2>§3　主窗口（1:1，560px）</h2>
+<p class="lead">
+  修两个真问题：<b>① 卡内标题原来用页面底色画在卡片上</b>（形成深色矩形补丁，本稿已换成 surface 同色）；
+  <b>② wraplength 写死 + 底部状态行被截断</b>（本稿改为随宽度换行）。8 张卡片用「2px 左轨」而非颜色泛滥来分层。
+</p>
+<div class="win w560">
+  <div class="tbar">HexARAMHelper 海克斯大乱斗助手 <span class="dot3">— □ ✕</span></div>
+  <div class="body560">
+    <!-- 状态行 -->
+    <div class="stat">
+      <span class="pill live">对局中</span>
+      <span class="dimline">英雄: <b>暗裔剑魔</b></span>
+      <span style="flex:1"></span>
+      <span class="t-btn">开始标定</span><span class="t-btn">⚙ 设置</span>
+    </div>
+
+    <div class="dimline" style="font-size:9px;color:#64717F">手动设英雄(兜底): <span class="t-entry" style="vertical-align:-1px">&nbsp;</span> <span class="t-btn" style="vertical-align:-1px">设置</span></div>
+
+    <div class="teams">
+      <div class="team"><em>己方</em><span>暗裔剑魔 九尾妖狐 皎月女神 盲僧 女圣之子</span></div>
+      <div class="team"><em>敌方</em><span>黑暗之女 狂暴之心 迭迦之刃 诺克萨斯之手 琴瑟仙女</span></div>
+    </div>
+
+    <div class="card">
+      <div class="body">
+        <div class="ctitle"><span class="tick"></span><b>敌方威胁画像</b></div>
+        <div class="cbody">法伤×3 | 物伤×2 | 坦克×1 | 治疗·琴瑟仙女</div>
+      </div>
+    </div>
+
+    <div class="card accent">
+      <div class="body">
+        <div class="ctitle on"><span class="tick"></span><b>当前建议</b><i>主输出</i></div>
+        <div class="cbody">出装主线<br>① 星蚀 —— 契合 AD 主线<br>② 夜之锋刃</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="body">
+        <div class="ctitle"><span class="tick"></span><b>满装替换预告</b></div>
+        <div class="cbody mute">-（威胁与出装明显错配时提示）</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="body">
+        <div class="ctitle"><span class="tick"></span><b>军师提示（最近 3 条）</b></div>
+        <div class="cbody dim">10:04 敌方 3 坦克堆甲，先把破甲件提上日程<br>09:58 顺风，攒钱补第三件即可</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="body">
+        <div class="ctitle"><span class="tick"></span><b>成型度对比</b><i>传说件 x/6 · 装备估值</i></div>
+        <div class="bp">
+          <div class="bpc">
+            <div class="bprow"><span class="nm">暗裔剑魔</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="x">6/6</span><span class="g hot">10450G</span></div>
+            <div class="bprow"><span class="nm">九尾妖狐</span><span class="track"><span class="fill" style="width:83%"></span></span><span class="x">5/6</span><span class="g">8200G</span></div>
+            <div class="bprow"><span class="nm">皎月女神</span><span class="track"><span class="fill" style="width:50%"></span></span><span class="x">3/6</span><span class="g">5100G</span></div>
+          </div>
+          <div class="bpc">
+            <div class="bprow"><span class="nm">黑暗之女</span><span class="track"><span class="fill" style="width:100%"></span></span><span class="x">6/6</span><span class="g hot">11200G</span></div>
+            <div class="bprow"><span class="nm">狂暴之心</span><span class="track"><span class="fill" style="width:67%"></span></span><span class="x">4/6</span><span class="g">9100G</span></div>
+            <div class="bprow"><span class="nm">诺克萨斯之手</span><span class="track"><span class="fill" style="width:33%"></span></span><span class="x">2/6</span><span class="g">3400G</span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="body">
+        <div class="ctitle"><span class="tick"></span><b>海克斯台账</b><i>点名字撤销纠错</i></div>
+        <div class="led"><em><span class="ix">1.</span>升级: 死亡之舞</em><span class="mini">撤销</span></div>
+        <div class="led"><em><span class="ix">2.</span>贪欲束缚</em><span class="mini">撤销</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="body">
+        <div class="ctitle"><span class="tick"></span><b>海克斯时刻评级</b></div>
+        <div class="cbody dim">
+          <span class="badge gs" style="display:inline-block;vertical-align:-2px">S</span> 贪欲束缚
+          <span style="color:#64717F;font-size:9px">　契合出装主线</span><br>
+          <span class="badge ga" style="display:inline-block;vertical-align:-2px">A</span> 升级: 死亡之舞
+          <span style="color:#64717F;font-size:9px">　开级型</span><br>
+          <span class="badge gb" style="display:inline-block;vertical-align:-2px">B</span> 漏血
+          <span style="color:#64717F;font-size:9px">　泛用</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="foot">
+      <div>数据版本: <em>16.19.1</em> | 抓取日期: <em>2026-09-24</em>（1 天前）</div>
+      <div>AI: <em>ai</em> | 本局 3/∞ 次 | ¥0.0043 | 上下文 <em>OP.GG</em></div>
+    </div>
+
+    <div>
+      <div class="lab" style="margin-bottom:3px">日志</div>
+      <div class="log">
+        <div><b>[10:10:13]</b> [SESSION] session_reset</div>
+        <div><b>[10:10:13]</b> [OK] HexARAMHelper 启动 (决策引擎: ai)</div>
+        <div>[10:10:13] [OK] 数据就绪: 16.19.1 | builds: 16.19 | AI: 开</div>
+        <div>[10:10:16] [SESSION] hero_selected 暗裔剑魔</div>
+        <div><em>[10:10:18] [SESSION] in_progress</em></div>
+        <div class="sb"><i></i></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ §4 设置窗口 ══════════ -->
+</section>
+<section id="s4">
+<h2>§4　设置窗口（1:1，720px）</h2>
+<p class="lead">
+  LabelFrame 的标题压在边框上、背景不匹配（原 D1 同源问题）→ 换成统一卡片 + 标题轨；
+  字段区放进 inset 凹陷底，base_url / api_key 用等宽字体便于核对 key（掩码行为不变）。
+  <b>文案与线程逻辑一行未动</b>。
+</p>
+<div class="win w720">
+  <div class="tbar">设置 — HexARAMHelper <span class="dot3">— □ ✕</span></div>
+  <div class="body720">
+    <div class="sec-card">
+      <div class="hd"><span class="tick"></span><b>AI 总开关</b></div>
+      <div class="in"><span class="t-check on"></span><span style="font-size:10px">启用 AI（关闭 = 纯规则模式，无 Key 可用）</span></div>
+    </div>
+
+    <div class="sec-card">
+      <div class="hd"><span class="tick"></span><b>System 2 — ChampionContext 生成</b><i>每局 1 次</i></div>
+      <div class="in">
+        <div class="row0">
+          <span class="t-combo">qwen3.8-max</span>
+          <span class="note-s">降级模型:</span><span class="t-entry mono">qwen3.8-flash</span>
+          <span class="sp"></span><span class="result ok">✅ 0.42s (qwen3.8-max)</span>
+          <span class="t-btn">测试连接</span>
+        </div>
+        <div class="inbox">
+          <div class="grid">
+            <span class="fk">Base URL:</span><span class="t-entry mono" style="grid-column:span 3">https://dashscope.aliyuncs.com/compatible-mode/v1</span>
+            <span class="fk">API Key:</span><span class="t-entry mono">••••••••••••••••</span>
+            <span class="fk">Key 环境变量名:</span><span class="t-entry mono">DASHSCOPE_API_KEY</span>
+            <span class="fk">温度:</span><span class="t-entry">0.3</span>
+            <span class="fk">max_tokens:</span><span class="t-entry">2048</span>
+            <span class="fk">超时(秒):</span><span class="t-entry">40</span>
+            <span class="fk">输入价 ¥/M tok:</span><span class="t-entry">2.4</span>
+            <span class="fk">输出价 ¥/M tok:</span><span class="t-entry">9.6</span>
+            <span class="fk">思考强度:</span><span class="t-combo">关闭</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="sec-card" style="flex:1">
+        <div class="hd"><span class="tick"></span><b>全局守门</b></div>
+        <div class="in" style="display:flex;align-items:center;gap:6px">
+          <span class="note-s">每局 System1 上限(0=不限)</span><span class="t-entry" style="width:44px">0</span>
+        </div>
+      </div>
+      <div class="sec-card" style="flex:1">
+        <div class="hd"><span class="tick"></span><b>费用仪表</b></div>
+        <div class="in note-s" style="font-size:9.5px;color:#8B98A6">本局 3 次 / ¥0.0043　累计 ¥0.1284</div>
+      </div>
+    </div>
+
+    <div class="sec-card">
+      <div class="hd"><span class="tick"></span><b>局内触发器</b></div>
+      <div class="in">
+        <span class="t-check on"></span><span style="font-size:10px">死亡刷下一件</span>
+        <span class="t-check on"></span><span style="font-size:10px">快照 diff 重算</span>
+        <span class="t-check on"></span><span style="font-size:10px">敌方关键装提示</span>
+        <span class="t-check on"></span><span style="font-size:10px">敌方起飞提示</span>
+        <span class="note-s" style="margin-left:12px">KDA 阈值</span><span class="t-entry" style="width:40px">3.0</span>
+      </div>
+    </div>
+
+    <div class="sec-card">
+      <div class="hd"><span class="tick"></span><b>数据面板</b><i>新鲜度常显</i></div>
+      <div class="in note-s" style="font-size:9.5px;color:#8B98A6">DD 装备库 16.19.1　OP.GG builds 16.19（抓取 2026-09-24）<br>英雄先验 173　海克斯名单 229　语义标签 1834　装备 1520</div>
+    </div>
+
+    <div style="display:flex;align-items:center;gap:10px">
+      <span class="note-s">Key 仅存本地 settings.json（gitignore 排除）</span>
+      <span style="flex:1"></span>
+      <span class="t-btn primary">保存并生效</span>
+    </div>
+  </div>
+</div>
+
+<!-- ══════════ §5 控件 ══════════ -->
+</section>
+<section id="s5">
+<h2>§5　ttk 控件样式对照</h2>
+<p class="lead">现状：clam 默认 3D 外观——白边输入框、亮灰滚动条、灰按钮（见改造前截图）。本稿统一为发丝边 + 凹陷底。</p>
+<div class="row">
+  <div style="flex:1">
+    <div class="lab">改造后</div>
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px;background:#131A21;border:1px solid #1E2831">
+      <span class="t-entry">普通输入</span>
+      <span class="t-entry focus">聚焦</span>
+      <span class="t-entry mono">DASHSCOPE_API_KEY</span>
+      <span class="t-combo">qwen3.8-max</span>
+      <span class="t-check on"></span><span style="font-size:10px">启用</span>
+      <span class="t-check"></span><span style="font-size:10px">未选</span>
+      <span class="t-btn">次要按钮</span>
+      <span class="t-btn primary">主按钮</span>
+      <span class="t-btn hover">悬停</span>
+    </div>
+  </div>
+  <div style="flex:1">
+    <div class="lab">改造前（clam 默认）</div>
+    <div style="display:flex;gap:14px;align-items:center;flex-wrap:wrap;padding:10px;background:#131A21;border:1px solid #1E2831">
+      <span style="background:#0d1117;border:2px inset #d4d0c8;color:#e6edf3;font-size:10px;padding:2px 6px">白边输入框</span>
+      <span style="background:#d9d9d9;color:#111;font-size:10px;padding:3px 10px;border:1px solid #999">灰按钮</span>
+      <span style="display:inline-block;width:9px;background:#c0c0c0;height:22px"></span>
+      <span style="display:inline-block;width:12px;height:12px;background:#fff;border:1px solid #888"></span>
+    </div>
+  </div>
+</div>
+
+<p class="note" style="margin-top:26px;border-top:1px solid #171F27;padding-top:12px">
+  本稿是<b>视觉语言定稿稿</b>；Tk 真实渲染以改造后 <code>experiments/preview_overlay_status.py</code>
+  与 mock 局实况截图为准，逐项与本稿对齐（色值 / 字号 / 间距 / 徽章 / 左轨）。
+  本次改造不新增任何依赖，不碰 alpha 与穿透机制，不改信息架构与文案。
+</p>
+</section>
+
+</body>
+</html>

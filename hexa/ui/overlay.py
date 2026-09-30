@@ -1,8 +1,21 @@
 """游戏内常驻信息条（置顶 + 全鼠标穿透 + 紧凑尺寸）
 
 fork 参考项目 main.py OverlayApp 的穿透技术，信息架构按计划 §7：
-加点顺序（OP.GG 静态顺序）+ 当前建议 + 已选海克斯台账 +
-敌方威胁摘要；海克斯界面出现时顶部高亮三卡片档位（S/A/B）。
+加点顺序（OP.GG 静态顺序）+ 当前建议 + 已选海克斯台账 + 敌方威胁摘要；
+海克斯界面出现时顶部高亮三卡片档位（S/A/B）。
+
+2026-09-30 UI 重构（Quiet Dark v3）——**只换皮肤，骨架不动**：
+- 色值全部来自 `hexa.ui.theme`（本文件曾自带一套重复 hex，与 theme 分叉，已删）
+- 档位**逐行分色 + 15px 徽章**：旧版用 `ranks[0]` 的档位色给整个多行块上色，
+  S/A/B 三行被涂成同一色（实机截图已证实），档位信息视觉失效
+- 高度**贴内容**：旧版强撑 560px 下限，1440p 下底部约 130px 死区白占屏幕
+  （用户口径「画面优先」：少占屏，而不是把字调淡——alpha 维持 0.88 不动）
+- 去 emoji（brain/refresh/hourglass/warning）：彩色字形是干扰游戏元素的主源；
+  保留 ①②③ 卡序与 ✓✗ 识别标记（黑白几何字形，渲染稳定）
+- 删掉「路线: AD」整行：路线不是 ad/ap/坦克三键而是不同装备玩法，拿伤害
+  类型键当"路线"显示既没用又与系统自身的方案制矛盾；`current_path` 仍留在
+  引擎里用于选候选与复盘，只是不再显示
+- 信息条目、显示顺序、数据源与 `ui_state()` 消费方式一字未改
 
 紧凑化按 2560x1440 基准设计，按屏幕高度等比缩放（限制 0.7~1.3）。
 穿透为完整三标志：WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
@@ -13,6 +26,11 @@ GA_ROOT 顶层 HWND 设置（winfo_id 只是 Tk 内层窗口，realize 前的
 import ctypes
 import queue
 import tkinter as tk
+
+from hexa.ui.theme import (CIRCLED, GRADES, Metrics, PENDING_TEXT, PENDING_WAIT,
+                           PICKED_MARK, Palette, Type, grade_badge,
+                           left_rail_box, ov_font, retint_badge, rule_row,
+                           stage_color, strip_emoji)
 
 # ── Win32 扩展样式 ────────────────────────────────────────────
 GWL_EXSTYLE = -20
@@ -26,15 +44,22 @@ CLICK_THROUGH_MASK = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
 # ── 紧凑尺寸（2560x1440 基准，原 300 宽 / 760 高上限） ─────────
 DESIGN_H = 1440
 BASE_WIDTH = 236
-BASE_HEIGHT = 560
+BASE_HEIGHT = 560      # 量不到内容时的首帧兜底上限（不再是常态下限）
+FLOOR_HEIGHT = 150     # 贴内容下限 ≈ 4 行
+SHRINK_EPS = 16        # 收缩迟滞：涨立即，缩需 ≥16px（见 fit_height）
+SCREEN_MARGIN = 40
+BADGE_GAP = 5
 
-FG = "#e6edf3"
-BG = "#10151c"
-FG_DIM = "#8b949e"
-ACCENT = "#58a6ff"
-WARN = "#d29922"
-GOOD = "#3fb950"
-GRADE_COLOR = {"S": GOOD, "A": ACCENT, "B": FG, "C": WARN, "?": WARN}
+# 阶段后缀（沿用旧文案，仅从英雄行拆成独立标签便于分色）
+STAGE_SUFFIX = {
+    "idle": "", "champ_select": "·选人", "game_start": "·加载",
+    "in_game": "·对局中",
+}
+
+# 提示语（沿用旧文案，去掉 emoji）
+COACH_PREFIX = "军师"
+AI_BUSY_TEXT = "AI 生成中…"
+DETECT_TEXT = "识别中…（读取三张卡面）"
 
 
 def ui_scale(screen_h: int) -> float:
@@ -42,15 +67,34 @@ def ui_scale(screen_h: int) -> float:
     return max(0.7, min(1.3, screen_h / DESIGN_H))
 
 
+def fit_height(want: int, floor: int, screen_h: int, cur: int) -> int:
+    """贴内容 + 抖动抑制（纯函数，可离线断言）。
+
+    旧实现固定 `min(560*scale, 屏-40)`，军师/时刻块叠上后 1440p 最坏 ~604px
+    超窗，底部"替换预告/敌方威胁"被挤到不可见；且内容只有 ~430px 时底部
+    空出约 130px 死区。这里改为按内容所需高度取 min(max(内容, 下限), 屏-40)；
+    军师/识别块进出会让内容忽长忽短，无迟滞则窗口每 500ms 跳一下，故收缩侧
+    要求变化 ≥SHRINK_EPS 才生效（涨侧立即——内容多了要马上看得到）。
+    """
+    target = min(max(int(want), int(floor)), int(screen_h) - SCREEN_MARGIN)
+    if cur and target < cur and (cur - target) < SHRINK_EPS:
+        return cur
+    return target
+
+
 class Overlay:
     def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue, visible: bool = True):
         self.session = session
         self.ui_queue = ui_queue
         self._moment_shown = False
+        self._coach_shown = False
+        self._ai_shown = False
+        self._forecast_shown = False
         self.win = tk.Toplevel(root)
         self.win.withdraw()
         self._setup_window()
         self._build()
+        self._snap_to_content()
         if visible:
             self.win.deiconify()
             self.win.update_idletasks()   # 强制 realize，顶层 HWND 稳定后再设穿透
@@ -62,19 +106,20 @@ class Overlay:
 
     def _setup_window(self):
         scale = ui_scale(self.win.winfo_screenheight())
+        self.scale = scale
+        P = Palette
         self.w = max(160, round(BASE_WIDTH * scale))
         self.pad_x = max(6, round(8 * scale))
         self.pad_y = max(1, round(2 * scale))
-        self.f_hero = max(9, round(11 * scale))   # 原 13 bold
-        self.f_body = max(8, round(9 * scale))    # 原 10
-        self.f_small = max(7, round(8 * scale))   # 原 9
         self.wrap = self.w - 2 * self.pad_x
+        self.wrap_badge = self.wrap - (Metrics["badge"] + BADGE_GAP)
 
         self.win.title("HexaOverlay")
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.config(bg=BG)
-        # 半透明卡片感：整体 alpha 0.88
+        self.win.config(bg=P["bg"])
+        # 半透明卡片感：整体 alpha 0.88（用户口径「画面优先」——少占屏靠
+        # 贴内容而非降 alpha，降 alpha 只会牺牲正文可读性）
         try:
             self.win.attributes("-alpha", 0.88)
         except Exception:
@@ -83,8 +128,9 @@ class Overlay:
         self.win.update_idletasks()
         screen_w = self.win.winfo_screenwidth()
         screen_h = self.win.winfo_screenheight()
-        h = min(round(BASE_HEIGHT * scale), screen_h - 40)
-        self._default_h = h        # 内容不足时的高度下限（原固定默认值）
+        h = min(round(BASE_HEIGHT * scale), screen_h - SCREEN_MARGIN)
+        self._floor_h = max(60, min(round(FLOOR_HEIGHT * scale),
+                                    screen_h - SCREEN_MARGIN))
         self._screen_h = screen_h
         self._x = screen_w - self.w - 12
         self._h = h
@@ -116,144 +162,210 @@ class Overlay:
             print(f"[WARN] overlay 穿透设置失败: {e}")
             return False
 
+    # ── 构建（控件一次性建好，500ms 轮询只 config 不重建） ──────────
+
     def _build(self):
+        P = Palette
+        s = self.scale
         pad = {"padx": self.pad_x, "pady": self.pad_y, "anchor": "w"}
-        wrap = self.wrap
-        self.lbl_hero = tk.Label(self.win, text="待机中…",
-                                 font=("Microsoft YaHei", self.f_hero, "bold"),
-                                 bg=BG, fg=ACCENT)
-        self.lbl_hero.pack(**pad)
-        # 军师提示（v4.5）：顶部显著位置（英雄行正下方），最新一条
-        self.lbl_coach = tk.Label(self.win, text="",
-                                  font=("Microsoft YaHei", self.f_body, "bold"),
-                                  bg=BG, fg=GOOD, justify=tk.LEFT,
-                                  wraplength=wrap)
-        self._coach_shown = False   # 未 pack；显示时插到路线行之前（置顶区）
-        self.lbl_path = tk.Label(self.win, text="", font=("Microsoft YaHei", self.f_body),
-                                 bg=BG, fg=FG_DIM)
-        self.lbl_path.pack(**pad)
-        self.sep(6)
 
+        # ① 英雄行：名字（主文本）+ 阶段后缀（三级文本），不再整行强调蓝
+        hero = tk.Frame(self.win, bg=P["bg"])
+        hero.pack(**pad)
+        self.lbl_hero = tk.Label(hero, text="待机中…", font=ov_font("ov_hero", True, s),
+                                 bg=P["bg"], fg=P["accent"])
+        self.lbl_hero.pack(side=tk.LEFT)
+        self.lbl_stage = tk.Label(hero, text="", font=ov_font("ov_body", False, s),
+                                  bg=P["bg"], fg=P["text_mute"])
+        self.lbl_stage.pack(side=tk.LEFT, padx=(4, 0))
+
+        # ② 军师（条件）：三级前缀 + 正文；显示时插在英雄行与加点行之间
+        coach = tk.Frame(self.win, bg=P["bg"])
+        tk.Label(coach, text=COACH_PREFIX, font=ov_font("ov_meta", False, s),
+                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
+        self.lbl_coach = tk.Label(coach, text="", font=ov_font("ov_body", False, s),
+                                  bg=P["bg"], fg=P["text"], justify=tk.LEFT,
+                                  wraplength=self.wrap)
+        self.lbl_coach.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+        self._coach = coach
+
+        # ③ 加点顺序
         self.lbl_skill = tk.Label(self.win, text="加点: -",
-                                  font=("Microsoft YaHei", self.f_body),
-                                  bg=BG, fg=FG_DIM, justify=tk.LEFT, wraplength=wrap)
+                                  font=ov_font("ov_meta", False, s),
+                                  bg=P["bg"], fg=P["text_mute"], justify=tk.LEFT,
+                                  wraplength=self.wrap)
         self.lbl_skill.pack(**pad)
-        self.sep(8)
 
-        # 海克斯时刻（界面出现时高亮三卡片档位 + 识别状态标识）
-        self.lbl_moment = tk.Label(self.win, text="",
-                                   font=("Microsoft YaHei", self.f_body, "bold"),
-                                   bg=BG, fg=ACCENT, justify=tk.LEFT,
-                                   wraplength=wrap)
-        # 锚点：建议标题（moment / AI 状态显示时插在它之前）
-        self._moment_anchor = tk.Label(self.win, text="── 建议 ──",
-                                       font=("Microsoft YaHei", self.f_small),
-                                       bg=BG, fg=FG_DIM)
-        self._moment_anchor.pack(**pad)
-        # AI 生成中标识（模型在途时显示，完成即消失）
-        self.lbl_ai = tk.Label(self.win, text="⟳ AI 生成中…",
-                               font=("Microsoft YaHei", self.f_small),
-                               bg=BG, fg=WARN)
+        # ④ 中段容器：海克斯时刻 + AI 在途标识（固定容器 → 两者相对顺序不翻面）
+        self._mid = tk.Frame(self.win, bg=P["bg"])
+        self._mid.pack(**pad)
+        self._mid.grid_columnconfigure(0, weight=1)
+
+        # 海克斯时刻：状态点 + 标题 + 提示 + 三行档位（徽章/卡名/理由）
+        moment = tk.Frame(self._mid, bg=P["bg"])
+        moment.grid(row=0, column=0, sticky="ew")
+        self._moment = moment
+        self._moment_title = rule_row(moment, "海克斯时刻", bg=P["bg"],
+                                      size=Type["ov_meta"], dot=P["warning"])
+        self._moment_title.grid(row=0, column=0, sticky="ew")
+        self._moment_body = tk.Label(moment, text="", font=ov_font("ov_body", False, s),
+                                     bg=P["bg"], fg=P["text_dim"], justify=tk.LEFT,
+                                     wraplength=self.wrap)
+        self._moment_body.grid(row=1, column=0, sticky="ew", pady=(2, 0))
+        self._grade_rows = []
+        for i in range(3):
+            row = tk.Frame(moment, bg=P["bg"])
+            badge = grade_badge(row, "")
+            badge.pack(side=tk.LEFT, pady=(2, 0))
+            col = tk.Frame(row, bg=P["bg"])
+            col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(BADGE_GAP, 0))
+            top = tk.Frame(col, bg=P["bg"])
+            top.pack(anchor=tk.W, fill=tk.X)
+            num = tk.Label(top, text="", font=ov_font("ov_body", True, s),
+                           bg=P["bg"], fg=P["text_mute"])
+            num.pack(side=tk.LEFT, padx=(0, 3))
+            name = tk.Label(top, text="", font=ov_font("ov_body", True, s),
+                            bg=P["bg"], fg=P["text"], justify=tk.LEFT,
+                            wraplength=self.wrap_badge)
+            name.pack(side=tk.LEFT, fill=tk.X, expand=True)
+            pick = tk.Label(top, text="", font=ov_font("ov_meta", False, s),
+                            bg=P["bg"], fg=P["success"])
+            pick.pack(side=tk.RIGHT, padx=(4, 0))
+            reason = tk.Label(col, text="", font=ov_font("ov_meta", False, s),
+                              bg=P["bg"], fg=P["text_mute"], justify=tk.LEFT,
+                              wraplength=self.wrap_badge)
+            reason.pack(anchor=tk.W, fill=tk.X)
+            row.grid(row=2 + i, column=0, sticky="ew", pady=(3, 0))
+            row.grid_remove()
+            self._grade_rows.append({"row": row, "badge": badge, "num": num,
+                                     "name": name, "pick": pick, "reason": reason})
+        self._moment_shown = False
+
+        # AI 在途标识（模型在途时显示，完成即消失）
+        ai = tk.Frame(self._mid, bg=P["bg"])
+        ai.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+        tk.Frame(ai, width=5, height=5, bg=P["warning"]).pack(
+            side=tk.LEFT, padx=(0, 6), pady=4)
+        tk.Label(ai, text=AI_BUSY_TEXT, font=ov_font("ov_meta", False, s),
+                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
+        self._ai = ai
+        self._ai.grid_remove()
         self._ai_shown = False
-        self.lbl_moment.pack(**pad)
-        self.lbl_moment.pack_forget()  # 默认隐藏，海克斯界面出现时显示
-        self.lbl_suggest = tk.Label(self.win, text="对局内自动触发",
-                                    font=("Microsoft YaHei", self.f_body),
-                                    bg=BG, fg=FG, justify=tk.LEFT, wraplength=wrap)
-        self.lbl_suggest.pack(**pad)
-        self.sep(8)
 
-        tk.Label(self.win, text="── 海克斯台账 ──",
-                 font=("Microsoft YaHei", self.f_small),
-                 bg=BG, fg=FG_DIM).pack(**pad)
-        self.lbl_augments = tk.Label(self.win, text="-",
-                                     font=("Microsoft YaHei", self.f_body),
-                                     bg=BG, fg=FG, justify=tk.LEFT, wraplength=wrap)
-        self.lbl_augments.pack(**pad)
-        self.sep(8)
+        # ⑤ 建议：2px 左轨（普通强调色 / 满装替换琥珀色），正文恒为主文本
+        self._suggest = tk.Frame(self.win, bg=P["bg"])
+        self._suggest.pack(**pad)
+        rule_row(self._suggest, "建议", bg=P["bg"]).grid(
+            row=0, column=0, sticky="ew")
+        self._sug_outer, self._sug_box = left_rail_box(self._suggest, P["accent"])
+        self._sug_outer.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+        self.lbl_suggest = tk.Label(self._sug_box, text="对局内自动触发",
+                                    font=ov_font("ov_body", False, s),
+                                    bg=P["surface_inset"], fg=P["text"],
+                                    justify=tk.LEFT, wraplength=self.wrap - 18)
+        self.lbl_suggest.pack(anchor=tk.W)
 
-        tk.Label(self.win, text="── 敌方威胁 ──",
-                 font=("Microsoft YaHei", self.f_small),
-                 bg=BG, fg=FG_DIM).pack(**pad)
-        self.lbl_threat = tk.Label(self.win, text="-",
-                                   font=("Microsoft YaHei", self.f_body),
-                                   bg=BG, fg=WARN, justify=tk.LEFT, wraplength=wrap)
-        self.lbl_threat.pack(**pad)
-        # 满装替换预告（威胁 vs 已有装备错配时显示；提示级，不改主建议）
-        self.lbl_forecast = tk.Label(self.win, text="",
-                                     font=("Microsoft YaHei", self.f_small),
-                                     bg=BG, fg=WARN, justify=tk.LEFT,
-                                     wraplength=wrap)
+        # ⑥ 海克斯台账
+        ledger = tk.Frame(self.win, bg=P["bg"])
+        ledger.pack(**pad)
+        rule_row(ledger, "海克斯台账", bg=P["bg"]).grid(
+            row=0, column=0, sticky="ew")
+        self.lbl_augments = tk.Label(ledger, text="-", font=ov_font("ov_body", False, s),
+                                     bg=P["bg"], fg=P["text_dim"], justify=tk.LEFT,
+                                     wraplength=self.wrap)
+        self.lbl_augments.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+
+        # ⑦ 敌方威胁（标题保持中性，语义色留给档位与真正的告警行）
+        threat = tk.Frame(self.win, bg=P["bg"])
+        threat.pack(**pad)
+        rule_row(threat, "敌方威胁", bg=P["bg"]).grid(
+            row=0, column=0, sticky="ew")
+        self.lbl_threat = tk.Label(threat, text="-", font=ov_font("ov_body", False, s),
+                                   bg=P["bg"], fg=P["text_dim"], justify=tk.LEFT,
+                                   wraplength=self.wrap)
+        self.lbl_threat.grid(row=1, column=0, sticky="ew", pady=(3, 0))
+
+        # ⑧ 满装替换预告（告警级，条件显示在末尾）
+        self.lbl_forecast = tk.Label(self.win, text="", font=ov_font("ov_meta", False, s),
+                                     bg=P["bg"], fg=P["warning"], justify=tk.LEFT,
+                                     wraplength=self.wrap)
         self._forecast_shown = False
-
-    def sep(self, pady):
-        tk.Frame(self.win, height=1, bg="#21262d").pack(fill=tk.X,
-                                                        padx=self.pad_x, pady=pady)
 
     # ── 刷新（UI 线程 after 轮询 session 快照） ────────────────────
 
     def _refresh(self):
+        P = Palette
         state = self.session.ui_state()
-        hero = state["my_hero"] or "待机中…"
-        stage = {"idle": "", "champ_select": "·选人", "game_start": "·加载",
-                 "in_game": "·对局中"}.get(state["stage"], "")
-        self.lbl_hero.config(text=hero + stage)
+        stage = state["stage"]
+        hero = state["my_hero"]
+        if hero:
+            self.lbl_hero.config(text=hero, fg=P["text"])
+            self.lbl_stage.config(text=STAGE_SUFFIX.get(stage, ""),
+                                  fg=stage_color(stage))
+        else:
+            self.lbl_hero.config(text="待机中…", fg=P["accent"])
+            self.lbl_stage.config(text=STAGE_SUFFIX.get(stage, ""),
+                                  fg=stage_color(stage))
         self._render_coach(state.get("coach_latest") or "")
-        path = state["current_path"].upper()
-        if state["path_drift"]:
-            path += "（装备偏离已重定）" if path else ""
-        self.lbl_path.config(text=f"路线: {path or '-'}")
-        skill = state.get("skill_order") or "-"
-        self.lbl_skill.config(text=f"加点: {skill}")
-        augs = state["augments"]
+        self.lbl_skill.config(text=f"加点: {state.get('skill_order') or '-'}")
         self.lbl_augments.config(
-            text="\n".join(f"{i+1}. {a}" for i, a in enumerate(augs)) or "-")
-        self.lbl_threat.config(text=state["threat"] or "-")
-        self.lbl_suggest.config(text=state["suggestion"] or "对局内自动触发")
-        # 满六神装替换建议视觉区分：琥珀色（普通"下一件"为常规前景色）
-        self.lbl_suggest.config(
-            fg=WARN if state.get("suggestion_kind") == "swap_items" else FG)
+            text="\n".join(f"{i + 1}. {a}" for i, a in enumerate(state["augments"])) or "-")
+        self.lbl_threat.config(text=strip_emoji(state["threat"]) or "-")
+        # 满六神装替换建议：左轨转琥珀（正文恒为主文本，多行琥珀字可读性差）
+        swap = state.get("suggestion_kind") == "swap_items"
+        self._sug_outer.configure(bg=P["warning"] if swap else P["accent"])
+        self.lbl_suggest.config(text=strip_emoji(state["suggestion"]) or "对局内自动触发")
         self._render_forecast(state.get("swap_forecast") or "")
         self._render_ai_busy(state.get("engine") or {})
         self._render_moment(state)
         self._fit_height()
         self.win.after(500, self._refresh)
 
+    def _snap_to_content(self):
+        """首帧贴内容：build 完直接量所需高度，避免先撑 560 再收缩的跳变。"""
+        try:
+            self.win.update_idletasks()
+            want = self.win.winfo_reqheight()
+        except Exception:
+            return
+        h = fit_height(want, self._floor_h, self._screen_h, 0)
+        if h > 0 and h != self._h:
+            self._h = h
+            y = max(0, (self._screen_h - h) // 2)
+            self.win.geometry(f"{self.w}x{h}+{self._x}+{y}")
+
     def _fit_height(self):
-        """按内容动态调窗高。原固定 min(560*scale, 屏-40) 不随内容伸缩，
-        军师/替换预告叠上时刻块+4 行 swap 建议后 1440p 最坏 ~604px 超窗，
-        底部"替换预告/敌方威胁"面板被 pack 挤到不可见（winfo_ismapped=False）。
-        取内容所需高度与默认值较大者再夹到屏幕内：内容不足不小于原默认，
-        高度无变化不重设 geometry（防 500ms 轮询抖动）。"""
+        """按内容动态调窗高（纯函数 fit_height：贴内容 + 收缩迟滞）"""
         try:
             self.win.update_idletasks()   # 刷新 label 文本/显隐后再量所需高度
             want = self.win.winfo_reqheight()
         except Exception:
             return
-        h = min(max(want, self._default_h), self._screen_h - 40)
+        h = fit_height(want, self._floor_h, self._screen_h, self._h)
         if h > 0 and h != self._h:
             self._h = h
             y = max(0, (self._screen_h - h) // 2)
             self.win.geometry(f"{self.w}x{h}+{self._x}+{y}")
 
     def _render_coach(self, text: str):
-        """军师提示行：最新一条显示在顶部（英雄行下、路线行上），空则收起"""
+        """军师提示行：最新一条显示在顶部（英雄行下、加点行上），空则收起"""
+        text = strip_emoji(text)
         if text:
-            self.lbl_coach.config(text="🧠 军师：" + text)
+            self.lbl_coach.config(text=text)
             if not self._coach_shown:
                 # before= 固定插入位置：重新 pack 不会跑到内容区末尾
-                self.lbl_coach.pack(before=self.lbl_path,
-                                    padx=self.pad_x, pady=self.pad_y,
-                                    anchor="w")
+                self._coach.pack(before=self.lbl_skill,
+                                 padx=self.pad_x, pady=self.pad_y, anchor="w")
                 self._coach_shown = True
         elif self._coach_shown:
-            self.lbl_coach.pack_forget()
+            self._coach.pack_forget()
             self._coach_shown = False
 
     def _render_forecast(self, text: str):
         """替换预告行：有错配提示时显示在威胁块下方，无则收起"""
+        text = strip_emoji(text)
         if text:
-            self.lbl_forecast.config(text="⚠ 替换预告: " + text)
+            self.lbl_forecast.config(text="替换预告: " + text)
             if not self._forecast_shown:
                 self.lbl_forecast.pack(padx=self.pad_x, pady=self.pad_y,
                                        anchor="w")
@@ -267,77 +379,95 @@ class Overlay:
         busy = int(engine_stats.get("inflight") or 0) > 0 or \
             engine_stats.get("ctx_source") == "生成中"
         if busy and not self._ai_shown:
-            self.lbl_ai.pack(before=self._moment_anchor,
-                             padx=self.pad_x, pady=self.pad_y, anchor="w")
+            self._ai.grid()
             self._ai_shown = True
         elif not busy and self._ai_shown:
-            self.lbl_ai.pack_forget()
+            self._ai.grid_remove()
             self._ai_shown = False
 
     def _render_moment(self, state):
-        """海克斯时刻：识别状态标识 + 三卡片档位（S 绿 / A 蓝 / B 白 / C 黄）
+        """海克斯时刻：状态点 + 三行档位徽章（逐行分色）
 
         状态流转（多局零识别成功曾无从判断，全程可见）：
-        界面在屏未识别 → "⏳ 识别中…"；识别成功 → 标题 ✓、三卡上屏
-        （AI 精修在途时只显卡名 + "⏳ AI 评级中…"，评级返回后放档位，
+        界面在屏未识别 → "识别中…"；识别成功 → 标题 ✓、三卡上屏
+        （AI 精修在途时只显卡名 + "AI 评级中…"，档位等精修回调后再放，
         2026-09-30：此前规则基准档顶着评级直接上屏，用户易当成 AI 结论）；
         点选卡按卡名标 ✓已选（AI 精修可能重排三卡，按下标会标错行）；
         reroll/新轮识别复位 → 上一轮旧评级直接丢弃并回"识别中"；
         界面关闭 → 保留上轮 成功✓/失败✗ 一行。
+
+        2026-09-30：旧版把整个多行块涂成 `ranks[0]` 的档位色 → S/A/B 三行同色，
+        档位信息在游戏里等于失效；现改为逐行按自身档位着色 + 15px 徽章。
         """
         ranks = state.get("card_ranks") or []
         pending = bool(state.get("card_ranks_pending"))
-        active = state.get("hex_active", False)
-        last = state.get("hex_last", "")
+        active = bool(state.get("hex_active", False))
+        last = state.get("hex_last", "") or ""
         picked = state.get("hex_picked")
         if active and not state.get("hex_recognized"):
             # reroll/新轮已把识别复位但 card_ranks 未清（game_state 保留旧值），
             # 此时在屏的评级必是上一轮旧卡名，直接丢弃防错位显示
             ranks = []
         if not ranks and not active and not last:
-            if self.lbl_moment.winfo_ismapped() or self._moment_shown:
-                self.lbl_moment.pack_forget()
-                self._moment_shown = False
+            self._hide_moment()
             return
+        picked_name = picked[1] if picked and len(picked) > 1 else ""
+        P = Palette
         if ranks:
+            recognized = bool(state.get("hex_recognized"))
             if pending:
-                # AI 评级在途：只上卡名（玩家此刻可以先认卡/选卡），
-                # 档位等精修回调后再放——等待态由 game_state 复位兜底
-                lines = ["── 海克斯时刻 ✓已识别 ──"]
-                picked_name = picked[1] if picked and len(picked) > 1 else ""
-                for i, r in enumerate(ranks[:3], 1):
-                    mark = (" ✓已选"
-                            if picked_name and r.get("name") == picked_name
-                            else "")
-                    lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}"
-                                 f"  ⏳ AI 评级中…{mark}")
-                text = "\n".join(lines)
-                fg = ACCENT
+                self._show_moment("海克斯时刻 ✓已识别", P["accent"], PENDING_TEXT)
             else:
-                lines = ["── 海克斯时刻 ✓已识别 ──"
-                         if state.get("hex_recognized") else "── 海克斯时刻 ──"]
-                # "✓已选"按稳定身份（卡名）匹配：hex_picked=(idx, name) 的 name
-                # 与评级条目 name 同源于检测卡名，模型重排后仍能标对行
-                picked_name = picked[1] if picked and len(picked) > 1 else ""
-                for i, r in enumerate(ranks[:3], 1):
-                    mark = (" ✓已选"
-                            if picked_name and r.get("name") == picked_name else "")
-                    lines.append(f"{'①②③'[i-1]} [{r.get('grade', '?')}] "
-                                 f"{r.get('name', '?')}  {r.get('reason', '')}{mark}")
-                text = "\n".join(lines)
-                fg = GRADE_COLOR.get(ranks[0].get("grade", "?"), ACCENT)
+                self._show_moment(
+                    "海克斯时刻 ✓已识别" if recognized else "海克斯时刻",
+                    P["success"] if recognized else P["warning"], "")
+            for i in range(3):
+                self._render_grade_row(i, ranks[i] if i < len(ranks) else None,
+                                       pending, picked_name)
         elif active:
-            text = "── 海克斯时刻 ──\n⏳ 识别中…（读取三张卡面）"
-            fg = ACCENT
+            self._show_moment("海克斯时刻", P["warning"], DETECT_TEXT)
+            self._clear_grade_rows()
         else:
-            text = f"海克斯 {last}"
-            fg = GOOD if "✓" in last else WARN
-        self.lbl_moment.config(text=text, fg=fg)
+            self._show_moment("海克斯时刻",
+                              P["success"] if "✓" in last else P["warning"],
+                              strip_emoji(last))
+            self._clear_grade_rows()
+
+    def _show_moment(self, title, dot, body):
+        self._moment_title.rule_label.config(text=title)
+        if self._moment_title.rule_dot is not None:
+            self._moment_title.rule_dot.config(bg=dot)
+        self._moment_body.config(text=body)
         if not self._moment_shown:
-            # 插到加点行之后（pack 顺序：before=建议标题）
-            self.lbl_moment.pack(before=self._moment_anchor,
-                                 padx=self.pad_x, pady=self.pad_y, anchor="w")
+            self._moment.grid()
             self._moment_shown = True
+
+    def _hide_moment(self):
+        if self._moment_shown:
+            self._moment.grid_remove()
+            self._moment_shown = False
+
+    def _clear_grade_rows(self):
+        for w in self._grade_rows:
+            w["row"].grid_remove()
+
+    def _render_grade_row(self, index, entry, pending, picked_name):
+        w = self._grade_rows[index]
+        if entry is None:
+            w["row"].grid_remove()
+            return
+        grade = "" if pending else (entry.get("grade") or "?")
+        retint_badge(w["badge"], grade)
+        w["num"].config(text=CIRCLED[index])
+        w["name"].config(text=strip_emoji(entry.get("name", "?")),
+                         fg=GRADES.get(grade) or Palette["text"])
+        w["reason"].config(text=PENDING_WAIT if pending
+                           else strip_emoji(entry.get("reason", "") or ""))
+        # "✓已选"按稳定身份（卡名）匹配：hex_picked=(idx, name) 的 name
+        # 与评级条目 name 同源于检测卡名，模型重排后仍能标对行
+        w["pick"].config(text=PICKED_MARK
+                         if picked_name and entry.get("name") == picked_name else "")
+        w["row"].grid()
 
     # ── 显隐控制（计划：仅留一个可选 overlay 显隐键） ───────────────
 

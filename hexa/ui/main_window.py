@@ -2,17 +2,38 @@
 
 线程模型：后台线程（PhaseMachine/LivePoller/检测器）→ ui_queue → after 轮询。
 ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度的统一出口）。
+
+2026-09-30 UI 重构（Quiet Dark v3）——**只换皮肤，骨架不动**：
+- 卡片统一发丝边 + 标题轨（`theme.card_frame`）。旧版卡内标题用页面底色
+  `#0d1117` 画在 `#161b22` 卡片上，实机截图里是一块块深色矩形补丁 → 补
+  `Card.TLabel` / `CardDim.TLabel` 卡内专用样式
+- 8 张卡片用「2px 左轨」分层而非颜色泛滥：只有"当前建议"（主输出）挂
+  强调色左轨，其余保持中性
+- `wraplength` 由写死 500/250 改为跟随窗口宽（旧值在缩放后换行错乱，底部
+  状态行被截断成「上下文 O」）
+- ttk 控件补全样式（Entry/Combobox/Checkbutton/Scrollbar/Progressbar 原为
+  clam 默认外观：白边输入框、亮灰滚动条、灰按钮），配置上收 theme.py
+- 删掉「路线: AD」（与 overlay 一致：路线不是 ad/ap/坦克三键而是不同装备
+  玩法，具名方案未进 UI，这行既没用又与系统自身的方案制矛盾）
+- 去 emoji，逻辑层文案里的彩色 emoji 在渲染边界统一剥离（`strip_emoji`）
+- 卡片/段落顺序、轮询频率、`ui_state()` 消费方式一字未改
 """
 import queue
 import time
 import tkinter as tk
-from tkinter import ttk, scrolledtext
+from tkinter import ttk
 
-from hexa.ui.theme import Theme
+from hexa.ui.theme import (GRADES, Metrics, PENDING_WAIT, Palette, Theme, Type,
+                           card_frame, grade_badge, retint_badge,
+                           stage_color, strip_emoji, version_label)
 
 STAGE_CN = {
     "idle": "待机", "champ_select": "选人中", "game_start": "加载中", "in_game": "对局中",
 }
+
+# 窗口几何：默认高度按内容请求校准，下限 1150（原 760 装得下满载内容）；
+# 再夹到屏幕内，1080p 机器不至于开出超屏窗口。
+MIN_H = 1150
 
 
 class MainWindow:
@@ -29,6 +50,7 @@ class MainWindow:
         self._bp_cache = None          # 成型度面板去重重建（同台账惯例）
         self._last_poll_err = None     # 轮询异常签名（限频去重，防 500ms 刷屏）
         self._last_poll_err_ts = 0.0
+        self._wraps = []               # 需随窗口宽度重排的标签（wraplength）
         self._build()
         self.root.after(100, self._poll_ui)
         self.root.after(200, self._poll_log)
@@ -36,107 +58,183 @@ class MainWindow:
     # ── 构建 ──────────────────────────────────────────────────────
 
     def _build(self):
-        self.root.title("HexARAMHelper 海克斯大乱斗助手")
+        P = Palette
+        ver = version_label()
+        self.root.title(f"HexARAMHelper 海克斯大乱斗助手 {ver}")
         # 默认高度兜底 1150：成型度/预告/军师面板就位后满载内容实测约 1121px，
         # 旧值 760 只装得下空面板，日志会被 expand 挤到 1px（构建完按请求高度再校准）
-        self.root.geometry("560x1150")
         self.root.minsize(480, 560)
         Theme.style_root(self.root)
-        # 成型度进度条配色（就地配置：theme.py 属公共层，随面板扩展再上收）
-        ttk.Style(self.root).configure(
-            "BP.Horizontal.TProgressbar", background=Theme.SUCCESS,
-            troughcolor=Theme.BG, bordercolor=Theme.BORDER,
-            lightcolor=Theme.SUCCESS, darkcolor=Theme.SUCCESS)
 
         main = ttk.Frame(self.root)
         main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main.bind("<Configure>", self._on_resize)
 
-        # 日志（排障唯一出口）：side=BOTTOM 最先入包 → pack 先到先得，空间分配
-        # 优先级最高；窗口高度不足时宁可裁剪上方卡片，日志也保有 8 行请求高度
-        logcard = ttk.Frame(main)
-        logcard.pack(side=tk.BOTTOM, fill=tk.BOTH, expand=True, pady=(8, 0))
-        ttk.Label(logcard, text="日志", style="Dim.TLabel").pack(anchor=tk.NW)
-        self.txt_log = scrolledtext.ScrolledText(
-            logcard, height=8, bg=Theme.BG_CARD, fg=Theme.TEXT_DIM,
-            font=Theme.FONT_MONO, relief=tk.FLAT, state=tk.DISABLED, wrap=tk.WORD)
-        self.txt_log.pack(fill=tk.BOTH, expand=True)
+        # 日志：自建 Text + ttk 滚动条，不用 scrolledtext.ScrolledText。
+        # 原因（本 Python 3.12 的 ScrolledText 是 **Text 子类**：Text 挂在内层
+        # frame 上却没被 pack，frame 保持 Tk 默认浅底 → 日志区右侧/下方露白，
+        # 实机出图才看出来（2026-09-30）；且它的滚动条是经典 tk.Scrollbar，
+        # 吃不到 theme 注册的深色 TScrollbar（旧版那个亮灰滚动条就是这么来的）。
+        logcard = card_frame(main, title="日志",
+                             pack=dict(side=tk.BOTTOM, fill=tk.BOTH,
+                                       expand=True, pady=(8, 0)))
+        log_body = tk.Frame(logcard, bg=P["surface_inset"])
+        log_body.pack(fill=tk.BOTH, expand=True)
+        self.txt_log = tk.Text(
+            log_body, height=8, bg=P["surface_inset"], fg=P["text_dim"],
+            font=Theme.FONT_MONO, relief=tk.FLAT, highlightthickness=0, bd=0,
+            insertbackground=P["accent"], state=tk.DISABLED, wrap=tk.WORD,
+            padx=7, pady=5)
+        self.txt_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_bar = ttk.Scrollbar(log_body, orient=tk.VERTICAL,
+                                command=self.txt_log.yview)
+        log_bar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.txt_log.config(yscrollcommand=log_bar.set)
 
-        # 状态行
-        status = ttk.Frame(main)
-        status.pack(fill=tk.X)
-        self.lbl_stage = ttk.Label(status, text="阶段: 待机", style="Accent.TLabel",
-                                   font=Theme.FONT_BOLD)
+        # 状态行：阶段色片 + 英雄（路线已删，见模块 docstring）
+        status = tk.Frame(main, bg=P["bg"])
+        status.pack(fill=tk.X, pady=(0, 6))
+        self.lbl_stage = tk.Label(status, text="待机", font=Theme.FONT_BOLD,
+                                  bg=P["surface_inset"], fg=P["text_mute"],
+                                  padx=7, pady=2)
         self.lbl_stage.pack(side=tk.LEFT)
-        self.lbl_hero = ttk.Label(status, text="英雄: -")
-        self.lbl_hero.pack(side=tk.LEFT, padx=(16, 0))
-        self.lbl_path = ttk.Label(status, text="路线: -")
-        self.lbl_path.pack(side=tk.LEFT, padx=(16, 0))
+        self.lbl_hero = tk.Label(status, text="英雄: -", font=Theme.FONT,
+                                 bg=P["bg"], fg=P["text_dim"])
+        self.lbl_hero.pack(side=tk.LEFT, padx=(10, 0))
+        # 版本角标：先 pack(RIGHT) 才会落在最右，按钮随后 pack(RIGHT) 排它左侧
+        tk.Label(status, text=ver, font=(Theme.FAMILY, Type["small"]),
+                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.RIGHT)
         if self.on_open_settings:
             ttk.Button(status, text="⚙ 设置", command=self.on_open_settings
                        ).pack(side=tk.RIGHT)
         if self.on_calibrate:
             ttk.Button(status, text="开始标定", command=self.on_calibrate
                        ).pack(side=tk.RIGHT, padx=(0, 8))
+        tk.Frame(main, height=1, bg=P["line"]).pack(fill=tk.X)
 
-        # 手动输英雄兜底行
-        manual = ttk.Frame(main)
+        # 手动输英雄兜底行（视觉降权：三级文本 + 小字）
+        manual = tk.Frame(main, bg=P["bg"])
         manual.pack(fill=tk.X, pady=(6, 0))
-        ttk.Label(manual, text="手动设英雄(兜底):", style="Dim.TLabel").pack(side=tk.LEFT)
+        tk.Label(manual, text="手动设英雄(兜底):", font=(Theme.FAMILY, Type["small"]),
+                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
         self.ent_hero = ttk.Entry(manual, width=16)
         self.ent_hero.pack(side=tk.LEFT, padx=6)
         ttk.Button(manual, text="设置", command=self._on_manual_hero).pack(side=tk.LEFT)
-        self.lbl_manual_hint = ttk.Label(manual, text="", style="Dim.TLabel")
+        self.lbl_manual_hint = tk.Label(manual, text="", font=(Theme.FAMILY, Type["small"]),
+                                        bg=P["bg"], fg=P["text_mute"])
         self.lbl_manual_hint.pack(side=tk.LEFT, padx=8)
 
-        # 阵容卡片
-        teams = ttk.Frame(main)
-        teams.pack(fill=tk.X, pady=(10, 0))
-        self.lbl_ally = ttk.Label(teams, text="己方: -", justify=tk.LEFT, wraplength=250)
-        self.lbl_ally.grid(row=0, column=0, sticky=tk.NW, padx=(0, 8))
-        self.lbl_enemy = ttk.Label(teams, text="敌方: -", justify=tk.LEFT, wraplength=250)
-        self.lbl_enemy.grid(row=0, column=1, sticky=tk.NW)
-        teams.columnconfigure(0, weight=1)
-        teams.columnconfigure(1, weight=1)
+        # 阵容卡片（两列 + 中缝 1px 竖线）
+        teams = card_frame(main, pack=dict(fill=tk.X, pady=(8, 0)))
+        col_a = tk.Frame(teams, bg=P["surface"])
+        col_a.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        col_b = tk.Frame(teams, bg=P["surface"])
+        col_b.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
+                   padx=(Metrics["gap_m"], 0))
+        tk.Frame(teams, width=1, bg=P["line_soft"]).pack(side=tk.LEFT,
+                                                           fill=tk.Y, padx=Metrics["gap_m"])
+        for col, tag in ((col_a, "己方"), (col_b, "敌方")):
+            tk.Label(col, text=tag, font=(Theme.FAMILY, Type["small"]),
+                     bg=P["surface"], fg=P["text_mute"]).pack(anchor=tk.W)
+        self.lbl_ally = tk.Label(col_a, text="-", font=Theme.FONT, bg=P["surface"],
+                                 fg=P["text"], justify=tk.LEFT)
+        self.lbl_ally.pack(anchor=tk.W)
+        self.lbl_enemy = tk.Label(col_b, text="-", font=Theme.FONT, bg=P["surface"],
+                                  fg=P["text"], justify=tk.LEFT)
+        self.lbl_enemy.pack(anchor=tk.W)
+        self._wraps.append((self.lbl_ally, 0.5))
+        self._wraps.append((self.lbl_enemy, 0.5))
 
         # 威胁 + 建议 + 替换预告 + 军师滚动列表 + 成型度对比 + 台账(纠错)卡片
+        # （顺序沿用旧版，不重排）
         self.card_threat = self._card(main, "敌方威胁画像")
-        self.card_suggest = self._card(main, "当前建议")
+        self.card_suggest = self._card(main, "当前建议", rail="accent",
+                                       note="主输出")
         self.card_forecast = self._card(main, "满装替换预告")
         self.card_coach = self._card(main, "军师提示（最近 3 条）")
+
         # 成型度对比（v4.6）：敌我十人六神装进度（传说件 x/6 + 装备估值）
-        bp_frame = ttk.Frame(main, style="Card.TFrame", padding=8)
-        bp_frame.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(bp_frame, text="成型度对比（传说件 x/6 · 装备估值）",
-                  style="Dim.TLabel").pack(anchor=tk.NW)
-        self.bp_box = ttk.Frame(bp_frame, style="Card.TFrame")
-        self.bp_box.pack(anchor=tk.NW, pady=(4, 0), fill=tk.X)
-        ledger_frame = ttk.Frame(main, style="Card.TFrame", padding=8)
-        ledger_frame.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(ledger_frame, text="海克斯台账（点名字撤销纠错）",
-                  style="Dim.TLabel").pack(anchor=tk.NW)
-        self.ledger_box = ttk.Frame(ledger_frame, style="Card.TFrame")
-        self.ledger_box.pack(anchor=tk.NW, pady=(4, 0), fill=tk.X)
-        self.card_ranks = self._card(main, "海克斯时刻评级")
+        bp = card_frame(main, title="成型度对比", note="传说件 x/6 · 装备估值",
+                        pack=dict(fill=tk.X, pady=(8, 0)))
+        self.bp_box = tk.Frame(bp, bg=P["surface"])
+        self.bp_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+
+        ledger = card_frame(main, title="海克斯台账", note="点名字撤销纠错",
+                            pack=dict(fill=tk.X, pady=(8, 0)))
+        self.ledger_box = tk.Frame(ledger, bg=P["surface"])
+        self.ledger_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+
+        self._build_ranks_card(main)
 
         # 数据新鲜度（版本翻译器底线：抓取日期常显 + >7 天黄标）
-        fresh = ttk.Frame(main)
+        fresh = tk.Frame(main, bg=P["bg"])
         fresh.pack(fill=tk.X, pady=(8, 0))
-        self.lbl_fresh = ttk.Label(fresh, text="数据版本: -", style="Dim.TLabel")
-        self.lbl_fresh.pack(side=tk.LEFT)
-        self.lbl_engine = ttk.Label(fresh, text="AI: -", style="Dim.TLabel")
+        self.lbl_fresh = tk.Label(fresh, text="数据版本: -", bg=P["bg"],
+                                  fg=P["text_mute"], justify=tk.LEFT,
+                                  anchor=tk.W, font=(Theme.FAMILY, Type["small"]))
+        self.lbl_fresh.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.lbl_engine = tk.Label(fresh, text="AI: -", bg=P["bg"],
+                                   fg=P["text_mute"], justify=tk.RIGHT,
+                                   anchor=tk.E, font=(Theme.FAMILY, Type["small"]))
         self.lbl_engine.pack(side=tk.RIGHT)
+        self._wraps.append((self.lbl_fresh, 0.5))
+        self._wraps.append((self.lbl_engine, 0.5))
 
         # 构建完按实际内容请求高度校准默认窗口（后续面板扩展自动适配，不低于兜底值）
+        #
+        # 2026-09-30：一度把高度夹到「屏高-80」，结果在 1080p 上更糟——内容
+        # 需 ~1120px、窗口 1000px 时 pack 会把**最后 pack 的卡片压成 0 高度**
+        # （海克斯台账/评级整张卡不可见且够不着）。旧公式让窗口略微超屏，
+        # 代价只是日志底部几十像素在屏外（可拖动/缩放），明显更优，故保留原样。
         self.root.update_idletasks()
-        self.root.geometry(f"560x{max(1150, self.root.winfo_reqheight())}")
+        self.root.geometry(f"560x{max(MIN_H, self.root.winfo_reqheight())}")
 
-    def _card(self, parent, title) -> ttk.Label:
-        frame = ttk.Frame(parent, style="Card.TFrame", padding=8)
-        frame.pack(fill=tk.X, pady=(8, 0))
-        ttk.Label(frame, text=title, style="Dim.TLabel").pack(anchor=tk.NW)
-        body = ttk.Label(frame, text="-", justify=tk.LEFT, wraplength=500)
-        body.pack(anchor=tk.NW, pady=(4, 0))
+    def _card(self, parent, title, rail=None, note=None):
+        """带标题轨的卡片，返回正文标签（调用点仍只 config(text=...)）"""
+        P = Palette
+        box = card_frame(parent, rail=rail, title=title, note=note,
+                         tick=(rail or "line"),
+                         pack=dict(fill=tk.X, pady=(8, 0)))
+        body = tk.Label(box, text="-", font=Theme.FONT, bg=P["surface"],
+                        fg=P["text"], justify=tk.LEFT, anchor=tk.W)
+        body.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+        self._wraps.append((body, 1.0))
         return body
+
+    def _on_resize(self, ev):
+        """wraplength 跟随窗口宽（旧值写死 500/250，缩放后换行错乱/底部截断）"""
+        width = max(160, ev.width - Metrics["pad_card"] * 2)
+        for lbl, frac in self._wraps:
+            try:
+                lbl.config(wraplength=max(120, int(width * frac) - 6))
+            except tk.TclError:
+                pass
+
+    def _build_ranks_card(self, parent):
+        """海克斯时刻评级卡：三行真徽章（单标签塞不进徽章，同 overlay 口径）"""
+        P = Palette
+        box = card_frame(parent, title="海克斯时刻评级",
+                         pack=dict(fill=tk.X, pady=(8, 0)))
+        self.ranks_hint = tk.Label(box, text="-（海克斯界面出现时显示）",
+                                   font=(Theme.FAMILY, Type["small"]),
+                                   bg=P["surface"], fg=P["text_mute"], anchor=tk.W)
+        self.ranks_hint.pack(anchor=tk.W)
+        self.ranks_rows = []
+        for i in range(3):
+            row = tk.Frame(box, bg=P["surface"])
+            badge = grade_badge(row, "")
+            badge.pack(side=tk.LEFT, pady=(1, 0))
+            num = tk.Label(row, text="①②③"[i], font=(Theme.FAMILY, Type["small"], "bold"),
+                           bg=P["surface"], fg=P["text_mute"])
+            num.pack(side=tk.LEFT, padx=(5, 3))
+            name = tk.Label(row, text="", font=Theme.FONT, bg=P["surface"],
+                            fg=P["text"], anchor=tk.W)
+            name.pack(side=tk.LEFT)
+            reason = tk.Label(row, text="", font=(Theme.FAMILY, Type["small"]),
+                              bg=P["surface"], fg=P["text_mute"], anchor=tk.W)
+            reason.pack(side=tk.LEFT, padx=(6, 0))
+            self.ranks_rows.append({"row": row, "badge": badge, "name": name,
+                                    "reason": reason, "shown": False})
 
     # ── 交互 ──────────────────────────────────────────────────────
 
@@ -146,10 +244,10 @@ class MainWindow:
             return
         result = self.session.set_hero_manual(query)
         if result:
-            self.lbl_manual_hint.config(text=f"✅ {result}", foreground=Theme.SUCCESS)
+            self.lbl_manual_hint.config(text=strip_emoji(result), fg=Palette["success"])
             self.ent_hero.delete(0, tk.END)
         else:
-            self.lbl_manual_hint.config(text="❌ 未匹配到英雄", foreground=Theme.ERROR)
+            self.lbl_manual_hint.config(text="未匹配到英雄", fg=Palette["error"])
 
     # ── 轮询渲染 ──────────────────────────────────────────────────
 
@@ -166,35 +264,31 @@ class MainWindow:
             except queue.Empty:
                 pass
             state = self.session.ui_state()
-            self.lbl_stage.config(text=f"阶段: {STAGE_CN.get(state['stage'], state['stage'])}")
+            P = Palette
+            stage = state["stage"]
+            self.lbl_stage.config(text=STAGE_CN.get(stage, stage),
+                                  fg=stage_color(stage))
             self.lbl_hero.config(text=f"英雄: {state['my_hero'] or '-'}")
-            path_txt = state['current_path'].upper() or "-"
-            if state['path_drift']:
-                path_txt += " ⚠装备偏离，已按实际出装重定"
-            self.lbl_path.config(text=f"路线: {path_txt}")
-            self.lbl_ally.config(text="己方: " + (" ".join(state['ally']) or "-"))
-            self.lbl_enemy.config(text="敌方: " + (" ".join(state['enemy']) or "-"))
-            self.card_threat.config(text=state['threat'] or "-")
-            # 满六神装替换建议视觉区分：琥珀色（普通"下一件"为默认前景色）
+            self.lbl_ally.config(text=" ".join(state["ally"]) or "-")
+            self.lbl_enemy.config(text=" ".join(state["enemy"]) or "-")
+            self.card_threat.config(text=strip_emoji(state["threat"]) or "-")
+            # 满六神装替换建议：正文保持主文本（多行琥珀字可读性差），
+            # 与 overlay 同口径由卡片左轨/语义色承担区分
             self.card_suggest.config(
-                text=state['suggestion'] or "-（对局内触发时给出）",
-                foreground=(Theme.WARNING
-                            if state.get('suggestion_kind') == 'swap_items'
-                            else Theme.TEXT))
+                text=strip_emoji(state["suggestion"]) or "-（对局内触发时给出）")
             # 替换预告（提示级不改主建议）：威胁与已有装备错配时给出方向
+            forecast = strip_emoji(state.get("swap_forecast") or "")
             self.card_forecast.config(
-                text=state.get('swap_forecast')
-                or "-（威胁与出装明显错配时提示）",
-                foreground=Theme.WARNING if state.get('swap_forecast')
-                else Theme.TEXT_DIM)
+                text=forecast or "-（威胁与出装明显错配时提示）",
+                fg=P["warning"] if forecast else P["text_mute"])
             # 军师提示滚动列表（v4.5，最多 3 条，最新在下）
-            coach = state.get('coach') or []
+            coach = state.get("coach") or []
             self.card_coach.config(
                 text="\n".join(
                     f"{time.strftime('%H:%M:%S', time.localtime(c['ts']))}"
-                    f" 🧠 {c['text']}" for c in coach)
+                    f"  {strip_emoji(c['text'])}" for c in coach)
                 or "-（对局内自动生成：阵容缺口/顺逆风/攒钱与替换提醒）")
-            self._render_ledger(state['augments'])
+            self._render_ledger(state["augments"])
             self._render_build_progress(state.get('build_progress'))
             self._render_ranks(state.get('card_ranks') or [],
                                bool(state.get('card_ranks_pending')))
@@ -216,6 +310,7 @@ class MainWindow:
 
     def _render_ledger(self, augments):
         """台账纠错：点名字撤销（列表变化才重建，防每 500ms 重建闪烁）"""
+        P = Palette
         key = tuple(augments)
         if key == self._ledger_cache:
             return
@@ -223,13 +318,17 @@ class MainWindow:
         for w in self.ledger_box.winfo_children():
             w.destroy()
         if not augments:
-            ttk.Label(self.ledger_box, text="-（游戏内海克斯界面点击后自动记录）",
-                      style="Dim.TLabel").pack(anchor=tk.NW)
+            tk.Label(self.ledger_box, text="-（游戏内海克斯界面点击后自动记录）",
+                     font=(Theme.FAMILY, Type["small"]), bg=P["surface"],
+                     fg=P["text_mute"], anchor=tk.W).pack(anchor=tk.W)
             return
-        for name in augments:
-            row = ttk.Frame(self.ledger_box, style="Card.TFrame")
-            row.pack(anchor=tk.NW, fill=tk.X, pady=1)
-            ttk.Label(row, text=f"· {name}").pack(side=tk.LEFT)
+        for i, name in enumerate(augments, 1):
+            row = tk.Frame(self.ledger_box, bg=P["surface"])
+            row.pack(anchor=tk.W, fill=tk.X, pady=2)
+            tk.Label(row, text=f"{i}.", font=(Theme.FAMILY, Type["small"]),
+                     bg=P["surface"], fg=P["text_mute"]).pack(side=tk.LEFT)
+            tk.Label(row, text=name, font=Theme.FONT, bg=P["surface"],
+                     fg=P["text"]).pack(side=tk.LEFT, padx=(5, 0))
             ttk.Button(row, text="撤销", width=5,
                        command=lambda n=name: self.session.revoke_augment(n)
                        ).pack(side=tk.RIGHT)
@@ -241,6 +340,7 @@ class MainWindow:
         惯例，防 500ms 轮询重建闪烁）。bp=None（快照未到/装备数据缺失）
         → 占位行不报错。
         """
+        P = Palette
         key = ((tuple((r["name"], r["legendary"], r["gold"])
                       for r in bp["ally"])),
                (tuple((r["name"], r["legendary"], r["gold"])
@@ -251,76 +351,99 @@ class MainWindow:
         for w in self.bp_box.winfo_children():
             w.destroy()
         if bp is None:
-            ttk.Label(self.bp_box, text="-（对局内快照同步后显示双方成型度）",
-                      style="Dim.TLabel").pack(anchor=tk.NW)
+            tk.Label(self.bp_box, text="-（对局内快照同步后显示双方成型度）",
+                     font=(Theme.FAMILY, Type["small"]), bg=P["surface"],
+                     fg=P["text_mute"], anchor=tk.W).pack(anchor=tk.W)
             return
         for col, (tag, rows) in enumerate((("己方", bp["ally"]),
                                            ("敌方", bp["enemy"]))):
-            col_frame = ttk.Frame(self.bp_box, style="Card.TFrame")
+            col_frame = tk.Frame(self.bp_box, bg=P["surface"])
             col_frame.grid(row=0, column=col, sticky=tk.NW,
-                           padx=(0, 8) if col == 0 else 0)
-            ttk.Label(col_frame, text=tag, style="Dim.TLabel").pack(anchor=tk.NW)
+                           padx=(0, Metrics["gap_l"]) if col == 0 else 0)
+            tk.Label(col_frame, text=tag, font=(Theme.FAMILY, Type["small"]),
+                     bg=P["surface"], fg=P["text_mute"]).pack(anchor=tk.W)
             if not rows:
                 # 阵容/分组缺失（快照 playerlist 不全）时占位，不报错
-                ttk.Label(col_frame, text="-", style="Dim.TLabel"
-                          ).pack(anchor=tk.NW)
+                tk.Label(col_frame, text="-", font=(Theme.FAMILY, Type["small"]),
+                         bg=P["surface"], fg=P["text_mute"]).pack(anchor=tk.W)
                 continue
             for r in rows:
-                row = ttk.Frame(col_frame, style="Card.TFrame")
-                row.pack(anchor=tk.NW, fill=tk.X, pady=1)
-                ttk.Label(row, text=r["name"], width=8, anchor=tk.W
-                          ).pack(side=tk.LEFT)
+                row = tk.Frame(col_frame, bg=P["surface"])
+                row.pack(anchor=tk.W, fill=tk.X, pady=2)
+                tk.Label(row, text=r["name"], font=(Theme.FAMILY, Type["small"]),
+                         bg=P["surface"], fg=P["text"], width=7,
+                         anchor=tk.W).pack(side=tk.LEFT)
                 ttk.Progressbar(row, style="BP.Horizontal.TProgressbar",
                                 maximum=6, value=min(r["legendary"], 6),
-                                length=56).pack(side=tk.LEFT, padx=(2, 4))
-                ttk.Label(row, text=f"{min(r['legendary'], 6)}/6", width=4,
-                          anchor=tk.E).pack(side=tk.LEFT)
-                ttk.Label(row, text=f"{r['gold']}G", style="Dim.TLabel",
-                          width=7, anchor=tk.E).pack(side=tk.RIGHT)
-        self.bp_box.columnconfigure(0, weight=1)
-        self.bp_box.columnconfigure(1, weight=1)
+                                length=52).pack(side=tk.LEFT, padx=(2, 4))
+                tk.Label(row, text=f"{min(r['legendary'], 6)}/6",
+                         font=(Theme.MONO_FAMILY, Type["small"]), bg=P["surface"],
+                         fg=P["text_dim"], width=4, anchor=tk.E).pack(side=tk.LEFT)
+                # 估值破万走琥珀（对方成型更快时一眼可见）
+                hot = r["gold"] >= 10000
+                tk.Label(row, text=f"{r['gold']}G",
+                         font=(Theme.MONO_FAMILY, Type["small"]), bg=P["surface"],
+                         fg=P["warning"] if hot else P["text_mute"],
+                         width=7, anchor=tk.E).pack(side=tk.RIGHT)
+        self.bp_box.grid_columnconfigure(0, weight=1)
+        self.bp_box.grid_columnconfigure(1, weight=1)
 
     def _render_ranks(self, ranks, pending=False):
-        if not ranks:
-            self.card_ranks.config(text="-（海克斯界面出现时显示）")
-            return
-        lines = []
-        for i, r in enumerate(ranks[:3], 1):
-            if pending:
-                # AI 评级精修在途：先显卡名，档位等回调后再放（与 overlay 同口径）
-                lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}  ⏳ AI 评级中…")
-            else:
-                grade = r.get("grade", "?")
-                lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}  [{grade}]  "
-                             f"{r.get('reason', '')}")
-        self.card_ranks.config(text="\n".join(lines))
+        """海克斯时刻评级：15px 档位徽章 + 卡名 + 理由（逐行独立着色，同 overlay）
+
+        行控件一次性建好、每帧只 config（destroy/recreate 会闪烁，同台账惯例）。
+        可见行恒为前缀 0..n-1，按索引顺序 pack → 顺序永不翻面。
+        """
+        P = Palette
+        for i, w in enumerate(self.ranks_rows):
+            entry = ranks[i] if i < len(ranks) else None
+            if entry is None:
+                if w["shown"]:
+                    w["row"].pack_forget()
+                    w["shown"] = False
+                continue
+            grade = "" if pending else (entry.get("grade") or "?")
+            retint_badge(w["badge"], grade)
+            w["name"].config(text=strip_emoji(entry.get("name", "?")),
+                             fg=GRADES.get(grade) or P["text"])
+            w["reason"].config(text=PENDING_WAIT if pending
+                               else strip_emoji(entry.get("reason", "") or ""))
+            if not w["shown"]:
+                w["row"].pack(anchor=tk.W, fill=tk.X, pady=2)
+                w["shown"] = True
+        if ranks and not self.ranks_hint.winfo_ismapped():
+            self.ranks_hint.pack_forget()
+        elif not ranks and not self.ranks_hint.winfo_ismapped():
+            self.ranks_hint.pack(anchor=tk.W)
 
     def _render_engine(self, st):
+        P = Palette
         if not st:
             # stats 异常被上游吞掉时不误报"关"（AI 可能实际在跑）
-            self.lbl_engine.config(text="AI: -", foreground=Theme.TEXT_DIM)
+            self.lbl_engine.config(text="AI: -", fg=P["text_mute"])
             return
         mode = st.get("mode", "rule")
         if mode == "rule":
-            txt, color = "AI: 关（规则模式）", Theme.TEXT_DIM
+            txt, color = "AI: 关（规则模式）", P["text_mute"]
         else:
             budget = st.get('budget', 0)
             budget_txt = "∞" if budget <= 0 else budget   # <=0 = 不限次
             txt = (f"AI: {mode} | 本局 {st.get('calls', 0)}/{budget_txt} 次"
                    f" | ¥{st.get('cost_game', 0):.4f} | 上下文 {st.get('ctx_source', '-')}")
-            color = Theme.SUCCESS
-        self.lbl_engine.config(text=txt, foreground=color)
+            color = P["success"]
+        self.lbl_engine.config(text=txt, fg=color)
 
     def _render_freshness(self, state):
+        P = Palette
         info = self.session.data_freshness()
         age = info["age_days"]
         if age is None:
-            txt, color = f"数据版本: {info['dd_version'] or '-'} | 抓取日期: 未知", Theme.WARNING
+            txt, color = f"数据版本: {info['dd_version'] or '-'} | 抓取日期: 未知", P["warning"]
         else:
             txt = (f"数据版本: {info['dd_version'] or '-'} | "
                    f"抓取日期: {info['date']}（{age} 天前）")
-            color = Theme.WARNING if age > 7 else Theme.TEXT_DIM
-        self.lbl_fresh.config(text=txt, foreground=color)
+            color = P["warning"] if age > 7 else P["text_mute"]
+        self.lbl_fresh.config(text=txt, fg=color)
 
     def _poll_log(self):
         try:
