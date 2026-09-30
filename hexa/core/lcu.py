@@ -379,10 +379,19 @@ class PhaseMachine(threading.Thread):
         while self._running:
             phase = self._poll_phase()
             self._handle(phase)
+            self._check_stall()
             if self.lcu.is_connected():
                 time.sleep(self.POLL_INTERVAL)
             else:
                 time.sleep(self.CONNECT_BACKOFF[self._backoff_idx])
+
+    def _check_stall(self):
+        """数据流停摆兜底：phase 查询成败都查（终局收尾不依赖 LCU，
+        见 GameSession.report_data_stall——20260929 人马案）。"""
+        check_stall = self.cb.get("check_stall")
+        if check_stall and check_stall():
+            self._fire("on_end_of_game", "data_stall")
+            self._phase = "None"   # 防后续 phase 恢复时按旧转换重触发
 
     def _poll_phase(self):
         if not self.lcu.is_connected():

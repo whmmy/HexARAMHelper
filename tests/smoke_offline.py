@@ -2349,6 +2349,44 @@ def test_review_fixes():
     check("终态：文件仍可读且含复盘字段",
           doc2["hero"] == draft_hero and doc2.get("clicks") == [])
 
+    # -- P3b：终局监听兜底（数据流停摆；20260929 人马案：局终退回桌面
+    #    本应 2s 内落盘，却因 phase 查询失败 prev 永卡 InProgress，
+    #    on_end_of_game 永不触发直到关机）--
+    from hexa.core.lcu import PhaseMachine as _PM
+    n_logs2 = len(list(games_dir.glob("*.json")))
+    sess2 = GameSession(kb, rules, settings=FakeSettings())
+    pm = _PM(None, callbacks={"on_end_of_game": sess2.on_end_of_game,
+                              "check_stall": sess2.report_data_stall})
+    check("stall：idle 不判定", not sess2.report_data_stall())
+    sess2.on_game_start({"ally": ["殇之木乃伊"], "enemy": [hero],
+                         "my_hero": "殇之木乃伊", "source": "test"})
+    sess2.on_in_progress()
+    check("stall：数据新鲜不判定", not sess2.report_data_stall())
+    sess2.on_phase("GameStart")   # phase 轨迹留痕（本局复盘可查）
+    check("stall：phase 回调进 timeline",
+          any(e[1] == "phase" and e[2] == "GameStart"
+              for e in sess2.timeline))
+    sess2.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                                my_gold=1000))
+    check("stall：快照刷新不判定", not sess2.report_data_stall())
+    sess2._last_data_ts -= 301.0   # 快照断流 5 分钟（游戏退了/接口死了/客户端不在）
+    check("stall：断流超时判定", sess2.report_data_stall() is True)
+    pm._check_stall()   # → fire on_end_of_game("data_stall") 落盘+收尾
+    latest = sorted(games_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    check("stall：兜底触发落盘",
+          len(list(games_dir.glob("*.json"))) == n_logs2 + 1)
+    stall_doc = _json.loads(latest[-1].read_text(encoding="utf-8"))
+    check("stall：落盘记录 data_stall",
+          any(e["event"] == "end_of_game" and "data_stall" in e["detail"]
+              for e in stall_doc["timeline"]),
+          str([e["event"] for e in stall_doc["timeline"][-3:]]))
+    check("stall：触发后 session 归位", sess2.stage == "idle")
+    check("stall：收尾后不再判定", not sess2.report_data_stall())
+    pm._check_stall()   # idle → 不再 fire
+    sess2.on_end_of_game("PreEndOfGame")   # 模拟 phase 恢复后的重复终局事件
+    check("stall：幂等门不产第二份文件",
+          len(list(games_dir.glob("*.json"))) == n_logs2 + 1)
+
 
 def test_thinking_params():
     """思考强度设置 → 服务商参数映射（off/low/high/auto × deepseek/qwen3/glm）"""

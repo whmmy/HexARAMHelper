@@ -90,6 +90,8 @@ class GameSession:
     """单局生命周期：ChampSelect → GameStart → InProgress → EndOfGame/秒退重置"""
 
     DRAFT_INTERVAL = 20.0   # 复盘草稿落盘周期（进程死亡最多丢这么多秒）
+    # 对局数据流停摆判定：快照断流超此时长即视为局已结束（终局监听兜底）
+    STALL_TIMEOUT = 300.0
 
     def __init__(self, kb, rules, settings=None, fixture_dumper=None,
                  live_poller=None, engine=None):
@@ -152,6 +154,8 @@ class GameSession:
             # 复盘草稿周期落盘状态（进程死亡护身符，见 _maybe_flush_review_draft）
             self._review_path = None      # 本局复盘文件名（首写后整局稳定覆盖）
             self._draft_ts = 0.0          # 上次草稿写入时间（限频）
+            # 数据流停摆兜底（终局监听不依赖 phase 查询，见 report_data_stall）
+            self._last_data_ts = time.time()
             self._log("session_reset")
 
     def _log(self, event, detail=""):
@@ -221,12 +225,17 @@ class GameSession:
     def on_in_progress(self):
         with self._lock:
             self.stage = "in_game"
+            self._last_data_ts = time.time()   # 数据流停摆兜底的起点
             self._log("in_progress")
             if self.live:
                 self.live.enter_game()
 
     def on_end_of_game(self, reason):
         with self._lock:
+            # 幂等门：会话已收尾（data_stall 兜底先触发过/重复终局事件）
+            # 就不拿空会话再写一份零内容文件、不重置已清场的新局状态
+            if self.stage not in ("game_start", "in_game"):
+                return
             self._log("end_of_game", reason)
             self._write_review_log()
             if self.live:
@@ -242,6 +251,7 @@ class GameSession:
         with self._lock:
             if self.stage not in ("in_game", "game_start"):
                 return
+            self._last_data_ts = time.time()   # 快照到位 = 数据流活着
             # 我的英雄兜底（LCU 断连时 live 仍可跟随）
             if not self.my_hero and snap.my_champion:
                 validated = self.kb.validate_hero(snap.my_champion)
@@ -1098,6 +1108,30 @@ class GameSession:
             return
         self._draft_ts = now
         self._write_review_log(final=False)
+
+    def report_data_stall(self):
+        """对局数据流停摆判定（PhaseMachine 每轮询问；终局监听兜底）。
+
+        终局落盘此前完全押注"phase 查询成功"一条链——InProgress→IDLE
+        转换只在 get_gameflow_phase 正常返回时判定（20260929 人马案：
+        局终退回桌面后本应 2s 内触发落盘，却因客户端局后离场/重启换口/
+        接口持续失败，prev 永远卡 InProgress，on_end_of_game 永不触发，
+        直到关机数据随进程蒸发）。本兜底不依赖 LCU 可用性：in_game 且
+        快照断流超 STALL_TIMEOUT（游戏进程退了/接口死了/客户端不在，
+        全部表现为 on_snapshot 不再来）即判定局已结束，返回 True 让
+        PhaseMachine fire on_end_of_game("data_stall")。正常对局快照
+        1-2s 一帧、死亡重生最长 78s，远小于阈值，不会误判；加载期
+        （game_start）不判定。幂等由 on_end_of_game 的 stage 门保证。
+        """
+        with self._lock:
+            if self.stage != "in_game":
+                return False
+            return time.time() - self._last_data_ts > self.STALL_TIMEOUT
+
+    def on_phase(self, phase):
+        """原始 phase 变化留痕（复盘 timeline 可见 phase 轨迹，排障用）"""
+        with self._lock:
+            self._log("phase", phase)
 
     def flush_pending_review(self):
         """复盘日志兜底②（P1）：终局事件丢失时补写上一局的复盘。

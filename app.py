@@ -91,6 +91,8 @@ def main():
         "on_game_start": session.on_game_start,
         "on_in_progress": session.on_in_progress,
         "on_end_of_game": session.on_end_of_game,
+        "on_phase": session.on_phase,          # phase 轨迹进复盘 timeline
+        "check_stall": session.report_data_stall,   # 数据流停摆→终局兜底
     })
 
     # ── P1 交互闭环：画面检测 + 鼠标记账 ──────────────────────────
