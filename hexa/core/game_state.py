@@ -89,6 +89,8 @@ class Suggestion:
 class GameSession:
     """单局生命周期：ChampSelect → GameStart → InProgress → EndOfGame/秒退重置"""
 
+    DRAFT_INTERVAL = 20.0   # 复盘草稿落盘周期（进程死亡最多丢这么多秒）
+
     def __init__(self, kb, rules, settings=None, fixture_dumper=None,
                  live_poller=None, engine=None):
         self.kb = kb
@@ -147,6 +149,9 @@ class GameSession:
             self._engine_started = False  # 引擎本局已 start_game（快照兜底判据）
             self.clicks = []              # 点击链黑匣子（台账排障，见 log_click）
             self._game_t0 = time.time()
+            # 复盘草稿周期落盘状态（进程死亡护身符，见 _maybe_flush_review_draft）
+            self._review_path = None      # 本局复盘文件名（首写后整局稳定覆盖）
+            self._draft_ts = 0.0          # 上次草稿写入时间（限频）
             self._log("session_reset")
 
     def _log(self, event, detail=""):
@@ -306,6 +311,8 @@ class GameSession:
             # 5s 轮询下不重复刷）
             self._update_coach(snap)
             self._periodic_recheck(enemies, snap)
+            # 复盘草稿周期落盘（进程死亡护身符；限频 20s，零内容不写）
+            self._maybe_flush_review_draft()
         # 锁外补 start_game（同 on_game_start 规矩：不持锁起线程）
         if late_start:
             engine, hero, ally, enemy, game_map = late_start
@@ -1014,14 +1021,21 @@ class GameSession:
 
     # ── 复盘日志（P3：局终落盘，供赛后回顾） ──────────────────────
 
-    def _write_review_log(self):
+    def _write_review_log(self, final=True):
+        """复盘落盘。final=True 局终写（置幂等位，on_end_of_game /
+        flush_pending_review 调）；final=False 为对局期草稿（不置位，
+        局终仍会覆盖写终态），文件名首写即缓存——草稿与终态覆盖同一
+        份文件，不因 hero 迟到等产生第二份。"""
         try:
             out_dir = BASE_DIR / "log" / "games"
             out_dir.mkdir(parents=True, exist_ok=True)
-            ts = time.strftime("%Y%m%d_%H%M%S", time.localtime(self._game_t0))
-            safe_hero = "".join(
-                ch for ch in (self.my_hero or "unknown")
-                if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "unknown"
+            if self._review_path is None:
+                ts = time.strftime("%Y%m%d_%H%M%S",
+                                   time.localtime(self._game_t0))
+                safe_hero = "".join(
+                    ch for ch in (self.my_hero or "unknown")
+                    if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "unknown"
+                self._review_path = f"{ts}_{safe_hero}.json"
             stats = {}
             try:
                 stats = self.engine.stats()
@@ -1049,13 +1063,41 @@ class GameSession:
                 "clicks": [dict(c, ts=round(c["ts"], 3))
                            for c in self.clicks[-200:]],
             }
-            path = out_dir / f"{ts}_{safe_hero}.json"
+            path = out_dir / self._review_path
             path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
                             encoding="utf-8")
-            self._review_flushed = True   # 写成功才置位；异常保持 False 可重试
-            print(f"[SESSION] 复盘日志已写入 {path.name}")
+            if final:
+                self._review_flushed = True   # 写成功才置位；异常保持 False 可重试
+            print(f"[SESSION] 复盘{'日志' if final else '草稿'}已写入 "
+                  f"{self._review_path}")
         except Exception as e:
             print(f"[WARN] 复盘日志写入失败: {e}")
+
+    def _maybe_flush_review_draft(self):
+        """复盘草稿周期落盘（进程死亡护身符）。
+
+        复盘数据此前全程在内存、局终才落盘——App 进程被强杀/终端关闭/
+        关机时，"下一局开局"与"退出 finally"两条兜底都来不及执行，整局
+        随进程蒸发（20260929 人马案：日女局 21:07 正常落盘后同进程再打
+        人马局，进程无声消失，复盘零记录且无 tee 无 WER 无从查证）。
+        改为对局期每 DRAFT_INTERVAL 秒覆盖写同一份草稿，局终 final 写
+        覆盖为终态——进程死亡最多丢一个周期。零内容局不产文件（与
+        flush_pending_review 同判据）；hero 未定不写（文件名会被钉死为
+        unknown）。仅在快照路径调用，锁内直写（RLock 同线程可重入，
+        与 on_end_of_game 持锁写同规矩）。
+        """
+        now = time.time()
+        if now - self._draft_ts < self.DRAFT_INTERVAL:
+            return
+        has_unverified = any(e[1] == "augment_unverified"
+                             for e in self.timeline)
+        if not (self.augments or self.history or has_unverified
+                or self.clicks):
+            return
+        if not self.my_hero:
+            return
+        self._draft_ts = now
+        self._write_review_log(final=False)
 
     def flush_pending_review(self):
         """复盘日志兜底②（P1）：终局事件丢失时补写上一局的复盘。
@@ -1082,7 +1124,7 @@ class GameSession:
                     or self.clicks):
                 return
             self._log("review_flush", "终局事件丢失，兜底补写复盘日志")
-            self._write_review_log()
+            self._write_review_log(final=True)
 
     # ── UI 消费 ───────────────────────────────────────────────────
 

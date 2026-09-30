@@ -1594,16 +1594,20 @@ def test_session_ai_serial():
           f"{c0.name} {c0.afford_note}")
 
     # 复盘日志（结束触发写盘到 log/games/）
+    # 草稿周期落盘后，局终写对本局文件是"覆盖"而非"新增"，且局终
+    # reset 会清 _review_path——断言语义改为"最新写出的 json 即本局
+    # 终态"（测试单线程，局终写必是最新），再以 hero 字段互证。
     import json as _json2
     from hexa.config import BASE_DIR
-    n_logs = len(list((BASE_DIR / "log" / "games").glob("*.json"))) \
-        if (BASE_DIR / "log" / "games").exists() else 0
+    games_dir_6b = BASE_DIR / "log" / "games"
     session.on_end_of_game("EndOfGame")
-    logs = list((BASE_DIR / "log" / "games").glob("*.json")) \
-        if (BASE_DIR / "log" / "games").exists() else []
-    check("复盘日志落盘", len(logs) == n_logs + 1)
-    if logs:
-        doc = _json2.loads(logs[-1].read_text(encoding="utf-8"))
+    newest = sorted(games_dir_6b.glob("*.json"),
+                    key=lambda p: p.stat().st_mtime)
+    review_path = newest[-1] if newest else None
+    check("复盘日志落盘", review_path is not None
+          and review_path.exists())
+    if review_path and review_path.exists():
+        doc = _json2.loads(review_path.read_text(encoding="utf-8"))
         check("复盘日志字段", doc.get("hero") == "暗裔剑魔"
               and doc.get("suggestions"), str(doc.get("hero")))
 
@@ -2297,6 +2301,53 @@ def test_review_fixes():
               s.get_float("system1", "price_out", default=2.7) == 2.7)
         check("get_float 默认价合并",
               s.get_float("system2", "price_in", default=0) == 2.4)
+
+    # -- P3：复盘草稿周期落盘（进程死亡护身符；20260929 人马案：日女局
+    #    正常落盘后同进程再打人马局，App 进程无声消失，复盘零记录——
+    #    数据全程在内存、局终才落盘，强杀/关机时两条兜底都来不及跑） --
+    games_dir = _game_state.BASE_DIR / "log" / "games"
+    n_logs = len(list(games_dir.glob("*.json")))
+    draft_hero = "黑暗之女"   # 独立英雄名，避免与本节前文暗裔剑魔局终文件撞 glob
+    sess = GameSession(kb, rules, settings=FakeSettings())
+    sess.on_game_start({"ally": [draft_hero], "enemy": [hero],
+                        "my_hero": draft_hero, "source": "test"})
+    sess.on_in_progress()
+    # 空转局：无建议/无海克斯/无点击 → 草稿不产文件
+    sess._maybe_flush_review_draft()
+    check("草稿：零内容局不产文件",
+          len(list(games_dir.glob("*.json"))) == n_logs)
+    # 有内容 + hero 未定：不写（避免文件名被钉死为 unknown）
+    sess.my_hero = None
+    sess.history.append((time.time(), "next_items", "测试建议"))
+    sess._maybe_flush_review_draft()
+    check("草稿：hero 未定不落盘",
+          len(list(games_dir.glob("*.json"))) == n_logs)
+    # hero 到位 → 草稿落盘（不置幂等位，限频生效）
+    sess.my_hero = draft_hero
+    sess._maybe_flush_review_draft()
+    draft_path = games_dir / sess._review_path
+    check("草稿：有内容即落盘", draft_path.exists(),
+          f"total={len(list(games_dir.glob('*.json')))} n_logs={n_logs}")
+    check("草稿：不置幂等位", sess._review_flushed is False)
+    doc = _json.loads(draft_path.read_text(encoding="utf-8"))
+    check("草稿：内容含建议历史", any("测试建议" in s["text"]
+                                      for s in doc["suggestions"]))
+    last_draft_ts = sess._draft_ts
+    sess._maybe_flush_review_draft()
+    check("草稿：周期限频", sess._draft_ts == last_draft_ts)
+    # 幂等位消费路径：终局事件丢失时 flush 补写置位，二次调用空转
+    sess.flush_pending_review()
+    check("终态：flush 补写置幂等位", sess._review_flushed is True)
+    sess.flush_pending_review()
+    check("终态：flush 幂等不重复落盘",
+          len(list(games_dir.glob("*.json"))) == n_logs + 1)
+    # 局终 final 覆盖同一文件（草稿/终态共用一份，不产第二份）
+    sess.on_end_of_game("PreEndOfGame")
+    check("终态：覆盖草稿同一文件",
+          len(list(games_dir.glob("*.json"))) == n_logs + 1)
+    doc2 = _json.loads(draft_path.read_text(encoding="utf-8"))
+    check("终态：文件仍可读且含复盘字段",
+          doc2["hero"] == draft_hero and doc2.get("clicks") == [])
 
 
 def test_thinking_params():
