@@ -171,6 +171,10 @@ def main():
         return px["rerolls"] if px else None
 
     _click_diag_ts = {}   # 点击链诊断限频（key → 上次打印时刻）
+    _silent_clicks = {"n": 0, "ts": time.monotonic()}
+    # 常规点击未路由计数（idx=None+非活跃，5min 一条汇总）：2026-09-30
+    # 牛头案——两局选卡点击零记账且 py-spy 实证线程存活，本计数与
+    # MouseLedger [MOUSE] 按下沿汇总对账可定案"点击有没有进 _on_click"
 
     def _click_diag(key, detail, ev=None):
         """点击链丢弃诊断：3s 限频 print（落日志面板+tee 文件），并写
@@ -213,6 +217,15 @@ def main():
                             f"({x},{y}) 海克斯界面在屏但未命中任何卡片矩形 "
                             f"{rects}（标定错位嫌疑）",
                             ev={"x": x, "y": y, "card": None})
+            else:
+                st = _silent_clicks
+                st["n"] += 1
+                now = time.monotonic()
+                if now - st["ts"] >= 300.0:
+                    print(f"[MOUSE] 近5min 常规点击未路由（卡矩形外+非活跃）"
+                          f" {st['n']} 次")
+                    st["n"] = 0
+                    st["ts"] = now
             return   # 常规对局点击（移动/攻击）占绝大多数：静默防刷屏
         if not active:
             _click_diag("no_hex_evidence",

@@ -2450,10 +2450,15 @@ def test_thinking_params():
     body, mt, on = params("qwen3.8-max", "auto")
     check("qwen3 auto→强制关",
           body == {"enable_thinking": False} and not on)
+    # qwen3 2026-09-30 牛头案：low/high 档也一律强制关——服务商对思考
+    # 请求的渐进输出绕过 read timeout，thinking=high 挂死 System2 12 分钟，
+    # 期间 ctx 永远 pending、System1 全瘫、浮窗永久"生成中"
     body, mt, on = params("qwen3.8-max", "low")
-    check("qwen3 low→开+预算",
-          on and body.get("enable_thinking") is True
-          and body.get("thinking_budget") == 1024)
+    check("qwen3 low→强制关（档位不生效，防挂死）",
+          body == {"enable_thinking": False} and mt == 800 and not on)
+    body, mt, on = params("qwen3.8-max", "high")
+    check("qwen3 high→强制关（防挂死）",
+          body == {"enable_thinking": False} and mt == 800 and not on)
     # GLM 走 thinking.type（无预算档）
     body, _mt, on = params("glm-5.3", "off")
     check("glm off→disabled",
@@ -2543,6 +2548,72 @@ def test_ai_inflight():
     while "augment_ranks" not in got and time.time() < deadline:
         time.sleep(0.01)
     check("评级回调已发", "augment_ranks" in got, str(got))
+
+
+def test_system2_watchdog():
+    """System2 挂死看门狗（2026-09-30 牛头案）：qwen3 思考请求的渐进输出
+    绕过 read timeout，挂 12 分钟才失败——期间 ctx 永远 pending，System1
+    全瘫、浮窗永久"生成中"。pending 超 180s 由 _ctx_ready 失败落位：
+    stats 显示"生成失败"；真 ctx 迟到仍会 cache.set 正常生效。"""
+    print("\n[11b] System2 挂死看门狗")
+    import threading
+
+    class GateClient(FakeClient):
+        def __init__(self, script):
+            super().__init__(script)
+            self.gate = threading.Event()
+
+        def chat(self, *a, **kw):
+            self.gate.wait(timeout=5)
+            return super().chat(*a, **kw)
+
+    eng, _c1, _c2 = build_ai_engine()
+    eng.client_s2 = GateClient(["{}"])
+    eng.client_s1 = GateClient(["{}"])
+    eng.start_game("暗裔剑魔", [], ["黑暗之女"])
+    check("生成中 pending 置位", eng.cache.pending
+          and eng.stats()["ctx_source"] == "生成中")
+    # 模拟挂死：pending 起点拨回 181s 前，触发 _ctx_ready 的看门狗
+    eng._pending_since = time.time() - 181
+    check("pending 未就绪（180s 内不放行）", eng._ctx_ready() is False)
+    check("看门狗已落位（不再 pending）", not eng.cache.pending)
+    check("stats 显示生成失败", eng.stats()["ctx_source"] == "生成失败")
+    # 真 ctx 迟到仍生效：放行 generate → 规则版 ctx set → source 覆盖
+    eng.client_s2.gate.set()
+    deadline = time.time() + 5
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.01)
+    check("迟到 ctx 正常落缓存", eng.cache.get() is not None)
+    check("ctx_source 转为实际来源", eng.stats()["ctx_source"] == "rule")
+
+
+def test_grab_card_crop_no_deadlock():
+    """点击抓帧重入死锁回归（2026-09-30 真机审查发现）：旧版
+    _grab_card_crop 外层 with _grab_lock 后调 _grab()，_grab() 内层再
+    with 同一把锁——threading.Lock 不可重入，同线程二次获取=永久死锁。
+    点卡且海克斯证据在窗内即触发：MouseLedger 线程挂死、后续点击全部
+    零痕迹。修复后同线程一次调用必须返回。"""
+    print("\n[11c] 点击抓帧重入死锁回归")
+    import numpy as _np
+    from hexa.core.screen_detect import ScreenDetector
+
+    class _Ocr:
+        available = True
+
+    class _Layout:
+        window = None
+
+        def to_pixels(self, w, h, canvas=False):
+            return {"cards": [(10, 10, 50, 50)],
+                    "title_bands": [], "rerolls": []}
+
+    det = ScreenDetector(kb, _Ocr(), layout=_Layout())
+    det._grab = lambda screen=None: _np.zeros((100, 100, 3), dtype=_np.uint8)
+    det._screen_size = lambda: (100, 100)
+    crop = det._grab_card_crop(0)   # 修复前：同线程重入拿锁，本行永久挂死
+    check("抓帧返回（无重入死锁）",
+          crop is not None and crop.shape[0] == 50)
+    check("越界卡号安全返回 None", det._grab_card_crop(5) is None)
 
 
 # ── 10. 点击链诊断 + stdout tee 留档（2026-09-29 台账复发案） ─────
@@ -2859,6 +2930,8 @@ if __name__ == "__main__":
     test_ai_engine()
     test_ai_build_pool()
     test_ai_inflight()
+    test_system2_watchdog()
+    test_grab_card_crop_no_deadlock()
     test_session_ai_serial()
     test_swap_mode()
     test_coach_save_gap()

@@ -137,6 +137,8 @@ class AIDecisionEngine(DecisionEngine):
         self.game_map = ""         # 当前对局地图（"11"/"12"）
         self._tasks = []           # 后台线程引用（防 GC）
         self._inflight = 0         # 在途 AI 生成数（浮窗"生成中"标识）
+        self._pending_since = 0.0  # System2 生成起点（挂死看门狗计时）
+        self._ctx_failed = False   # 看门狗落位后置真（stats 显示"生成失败"）
 
     # ── 守门 ──────────────────────────────────────────────────────
 
@@ -268,6 +270,8 @@ class AIDecisionEngine(DecisionEngine):
         # 缓存仍是上一局 ChampionContext，本局沿用上一局英雄的出门/路线/
         # 加点生成 prompt，直到 late_start 补开局才自愈
         self.cache.start_pending()
+        self._pending_since = time.time()
+        self._ctx_failed = False
         if not hero:
             print("[AI] 英雄未知，跳过 System2 上下文生成（可手动设英雄后重开局）")
             return
@@ -297,6 +301,12 @@ class AIDecisionEngine(DecisionEngine):
                       f" 出门{len(ctx.opening_items)} 方案{len(ctx.builds)} — {src}")
                 if self.on_result:
                     self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+            except Exception as e:  # noqa: BLE001 —— generate 内部已兜
+                # LLM/解析异常，此处兜 kb/规则层意外异常：漏掉即线程静默
+                # 死亡、pending 永挂（直到看门狗落位），必须可见
+                print(f"[WARN] System2 生成异常: {type(e).__name__}: {e}")
+                if self.on_result:
+                    self.on_result(KIND_CTX, {"source": "error"}, 0)
             finally:
                 with self._lock:
                     self._inflight -= 1
@@ -307,7 +317,21 @@ class AIDecisionEngine(DecisionEngine):
     # ── 三类建议（同步规则底线 + 异步 AI 精修） ────────────────────
 
     def _ctx_ready(self) -> bool:
-        return self.cache.get() is not None and not self.cache.pending
+        ctx = self.cache.get()
+        if ctx is not None and not self.cache.pending:
+            return True
+        # System2 挂死看门狗：pending 超 180s 视为生成失败并落位——
+        # LLM 心跳/渐进输出可绕过 read timeout（2026-09-30 牛头案：
+        # qwen3 思考挂死 12 分钟，期间 System1 全瘫、浮窗永久"生成中"）。
+        # 落位后规则底线照常兜底；真 ctx 若迟到 cache.set 仍会正常生效。
+        if self.cache.pending and self._pending_since \
+                and time.time() - self._pending_since > 180:
+            self.cache.fail()
+            self._pending_since = 0.0
+            self._ctx_failed = True
+            print("[WARN] System2 生成超 180s 未返回，按失败落位放行规则底线"
+                  "（本轮无方案池/跨流派适配）")
+        return False
 
     def opening_candidates(self, first_augment, threat, serial):
         base = self.delegate.opening_candidates(first_augment, threat, serial)
@@ -414,7 +438,8 @@ class AIDecisionEngine(DecisionEngine):
                 "cost_total": round(cost_total, 4),
                 "inflight": self._inflight,
                 "ctx_source": (ctx.source if ctx else
-                               ("生成中" if self.cache.pending else "-"))}
+                               ("生成失败" if self._ctx_failed else
+                                ("生成中" if self.cache.pending else "-")))}
 
 
 class JevEngine(DecisionEngine):

@@ -385,3 +385,13 @@ class ContextCache:
         with self._lock:
             self._ctx = None
             self._pending = True
+
+    def fail(self):
+        """生成失败落位：清 pending（ctx_source 从"生成中"转"生成失败"）。
+
+        看门狗消费（engine._ctx_ready）：System2 长时间不返回时放行——
+        否则浮窗永久"AI 生成中…"且用户无从判断（2026-09-30 牛头案：
+        qwen3 思考挂死 12 分钟，ctx_source 全局卡"生成中"）。"""
+        with self._lock:
+            self._ctx = None
+            self._pending = False

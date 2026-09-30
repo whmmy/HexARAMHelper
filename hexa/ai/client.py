@@ -132,12 +132,21 @@ class LLMClient:
         off=显式下发关闭；low/medium/high=开启+预算档；auto=不发参数跟随服务商
         默认（仅 qwen3 系例外，见模块注释）。思考 token 计入输出配额，故开启时
         max_tokens 需加上预算，防思考把正文配额烧穿（deepseek 默认思考的教训）。
-        """
+
+        qwen3 系不分档位一律强制关：非流式长输入开思考必超时（P0.5 实测），
+        且服务商对思考请求的渐进输出会绕过 read timeout——2026-09-30 牛头案
+        thinking=high 挂死 System2 12 分钟才报 Request timed out，期间 ctx
+        永远 pending、System1 全瘫、浮窗永久"生成中"。qwen3 要开思考需先
+        改流式实现。"""
         effort = (self.settings.get(self.slot, "thinking", default="off")
                   or "off").strip().lower()
+        if model.lower().startswith("qwen3"):
+            if effort in THINKING_BUDGET:
+                print(f"[WARN] {model} 思考档位 '{effort}' 不生效：qwen3 系"
+                      "非流式开思考必挂死，已强制关闭（要开思考请换 "
+                      "deepseek/glm 系或改流式实现）")
+            return {"enable_thinking": False}, max_tokens, False
         if effort == "auto":
-            if model.lower().startswith("qwen3"):
-                return {"enable_thinking": False}, max_tokens, False
             return None, max_tokens, False
         on = effort in THINKING_BUDGET
         budget = THINKING_BUDGET.get(effort, 0)

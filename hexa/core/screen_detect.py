@@ -777,8 +777,11 @@ class ScreenDetector(threading.Thread):
     def _grab_card_crop(self, idx: int):
         """点击时刻定格第 idx 张卡画面 → 裁剪图 | None（毫秒级，不 OCR）。
 
-        抓帧在 _grab_lock 内一次完成：点击瞬间画面定格，之后界面动画/
-        关闭都不影响已取到的像素——"选的时候直接截图，分析交给后台"。"""
+        抓帧经 _grab()（内部自持 _grab_lock 原子完成）——调用方不得再持
+        同一把锁进入：threading.Lock 不可重入，外层 with + _grab() 内层
+        with 同线程二次获取 = 永久死锁（2026-09-30 真机审查发现，点击
+        链一旦踩中 MouseLedger 线程即挂死、后续点击全部零痕迹）。定格
+        语义不变：grab 在锁内一次完成，返回帧后界面变化不影响已取像素。"""
         if self.layout is None or not self.ocr.available:
             return None
         try:
@@ -786,8 +789,7 @@ class ScreenDetector(threading.Thread):
             cards = regions["cards"]
             if idx < 0 or idx >= len(cards):
                 return None
-            with self._grab_lock:
-                frame = self._grab()
+            frame = self._grab()
             return self._crop(frame, cards[idx])
         except Exception as e:  # noqa: BLE001 —— 抓帧失败按"未抓到"处理
             print(f"[WARN] 点击抓帧异常: {e}")

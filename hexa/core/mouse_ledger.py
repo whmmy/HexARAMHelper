@@ -31,6 +31,7 @@ class MouseLedger(threading.Thread):
     """
 
     POLL_INTERVAL = 0.02   # 20ms：抓住 >=20ms 的点击（50ms 间隔内完成的快速点击只靠高位会整次漏掉）
+    STAT_INTERVAL = 60.0   # 按下沿汇总周期（观测性，0 次也打：两种失败都要可见）
 
     def __init__(self, on_click, on_reroll=None,
                  reroll_rect_provider=lambda: None):
@@ -41,6 +42,8 @@ class MouseLedger(threading.Thread):
         self._running = False
         self._prev_down = False
         self._user32 = ctypes.windll.user32
+        self._edge_count = 0      # 统计窗内左键按下沿数（60s 汇总打点）
+        self._stat_ts = time.monotonic()
 
     def stop(self):
         self._running = False
@@ -67,12 +70,28 @@ class MouseLedger(threading.Thread):
             return [rr]
         return list(rr)
 
+    def _maybe_report_edges(self, now: float):
+        """60s 左键按下沿汇总（观测性打点，0 次也打）。
+
+        2026-09-30 牛头案：两局全部海克斯选卡点击零记账（augments=0、
+        clicks 全 drop），且 py-spy 实证 MouseLedger/检测线程均存活——
+        静态推演无法定案"按下沿没收到（键位/轮询丢失）"还是"收到但
+        路由丢弃（坐标/状态门控）"。本计数与 app 侧未路由计数对账：
+        按下沿>0 而路由痕迹=0 → 坐标/状态问题；按下沿=0 → 键位问题。"""
+        if now - self._stat_ts < self.STAT_INTERVAL:
+            return
+        print(f"[MOUSE] 近{int(self.STAT_INTERVAL)}s 左键按下沿 "
+              f"{self._edge_count} 次")
+        self._edge_count = 0
+        self._stat_ts = now
+
     def run(self):
         self._running = True
         while self._running:
             try:
                 down = self.left_button_down()
                 if down and not self._prev_down:
+                    self._edge_count += 1
                     x, y = self.cursor_pos()
                     rr = self.reroll_rect_provider() if self.reroll_rect_provider else None
                     if any(point_in_rect(x, y, r) for r in self._as_rect_list(rr)):
@@ -81,6 +100,7 @@ class MouseLedger(threading.Thread):
                     elif self.on_click:
                         self.on_click(x, y)
                 self._prev_down = down
+                self._maybe_report_edges(time.monotonic())
             except Exception as e:  # noqa: BLE001 —— 轮询异常不中断线程
                 print(f"[WARN] 鼠标观察异常: {e}")
             time.sleep(self.POLL_INTERVAL)
