@@ -34,7 +34,7 @@ from hexa.ai.engine import (AIDecisionEngine, KIND_NEXT, KIND_OPENING,
 from hexa.core.game_state import GameSession
 from hexa.core.live_api import LivePoller, LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
-from hexa.core.mouse_ledger import CardLedger
+from hexa.core.mouse_ledger import CardLedger, MouseLedger
 from hexa.core.rules_engine import (RulesEngine, SwapCandidate, ThreatProfile,
                                     is_full_build)
 from hexa.core.screen_detect import (DEFAULT_LAYOUT_169, DetectorCore, Layout,
@@ -2616,6 +2616,39 @@ def test_grab_card_crop_no_deadlock():
     check("越界卡号安全返回 None", det._grab_card_crop(5) is None)
 
 
+def test_mouse_ledger_hook():
+    """点击捕获 v2（2026-09-30 牛头案）：GetAsyncKeyState 轮询被 OCR
+    活跃期饿死——轮询间隙 100ms+ 叠 Windows sleep 精度，60-80ms 的快速
+    选卡点击整次漏掉（两局 7 轮选卡零记账、所有捕获点击均在 OCR 空闲期
+    的定向证据）。改 WH_MOUSE_LL 低级钩子：系统投递事件，回调只做
+    非阻塞投队列（慢回调会拖慢全系统鼠标，游戏内不可接受），处理线程
+    消费路由。断言：钩子安装成功、队列→路由端到端、stop 干净退出。"""
+    print("\n[11d] 点击捕获 v2（LL 钩子）")
+    got = []
+    ml = MouseLedger(
+        on_click=lambda x, y: got.append(("click", x, y)),
+        on_reroll=lambda x, y: got.append(("reroll", x, y)),
+        reroll_rect_provider=lambda: [[900, 600, 100, 80]])
+    ml.start()
+    try:
+        time.sleep(0.5)
+        check("LL 钩子安装成功", ml.mode == "hook" and ml.is_alive(),
+              f"mode={ml.mode}")
+        # 模拟钩子投递 → 处理线程路由端到端
+        ml._queue.put((940, 640))    # 命中 reroll 矩形 → on_reroll
+        ml._queue.put((100, 100))    # 矩形外 → on_click
+        deadline = time.time() + 3
+        while len(got) < 2 and time.time() < deadline:
+            time.sleep(0.01)
+        check("队列→路由端到端（reroll 命中/on_click 透传）",
+              len(got) == 2 and got[0][0] == "reroll" and got[1][0] == "click",
+              str(got))
+    finally:
+        ml.stop()
+        ml.join(timeout=3)
+    check("stop 干净退出（消息循环收 WM_QUIT + unhook）", not ml.is_alive())
+
+
 # ── 10. 点击链诊断 + stdout tee 留档（2026-09-29 台账复发案） ─────
 
 def test_click_diag_and_tee():
@@ -2932,6 +2965,7 @@ if __name__ == "__main__":
     test_ai_inflight()
     test_system2_watchdog()
     test_grab_card_crop_no_deadlock()
+    test_mouse_ledger_hook()
     test_session_ai_serial()
     test_swap_mode()
     test_coach_save_gap()
