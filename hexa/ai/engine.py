@@ -7,7 +7,8 @@
 - JevEngine            结构化评估模型占位（P3+，接口先留）
 
 守门（计划 §4 / v4.2 触发模型）：
-- budget_per_game  System1 每局硬上限（超限自动纯规则）
+- budget_per_game  System1 每局上限；<=0 = 不限（默认，2026-09-30
+                   用户拍板），正数硬限超限自动纯规则
 - min_interval     periodic 类精修最小间隔；event 类（死亡/首海克斯/海克斯时刻）不受限
 - 任何异常 → 保留规则建议，绝不阻塞 UI 线程（AI 全部跑后台线程）
 """
@@ -50,8 +51,13 @@ class DecisionEngine(ABC):
 
     @abstractmethod
     def rank_cards(self, hero, card_names, taken, my_items, threat,
-                   serial: int) -> list:
-        """海克斯三卡片评级 [{name, grade, reason}]（同步基准；AI 异步精修）"""
+                   serial: int) -> tuple:
+        """海克斯三卡片评级，返回 (基准评级, AI精修是否在途)。
+
+        基准评级 [{name, grade, reason}] 同步可立即上屏；AI 在途=True 时
+        UI 先显示卡名等评级（"先显卡名后放评级"），精修结果经
+        on_result(KIND_RANKS) 回调覆盖（失败也回调 None 通知清等待态，
+        规则基准成为最终展示）。"""
 
     @abstractmethod
     def skill_order(self, hero: str) -> str:
@@ -95,7 +101,7 @@ class RuleDecisionEngine(DecisionEngine):
                                          game_map=self.game_map, pool=pool)
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
-        return self.rules.rank_augments(hero, card_names, taken)
+        return self.rules.rank_augments(hero, card_names, taken), False
 
     def skill_order(self, hero):
         return self.kb.skill_advice(hero)["priority"]
@@ -135,10 +141,13 @@ class AIDecisionEngine(DecisionEngine):
     # ── 守门 ──────────────────────────────────────────────────────
 
     def _try_reserve(self) -> bool:
-        """原子占位：预算内则计数 +1 并返回 True（检查与计数同锁，防竞态超限）"""
-        budget = int(self.settings.get_float("ai", "budget_per_game", default=15))
+        """原子占位：预算内则计数 +1 并返回 True（检查与计数同锁，防竞态超限）。
+
+        budget_per_game <= 0 = 不限次（默认，2026-09-30 用户拍板：分级
+        单价下单局成本可忽略，不设硬上限）；正数仍硬限，超限自动纯规则。"""
+        budget = int(self.settings.get_float("ai", "budget_per_game", default=0))
         with self._lock:
-            if self._calls >= budget:
+            if budget > 0 and self._calls >= budget:
                 return False
             self._calls += 1
             return True
@@ -153,7 +162,9 @@ class AIDecisionEngine(DecisionEngine):
         """后台执行 AI 精修；结果经 on_result(kind, payload, serial) 回传。
 
         提交时捕获游戏代际——旧局迟到结果在回调前整包丢弃（防串局）。
-        """
+        精修失败/空结果也回调 on_result(kind, None, serial)：等待态消费方
+        （如海克斯评级的"AI 评级中"）借此清等待、回落规则底线展示，
+        否则失败时等待态永久滞留（2026-09-30 评级等待态案）。"""
         with self._lock:
             epoch = self._epoch
             self._inflight += 1
@@ -166,11 +177,16 @@ class AIDecisionEngine(DecisionEngine):
                 if stale:
                     print(f"[AI] 丢弃旧局精修结果 {kind}（代际过期）")
                     return
-                if payload is not None and self.on_result:
-                    self._last_refine[kind] = time.time()
+                if not payload:
+                    payload = None   # 空结果按失败口径：通知等待方回落规则底线
+                if self.on_result:
+                    if payload:
+                        self._last_refine[kind] = time.time()
                     self.on_result(kind, payload, serial)
-            except Exception as e:  # noqa: BLE001 —— 精修失败保留规则底线
+            except Exception as e:  # noqa: BLE001 —— 精修失败保留规则建议
                 print(f"[WARN] AI 精修 {kind} 失败（保留规则建议）: {e}")
+                if self.on_result:
+                    self.on_result(kind, None, serial)
             finally:
                 with self._lock:
                     self._inflight -= 1
@@ -352,9 +368,9 @@ class AIDecisionEngine(DecisionEngine):
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
         base = self.delegate.rank_cards(hero, card_names, taken, my_items,
-                                        threat, serial)
+                                        threat, serial)[0]
         if not (self._ctx_ready() and self._try_reserve()):
-            return base
+            return base, False
         ctx = self.cache.get()
         summary = threat.summary() if threat else ""
 
@@ -363,7 +379,7 @@ class AIDecisionEngine(DecisionEngine):
                 self.client_s1, ctx, hero, card_names, taken or [], my_items,
                 summary, base, enemy=self._enemy_detail())
         self._submit(KIND_RANKS, serial, fn)
-        return base
+        return base, True
 
     # ── 查询 ──────────────────────────────────────────────────────
 
@@ -393,7 +409,7 @@ class AIDecisionEngine(DecisionEngine):
         ctx = self.cache.get()
         return {"mode": self.mode, "calls": calls,
                 "budget": int(self.settings.get_float(
-                    "ai", "budget_per_game", default=15)),
+                    "ai", "budget_per_game", default=0)),
                 "cost_game": round(cost_game, 4),
                 "cost_total": round(cost_total, 4),
                 "inflight": self._inflight,

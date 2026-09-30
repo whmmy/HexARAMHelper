@@ -47,7 +47,9 @@ DEFAULTS = {
     # AI 总开关（关 = 纯规则模式，P0 验收要求无 key 可用）
     "ai": {
         "enabled": False,
-        "budget_per_game": 15,        # 每局 System1 调用硬上限
+        "budget_per_game": 0,         # 每局 System1 调用上限（<=0 = 不限，
+                                      # 2026-09-30 用户拍板：分级单价下成本可忽略；
+                                      # 要限就填正数，超限自动纯规则）
     },
     # System 2：ChampionContext 生成（每局 1 次）
     "system2": {

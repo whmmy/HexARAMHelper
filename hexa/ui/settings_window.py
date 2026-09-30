@@ -117,7 +117,7 @@ class SettingsWindow(tk.Toplevel):
         row.pack(fill=tk.X, padx=8, pady=6)
         self.vars["ai.budget_per_game"] = tk.StringVar()
         self.vars["ai.min_interval"] = tk.StringVar()
-        ttk.Label(row, text="每局 System1 硬上限:").pack(side=tk.LEFT)
+        ttk.Label(row, text="每局 System1 上限(0=不限):").pack(side=tk.LEFT)
         ttk.Entry(row, textvariable=self.vars["ai.budget_per_game"],
                   width=6).pack(side=tk.LEFT, padx=(4, 16))
         ttk.Label(row, text="periodic 精修最小间隔(秒):").pack(side=tk.LEFT)
@@ -211,7 +211,7 @@ class SettingsWindow(tk.Toplevel):
         s = self.settings
         self.vars["ai.enabled"].set(bool(s.get("ai", "enabled", default=False)))
         self.vars["ai.budget_per_game"].set(
-            str(s.get("ai", "budget_per_game", default=15)))
+            str(s.get("ai", "budget_per_game", default=0)))
         self.vars["ai.min_interval"].set(
             str(s.get("ai", "min_interval", default=20)))
         for key in ("death_next_item", "periodic_recheck", "enemy_key_item",
@@ -236,7 +236,7 @@ class SettingsWindow(tk.Toplevel):
     def _save(self):
         s = self.settings
         s.set("ai", "enabled", bool(self.vars["ai.enabled"].get()))
-        s.set("ai", "budget_per_game", self._num("ai.budget_per_game", 15, int))
+        s.set("ai", "budget_per_game", self._num("ai.budget_per_game", 0, int))
         s.set("ai", "min_interval", self._num("ai.min_interval", 20, float))
         for key in ("death_next_item", "periodic_recheck", "enemy_key_item",
                     "enemy_kda"):

@@ -196,7 +196,8 @@ class MainWindow:
                 or "-（对局内自动生成：阵容缺口/顺逆风/攒钱与替换提醒）")
             self._render_ledger(state['augments'])
             self._render_build_progress(state.get('build_progress'))
-            self._render_ranks(state.get('card_ranks') or [])
+            self._render_ranks(state.get('card_ranks') or [],
+                               bool(state.get('card_ranks_pending')))
             self._render_freshness(state)
             self._render_engine(state.get('engine') or {})
         except Exception as e:
@@ -279,15 +280,19 @@ class MainWindow:
         self.bp_box.columnconfigure(0, weight=1)
         self.bp_box.columnconfigure(1, weight=1)
 
-    def _render_ranks(self, ranks):
+    def _render_ranks(self, ranks, pending=False):
         if not ranks:
             self.card_ranks.config(text="-（海克斯界面出现时显示）")
             return
         lines = []
         for i, r in enumerate(ranks[:3], 1):
-            grade = r.get("grade", "?")
-            lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}  [{grade}]  "
-                         f"{r.get('reason', '')}")
+            if pending:
+                # AI 评级精修在途：先显卡名，档位等回调后再放（与 overlay 同口径）
+                lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}  ⏳ AI 评级中…")
+            else:
+                grade = r.get("grade", "?")
+                lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}  [{grade}]  "
+                             f"{r.get('reason', '')}")
         self.card_ranks.config(text="\n".join(lines))
 
     def _render_engine(self, st):
@@ -299,7 +304,9 @@ class MainWindow:
         if mode == "rule":
             txt, color = "AI: 关（规则模式）", Theme.TEXT_DIM
         else:
-            txt = (f"AI: {mode} | 本局 {st.get('calls', 0)}/{st.get('budget', 0)} 次"
+            budget = st.get('budget', 0)
+            budget_txt = "∞" if budget <= 0 else budget   # <=0 = 不限次
+            txt = (f"AI: {mode} | 本局 {st.get('calls', 0)}/{budget_txt} 次"
                    f" | ¥{st.get('cost_game', 0):.4f} | 上下文 {st.get('ctx_source', '-')}")
             color = Theme.SUCCESS
         self.lbl_engine.config(text=txt, foreground=color)

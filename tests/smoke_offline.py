@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hexa.ai.client import UsageStats
 from hexa.ai.engine import (AIDecisionEngine, KIND_NEXT, KIND_OPENING,
-                            RuleDecisionEngine)
+                            KIND_RANKS, RuleDecisionEngine)
 from hexa.core.game_state import GameSession
 from hexa.core.live_api import LivePoller, LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
@@ -572,6 +572,16 @@ def test_session():
     st = session.ui_state()
     check("hex 识别成功标记", st["hex_active"] and st["hex_recognized"]
           and len(st["card_ranks"]) == 3, str(st["hex_recognized"]))
+    check("规则模式评级无等待态（基准即最终展示）",
+          st["card_ranks_pending"] is False, str(st["card_ranks_pending"]))
+    # AI 评级等待态契约（2026-09-30 先显卡名后放评级）：None payload =
+    # 精修失败/空结果信号 → 清等待态，规则基准保留为最终展示
+    session.card_ranks_pending = True
+    session._on_engine_result(KIND_RANKS, None, session._card_serial)
+    st = session.ui_state()
+    check("评级失败信号清等待态（基准保留）",
+          not st["card_ranks_pending"] and len(st["card_ranks"]) == 3,
+          f"pending={st['card_ranks_pending']}")
     other = sorted(kb.augment_names)[1]
     session.record_augment(other, card_idx=1)
     st = session.ui_state()
@@ -1145,7 +1155,7 @@ def test_detect_and_layout():
 class FakeSettings:
     """Settings 协议子集（get/set），预置 AI 开 + 两槽位已配置"""
 
-    def __init__(self, budget=15, min_interval=0.0):
+    def __init__(self, budget=0, min_interval=0.0):   # 默认随产品：0 = 不限
         self._d = {
             "ai": {"enabled": True, "budget_per_game": budget,
                    "min_interval": min_interval},
@@ -1201,7 +1211,7 @@ class FakeClient:
                       "tokens_in": 100, "tokens_out": 50}
 
 
-def build_ai_engine(script_s2=(), script_s1=(), budget=15, min_interval=0.0):
+def build_ai_engine(script_s2=(), script_s1=(), budget=0, min_interval=0.0):
     st = FakeSettings(budget=budget, min_interval=min_interval)
     delegate = RuleDecisionEngine(kb, rules)
     c2 = FakeClient(list(script_s2))
@@ -1328,7 +1338,16 @@ def test_ai_engine():
     # ---- 海克斯时刻评级精修 ----
     c1.script.append(_json.dumps({"grades": [
         {"name": top[0], "grade": "S", "reason": "版本亲和第一"}]}))
-    eng.rank_cards(hero, top[:3], [], [], threat, serial=4)
+    ret = eng.rank_cards(hero, top[:3], [], [], threat, serial=4)
+    check("评级 AI 在途标记（先显卡名后放评级）",
+          isinstance(ret, tuple) and len(ret[0]) == 3 and ret[1] is True,
+          str(ret[1] if isinstance(ret, tuple) else ret))
+    eng_nosub, _c1x, _c2x = build_ai_engine()   # 未 start_game：ctx 未就绪
+    check("ctx 未就绪不进评级等待态（基准直显）",
+          eng_nosub.rank_cards(hero, top[:3], [], [], None, 1)[1] is False)
+    check("规则引擎评级无等待态（基准直显）",
+          RuleDecisionEngine(kb, rules)
+          .rank_cards(hero, top[:3], [], [], None, 1)[1] is False)
     deadline = time.time() + 5
     got_ranks = None
     while time.time() < deadline:
@@ -1360,6 +1379,12 @@ def test_ai_engine():
     time.sleep(0.3)
     check("预算守门生效", len(c1b.calls) == calls_after_budget == 2,
           f"calls={len(c1b.calls)}")
+
+    # ---- 预算 0 = 不限次（2026-09-30 默认）：连续占用远超旧上限仍放行 ----
+    eng_u, _c1u, _c2u = build_ai_engine(budget=0)
+    ok_unl = all(eng_u._try_reserve() for _ in range(30)) \
+        and eng_u._calls == 30
+    check("预算 0 = 不限次", ok_unl, f"calls={eng_u._calls}")
 
     # ---- 间隔守门：min_interval 很大时 periodic 被压制，event 不受限 ----
     eng_i, c1i, _ = build_ai_engine(script_s2=[_json.dumps(ctx_json)],
@@ -2265,7 +2290,7 @@ def test_review_fixes():
     eng_s.settings._d["system2"]["price_out"] = ""
     try:
         st_stats = eng_s.stats()
-        ok = (st_stats["mode"] == "ai" and st_stats["budget"] == 15
+        ok = (st_stats["mode"] == "ai" and st_stats["budget"] == 0
               and st_stats["cost_game"] >= 0)
     except Exception as e:  # noqa: BLE001 —— 回归点就是"不该抛"
         ok = False

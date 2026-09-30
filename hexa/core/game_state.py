@@ -141,6 +141,7 @@ class GameSession:
             self._sug_serial = 0          # 建议序号（AI 精修防旧覆新）
             self._card_serial = 0         # 海克斯时刻评级序号
             self.card_ranks = []          # 当前海克斯三卡片评级 [{name,grade,reason}]
+            self.card_ranks_pending = False  # AI 评级精修在途（UI 先显卡名后放评级）
             # 海克斯识别状态（overlay 状态标识数据源：多局零识别成功曾无从判断）
             self.hex_active = False       # 三选一界面在屏（detector 回调）
             self.hex_recognized = False   # 本轮三卡已稳定识别（on_cards 已发射）
@@ -486,7 +487,11 @@ class GameSession:
     # ── 海克斯时刻（screen_detect 检测到三卡片 → 评级；记账入口 record_augment） ──
 
     def rank_augment_cards(self, card_names: list) -> list:
-        """三张卡片基准评级（同步）+ AI 精修（异步经 _on_engine_result 覆盖）"""
+        """三张卡片基准评级（同步）+ AI 精修（异步经 _on_engine_result 覆盖）。
+
+        AI 精修在途时 card_ranks_pending=True——UI 先显示卡名（"AI 评级中"），
+        精修回调后放评级；未提交精修（规则模式/ctx 未就绪/预算耗尽）时
+        False，基准评级即时上屏即最终展示。"""
         with self._lock:
             self._card_serial += 1
             serial = self._card_serial
@@ -494,11 +499,12 @@ class GameSession:
             taken = [a["name"] for a in self.augments]
             items = list(self.my_items)
             threat = self.threat
-        ranks = self.engine.rank_cards(hero, card_names, taken, items,
-                                       threat, serial)
+        ranks, ai_pending = self.engine.rank_cards(hero, card_names, taken,
+                                                   items, threat, serial)
         with self._lock:
             if serial == self._card_serial:
                 self.card_ranks = ranks
+                self.card_ranks_pending = ai_pending
                 # 能到这里的调用方（detector on_cards）已保证 ≥2 张有效库名
                 self.hex_active = True
                 self.hex_recognized = True
@@ -509,6 +515,7 @@ class GameSession:
         """海克斯界面消失后清除时刻评级（overlay 时刻块随之隐藏）"""
         with self._lock:
             self.card_ranks = []
+            self.card_ranks_pending = False
 
     # ── 海克斯界面识别状态（detector on_state / reroll 回调） ──────
 
@@ -521,6 +528,7 @@ class GameSession:
                 self.hex_recognized = False
                 self.hex_picked = None
                 self.hex_last = ""
+                self.card_ranks_pending = False   # 新一轮：等待态随轮复位
             else:
                 self.hex_active = False
                 self.hex_last = ("上轮: 识别成功 ✓" if self.hex_recognized
@@ -532,6 +540,7 @@ class GameSession:
             if self.hex_active:
                 self.hex_recognized = False
                 self.hex_picked = None
+                self.card_ranks_pending = False   # 旧轮等待态一并作废
 
     # ── 出门装两分支状态机（v4.1 §2：先海克斯后出门装） ────────────
 
@@ -760,9 +769,13 @@ class GameSession:
                 ctx_refresh = bool(in_next_mode
                                    and not self._is_full_build())
             elif kind == KIND_RANKS:
-                if serial == self._card_serial and payload:
-                    self.card_ranks = payload
-                    self._log("card_ranks_ai", str(len(payload)))
+                if serial == self._card_serial:
+                    if payload:
+                        self.card_ranks = payload
+                        self._log("card_ranks_ai", str(len(payload)))
+                    # None（精修失败/空结果信号）同样清等待态：规则基准
+                    # 即为最终展示，"AI 评级中"不能永久滞留
+                    self.card_ranks_pending = False
             elif serial == self._sug_serial and self.suggestion is not None:
                 # opening / next_items：serial 匹配当前建议且类型一致才覆盖
                 cur = self.suggestion
@@ -1212,6 +1225,7 @@ class GameSession:
                 "coach_latest": (self.coach_notes[-1]["text"]
                                  if self.coach_notes else ""),
                 "card_ranks": [dict(r) for r in self.card_ranks],
+                "card_ranks_pending": self.card_ranks_pending,
                 "hex_active": self.hex_active,
                 "hex_recognized": self.hex_recognized,
                 "hex_picked": (list(self.hex_picked)

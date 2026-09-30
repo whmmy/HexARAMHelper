@@ -278,11 +278,15 @@ class Overlay:
         """海克斯时刻：识别状态标识 + 三卡片档位（S 绿 / A 蓝 / B 白 / C 黄）
 
         状态流转（多局零识别成功曾无从判断，全程可见）：
-        界面在屏未识别 → "⏳ 识别中…"；识别成功 → 标题 ✓、点选卡按卡名标 ✓已选
-        （AI 精修可能重排三卡，按下标会标错行）；reroll/新轮识别复位 →
-        上一轮旧评级直接丢弃并回"识别中"；界面关闭 → 保留上轮 成功✓/失败✗ 一行。
+        界面在屏未识别 → "⏳ 识别中…"；识别成功 → 标题 ✓、三卡上屏
+        （AI 精修在途时只显卡名 + "⏳ AI 评级中…"，评级返回后放档位，
+        2026-09-30：此前规则基准档顶着评级直接上屏，用户易当成 AI 结论）；
+        点选卡按卡名标 ✓已选（AI 精修可能重排三卡，按下标会标错行）；
+        reroll/新轮识别复位 → 上一轮旧评级直接丢弃并回"识别中"；
+        界面关闭 → 保留上轮 成功✓/失败✗ 一行。
         """
         ranks = state.get("card_ranks") or []
+        pending = bool(state.get("card_ranks_pending"))
         active = state.get("hex_active", False)
         last = state.get("hex_last", "")
         picked = state.get("hex_picked")
@@ -296,18 +300,32 @@ class Overlay:
                 self._moment_shown = False
             return
         if ranks:
-            lines = ["── 海克斯时刻 ✓已识别 ──"
-                     if state.get("hex_recognized") else "── 海克斯时刻 ──"]
-            # "✓已选"按稳定身份（卡名）匹配：hex_picked=(idx, name) 的 name
-            # 与评级条目 name 同源于检测卡名，模型重排后仍能标对行
-            picked_name = picked[1] if picked and len(picked) > 1 else ""
-            for i, r in enumerate(ranks[:3], 1):
-                mark = (" ✓已选"
-                        if picked_name and r.get("name") == picked_name else "")
-                lines.append(f"{'①②③'[i-1]} [{r.get('grade', '?')}] "
-                             f"{r.get('name', '?')}  {r.get('reason', '')}{mark}")
-            text = "\n".join(lines)
-            fg = GRADE_COLOR.get(ranks[0].get("grade", "?"), ACCENT)
+            if pending:
+                # AI 评级在途：只上卡名（玩家此刻可以先认卡/选卡），
+                # 档位等精修回调后再放——等待态由 game_state 复位兜底
+                lines = ["── 海克斯时刻 ✓已识别 ──"]
+                picked_name = picked[1] if picked and len(picked) > 1 else ""
+                for i, r in enumerate(ranks[:3], 1):
+                    mark = (" ✓已选"
+                            if picked_name and r.get("name") == picked_name
+                            else "")
+                    lines.append(f"{'①②③'[i-1]} {r.get('name', '?')}"
+                                 f"  ⏳ AI 评级中…{mark}")
+                text = "\n".join(lines)
+                fg = ACCENT
+            else:
+                lines = ["── 海克斯时刻 ✓已识别 ──"
+                         if state.get("hex_recognized") else "── 海克斯时刻 ──"]
+                # "✓已选"按稳定身份（卡名）匹配：hex_picked=(idx, name) 的 name
+                # 与评级条目 name 同源于检测卡名，模型重排后仍能标对行
+                picked_name = picked[1] if picked and len(picked) > 1 else ""
+                for i, r in enumerate(ranks[:3], 1):
+                    mark = (" ✓已选"
+                            if picked_name and r.get("name") == picked_name else "")
+                    lines.append(f"{'①②③'[i-1]} [{r.get('grade', '?')}] "
+                                 f"{r.get('name', '?')}  {r.get('reason', '')}{mark}")
+                text = "\n".join(lines)
+                fg = GRADE_COLOR.get(ranks[0].get("grade", "?"), ACCENT)
         elif active:
             text = "── 海克斯时刻 ──\n⏳ 识别中…（读取三张卡面）"
             fg = ACCENT
