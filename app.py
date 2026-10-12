@@ -20,6 +20,14 @@ import tkinter as tk
 
 
 def main():
+    # pythonw 下 stdout/stderr 为 None——任何 print 都 AttributeError
+    # （20261004 提权重启静默死亡案：UAC 点"是"后无窗即此故，知识库
+    # 加载 [OK] 行在 tee 之前打印直接炸进程），先垫安全流
+    if sys.stdout is None:
+        sys.stdout = open(os.devnull, "w", encoding="utf-8")
+    if sys.stderr is None:
+        sys.stderr = open(os.devnull, "w", encoding="utf-8")
+
     # 高 DPI（fork 参考项目 gui_launcher）
     try:
         ctypes.windll.shcore.SetProcessDpiAwareness(1)
@@ -44,9 +52,72 @@ def main():
     from hexa.ui.settings_window import SettingsWindow
     from hexa.ui.theme import LogRedirector
 
+    # UI 队列（后台线程 → UI 线程；可承载事件串与可调用对象）
+    ui_queue = queue.Queue()
+    log_queue = queue.Queue()
+
+    # stdout/stderr → 日志面板 + 文件留档——提前到一切打印之前：
+    # 知识库加载等早期输出也要留档，pythonw 垫流之后的早期 print 才有
+    # 归处（控制台窗口一关输出全丢：2026-09-29 台账复发案起 tee 落盘）
+    _tee_path = BASE_DIR / "log" / f"app_{time.strftime('%Y%m%d_%H%M%S')}.log"
+    _tee_path.parent.mkdir(parents=True, exist_ok=True)
+    sys.stdout = LogRedirector(log_queue, sys.stdout, tee_path=_tee_path)
+    sys.stderr = LogRedirector(log_queue, sys.stderr, tee_path=_tee_path)
+
     settings = Settings()
     kb = KnowledgeBase()
     rules = RulesEngine(kb)
+
+    # ── 自动提权（20261003/04 皮城女警案定案） ────────────────────
+    # 游戏窗口提权(High)运行，本工具 Medium 时游戏画面焦点期的输入对
+    # 全部观察通道（LL 钩子/捕获子进程/GetAsyncKeyState）完全不可见
+    # （事件计数归零、连鼠标移动都没有）——选卡点击永远进不了台账。
+    # 提权到与游戏同级后观察恢复。启动时检测：未提权 → ShellExecute
+    # runas 重启自身（UAC 弹窗一次），拒绝则带降级 WARN 继续跑。
+    from hexa.core.mouse_ledger import is_elevated
+    _relaunch_mark = "--elevated-relaunch" in sys.argv
+    if _relaunch_mark and is_elevated():
+        print("[OK] 管理员权限生效（IL=High）——游戏画面焦点期的输入观察"
+              "就绪")
+    if _relaunch_mark and not is_elevated():
+        # 递归保险（20261004 提权递归案）：重启标记在身仍非提权 → 不再
+        # 二次请求（否则无限递归，8 分钟 1500 个实例），带降级 WARN 运行
+        print("[WARN] 提权重启未生效（仍为普通权限）——游戏内选卡点击"
+              "无法记账；请右键本程序选择\"以管理员身份运行\"后重试")
+    if (not is_elevated() and not _relaunch_mark
+            and bool(settings.get("diagnostics", "elevate_auto",
+                                  default=True))):
+        # 重启目标必须绕开 uv 的 pythonw trampoline（.venv\Scripts 下的
+        # 是跳板，提权令牌在它 spawn 真解释器时丢失 → 子进程仍 Medium →
+        # 再次请求 → 无限递归）：从 pyvenv.cfg 解析基础解释器直启，
+        # PYTHONPATH 指向 venv site-packages 保住虚拟环境依赖
+        target = None
+        try:
+            for line in (BASE_DIR / ".venv" / "pyvenv.cfg").read_text(
+                    encoding="utf-8").splitlines():
+                if line.lower().startswith("home"):
+                    base = os.path.dirname(line.split("=", 1)[1].strip())
+                    cand = os.path.join(base, "pythonw.exe")
+                    if os.path.exists(cand):
+                        target = cand
+                    break
+        except Exception:  # noqa: BLE001 —— 解析失败走跳板兜底
+            pass
+        if target is None:
+            target = str(BASE_DIR / ".venv" / "Scripts" / "pythonw.exe")
+        site = str(BASE_DIR / ".venv" / "Lib" / "site-packages")
+        os.environ["PYTHONPATH"] = os.pathsep.join(
+            [p for p in (site, os.environ.get("PYTHONPATH", "")) if p])
+        script = os.path.abspath(sys.argv[0])
+        ret = ctypes.windll.shell32.ShellExecuteW(
+            None, "runas", target, f'"{script}" --elevated-relaunch',
+            str(BASE_DIR), 1)
+        if ret > 32:
+            print("[OK] 已请求管理员权限重启（UAC 确认后生效）——游戏画面"
+                  "焦点期的输入观察需要与游戏同级权限")
+            return
+        print("[WARN] 提权未确认（UAC 拒绝或失败）——以普通权限运行："
+              "游戏内的选卡点击将无法记账（输入被提权游戏窗口屏蔽）")
 
     # 降进程优先级：本工具任何突发计算（OCR/截图）都不与游戏抢核
     try:
@@ -57,19 +128,8 @@ def main():
 
     dumper = FixtureDumper(enabled=bool(settings.get("fixtures", "dump", default=False)))
 
-    # UI 队列（后台线程 → UI 线程；可承载事件串与可调用对象）
-    ui_queue = queue.Queue()
-    log_queue = queue.Queue()
-
     root = tk.Tk()
     root.withdraw()  # 主窗口在初始化完成后再显示
-
-    # stdout/stderr → 日志面板 + 文件留档（控制台窗口一关输出全丢：
-    # 2026-09-29 台账复发案无任何事后日志可查，从本次启动起 tee 落盘）
-    _tee_path = BASE_DIR / "log" / f"app_{time.strftime('%Y%m%d_%H%M%S')}.log"
-    _tee_path.parent.mkdir(parents=True, exist_ok=True)
-    sys.stdout = LogRedirector(log_queue, sys.stdout, tee_path=_tee_path)
-    sys.stderr = LogRedirector(log_queue, sys.stderr, tee_path=_tee_path)
 
     # UI 线程调度 helper（任意线程 → mainloop）
     def ui(fn):
@@ -83,14 +143,23 @@ def main():
                       summoner_name_fn=lcu.summoner_name)
     session = GameSession(kb, rules, settings=settings,
                           fixture_dumper=dumper, live_poller=live,
-                          engine=engine)
+                          engine=engine,
+                          # 鼠标双通道统计窗随复盘 JSON 落盘（台账排障局级
+                          # 证据）。ledger 在下方才构造——复盘写盘时刻必已
+                          # 存在，此处晚绑定即可
+                          mouse_stats_fn=lambda: ledger.stats_history())
     live.on_snapshot = session.on_snapshot
 
     phase = PhaseMachine(lcu, callbacks={
         "on_champ_select": session.on_champ_select,
         "on_game_start": session.on_game_start,
-        "on_in_progress": session.on_in_progress,
-        "on_end_of_game": session.on_end_of_game,
+        # 20261002 寒冰案：局内相位切换 MouseLedger 轮询通道开关——LL 钩子
+        # 在游戏窗口焦点期收不到事件（客户端窗口期正常）。回调在相位机
+        # 首次触发时才解引用，ledger 必已构造（phase.start() 在其后）。
+        "on_in_progress": lambda *a: (ledger.set_game_mode(True),
+                                      session.on_in_progress()),
+        "on_end_of_game": lambda *a: (ledger.set_game_mode(False),
+                                      session.on_end_of_game(*a)),
         "on_phase": session.on_phase,          # phase 轨迹进复盘 timeline
         "check_stall": session.report_data_stall,   # 数据流停摆→终局兜底
     })
@@ -127,6 +196,43 @@ def main():
 
     detector.capture_sink = _capture_sink
 
+    def _frame_sink(frame):
+        """每轮海克斯界面激活帧存档（20261003 皮城女警案：用户点击落点
+        与标定矩形错位嫌疑——留档看卡片真实位置，坐标争议一锤定音）。"""
+        if not _capture_on:
+            return
+        import cv2
+        _cap_dir.mkdir(parents=True, exist_ok=True)
+        path = _cap_dir / (f"round_{time.strftime('%Y%m%d_%H%M%S')}.png")
+        ok, buf = cv2.imencode(".png", frame)
+        if ok:
+            path.write_bytes(buf.tobytes())
+
+    detector.frame_sink = _frame_sink
+
+    def _capture_full_drop(x, y):
+        """丢弃点击的全屏定格（5s 限频）：rect_miss/no_hex_evidence 的
+        点击没有卡面可截，但"用户点的那一刻屏幕上是什么"是排障铁证。"""
+        if not _capture_on:
+            return None
+        now = time.monotonic()
+        if now - _click_diag_ts.get("_full_drop", 0.0) < 5.0:
+            return None
+        _click_diag_ts["_full_drop"] = now
+        try:
+            frame = detector._grab()
+            import cv2
+            _cap_dir.mkdir(parents=True, exist_ok=True)
+            path = _cap_dir / (f"drop_{time.strftime('%Y%m%d_%H%M%S')}"
+                               f"_{int(x)}_{int(y)}.png")
+            ok, buf = cv2.imencode(".png", frame)
+            if ok:
+                path.write_bytes(buf.tobytes())
+                return path.name
+        except Exception as e:  # noqa: BLE001 —— 排障辅助不拖垮主链路
+            print(f"[WARN] 丢弃点击截屏异常: {e}")
+        return None
+
     def _on_state(active, round_id):
         if active:
             session.on_hex_ui(True)
@@ -142,7 +248,41 @@ def main():
         detector.last_cards = list(stable_cards)  # 含 None 占位（保证卡片序对齐）
         names = [n for n in stable_cards if n]
         print(f"[DETECT] 本轮卡片: {names}")
-        ranks = session.rank_augment_cards(stable_cards)  # 同步基准 + AI 异步精修
+        # 描述自举（20261013）：卡面原文是海克斯能力的事实源——标签库是
+        # 离线从名字猜的压缩结论（真机实锤 大法师 被标 ap/法穿/爆发，原文
+        # 是技能花费返还）。现在抓帧定格（界面在屏），OCR 在后台线程跑；
+        # 评级 AI 精修线程经 fetcher 等待结果进 prompt 并写回知识库——
+        # 调用频次不增，规则基准照旧即时上屏。
+        _desc_box = {}
+        _desc_done = threading.Event()
+
+        def _on_desc(descs):
+            _desc_box["descs"] = descs
+            _desc_done.set()
+
+        detector.async_ocr_descriptions(_on_desc, round_id=round_id)
+
+        def _desc_fetcher():
+            if not _desc_done.wait(10.0):
+                print("[WARN] 卡面描述 OCR 超时（10s），本轮评级不带描述")
+                return None
+            descs = _desc_box.get("descs")
+            if not descs:
+                return None
+            out = {}
+            for i, n in enumerate(stable_cards):
+                if not n:
+                    continue
+                text = (descs.get(i) or "").strip()
+                if len(text) >= 8:
+                    out[n] = text[:120]
+                    kb.record_augment_desc(n, out[n])   # 自增长资产：随对局自更新
+                elif kb.augment_desc(n):
+                    out[n] = kb.augment_desc(n)   # 本轮该卡没读到 → 库缓存兜底
+            return out or None
+
+        ranks = session.rank_augment_cards(stable_cards,
+                                           desc_fetcher=_desc_fetcher)
         # 打印标注 ctx 来源：ctx 未就绪时这行只是规则基准，此前顶着 [AI]
         # 前缀被当成 AI 返回，对账时无从分辨（20260929 曙光女神案）
         try:
@@ -199,24 +339,29 @@ def main():
                                "result": f"dropped_{key}", "name": None,
                                "raw": None, "image": None})
 
-    def _on_click(x, y):
+    def _on_click(x, y, ts=None):
         # 双保险：MouseLedger 已把刷新按钮命中独占路由给 on_reroll，正常
-        # 走不到这里；留着防御路由/矩形来源将来变更时误把刷新记账成选卡
+        # 走不到这里；留着防御路由/矩形来源将来变更时误把刷新记账成选卡。
+        # ts=点击时刻（v4 透传）：门控/记账一律按点击时刻判定，处理线程
+        # 被拖 late 时不再按处理时刻误丢（20261002 虚空之女案）
+        t_click = ts if ts is not None else time.time()
         for rr in _reroll_rects() or []:
             if point_in_rect(x, y, rr):
                 _click_diag("reroll_overlap",
                             f"({x},{y}) 命中刷新按钮矩形（路由异常?）",
-                            ev={"x": x, "y": y, "card": None})
+                            ev={"x": x, "y": y, "card": None, "ts": t_click})
                 return
         idx = card_ledger.card_at(x, y)
-        active = detector.recent_hex_activity()
+        active = detector.recent_hex_activity(ts=t_click)
         if idx is None:
             if detector.core.state == "active":
                 rects = card_ledger.rects_provider()
+                shot = _capture_full_drop(x, y)
                 _click_diag("rect_miss",
                             f"({x},{y}) 海克斯界面在屏但未命中任何卡片矩形 "
                             f"{rects}（标定错位嫌疑）",
-                            ev={"x": x, "y": y, "card": None})
+                            ev={"x": x, "y": y, "card": None, "ts": t_click,
+                                "image": shot})
             else:
                 st = _silent_clicks
                 st["n"] += 1
@@ -228,38 +373,54 @@ def main():
                     st["ts"] = now
             return   # 常规对局点击（移动/攻击）占绝大多数：静默防刷屏
         if not active:
+            shot = _capture_full_drop(x, y)
             _click_diag("no_hex_evidence",
                         f"({x},{y}) 卡{idx + 1} 矩形命中但无海克斯证据"
                         "（界面刚关 >10s？）",
-                        ev={"x": x, "y": y, "card": idx + 1})
+                        ev={"x": x, "y": y, "card": idx + 1, "ts": t_click,
+                            "image": shot})
             return   # 卡片矩形命中但无海克斯证据 = 误入
+        # 本轮已记账 → 界面早已随选卡关闭，这是选完后的游玩点击（商店推荐
+        # 面板/移动落进旧卡矩形）——20261012 赏金猎人案幻影记账的闸门：
+        # 检测器消失迟滞 5~9s + 证据窗 10s 内残留卡名仍有效，真机一局被
+        # 多记 2 条。放在抓帧之前：游玩点击不再产生定格截图。
+        rid = detector.core.round_id
+        if session.round_recorded(rid):
+            _click_diag("round_recorded",
+                        f"({x},{y}) 卡{idx + 1} 第{rid}轮已记账，后续点击"
+                        "按游玩点击丢弃",
+                        ev={"x": x, "y": y, "card": idx + 1, "ts": t_click})
+            return
         # 点击时刻抓帧定格+落盘（毫秒级）；直记/补扫消费同一张 crop，
         # 保证截图与识别看到的是同一像素（台账对账三方：clicks/截图/日志）
-        t0 = time.time()
         crop, img = detector.capture_click_evidence(idx)
         # 稳定结果优先；识别尚未稳定时用最近一帧读数兜底（历史缺陷：
         # OCR 逐帧抖动导致永不稳定 → last_cards 空 → 点击被静默丢弃）
         cards = detector.last_cards or detector.last_cards_raw
         name = cards[idx] if cards and idx < len(cards) else None
         if name and kb.valid_augment(name):
-            _record_click(idx, name, None, ev=(t0, x, y, idx, "direct", img))
+            _record_click(idx, name, None,
+                          ev=(t_click, x, y, idx, "direct", img), rid=rid)
             return
         # 识别挪后台线程（迟滞窗口/OCR 迟滞期的点击也要能记账；历史缺陷：
         # 这里的点击被静默丢弃 → 台账缺记录；2026-09-29 起不再同步阻塞
         # 记账线程 ~2s，连点两卡不漏）
         detector.async_ocr_card_raw(
-            idx, lambda n, r, i=idx: _record_click(
-                i, n, r, ev=(t0, x, y, i, "rescan", img)),
+            idx, lambda n, r, i=idx, rid=rid: _record_click(
+                i, n, r, ev=(t_click, x, y, i, "rescan", img), rid=rid),
             crop=crop)
 
-    def _record_click(idx, name, raw, ev=None):
+    def _record_click(idx, name, raw, ev=None, rid=None):
         """点击记账落位（稳定名直记 / 后台补扫回调共用）。
 
         库外名留痕：timeline 记下 OCR 原文随复盘日志落盘（知识库
         落后于游戏版本时才有线索可查）；不进台账、不参与联动推装。
         ev=(点击时刻, x, y, 卡号, 分支, 截图文件名)：终点组装 clicks
         黑匣子记录——direct=稳定名直记，rescan=后台补扫，
-        callback=无上下文兜底（不该出现，出现即上下文丢失线索）。"""
+        callback=无上下文兜底（不该出现，出现即上下文丢失线索）。
+        rid：点击时刻的检测器轮次——成功记账即登记本轮（session 侧
+        闸门数据源）并立即作废残留卡名（同 reroll 分支）：20261012
+        赏金猎人案，选卡后窗口期内商店/地面的 OCR 读数不得再入台账。"""
         if ev is None:
             ev = (time.time(), None, None, idx, "callback", None)
         t0, x, y, card, branch, img = ev
@@ -282,26 +443,35 @@ def main():
                                        "可能是知识库落后于游戏版本，"
                                        "请刷新 augments.json"))
             return
-        ok = session.record_augment(name, card_idx=idx)
+        ok = session.record_augment(name, card_idx=idx, round_id=rid)
         _blackbox("recorded" if ok else "duplicate", name)
         if ok:
+            detector.last_cards = None   # 残留卡名作废（选卡完成界面即关，
+            detector.last_cards_raw = None   # 窗口期内读数只该走向丢弃分支）
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
         else:
             ui(lambda n=name: print(f"[LEDGER] {n} 已在台账，忽略重复记录"))
 
-    def _on_reroll(x, y):
-        if not detector.recent_hex_activity():
+    def _on_reroll(x, y, ts=None):
+        t_click = ts if ts is not None else time.time()
+        if not detector.recent_hex_activity(ts=t_click):
             _click_diag("reroll_no_evidence",
                         f"({x},{y}) 刷新按钮命中但无海克斯证据",
-                        ev={"x": x, "y": y, "card": None})
+                        ev={"x": x, "y": y, "card": None, "ts": t_click})
             return   # 界面关闭 >10s 后的对局点击不再触发重扫/刷日志（同 _on_click 门）
+        if session.round_recorded(detector.core.round_id):
+            _click_diag("reroll_round_recorded",
+                        f"({x},{y}) 刷新按钮命中但本轮已记账（选卡后游玩"
+                        "点击，防重扫/浮窗状态被误触发）",
+                        ev={"x": x, "y": y, "card": None, "ts": t_click})
+            return
         detector.force_rescan()
         detector.last_cards = None  # 重扫稳定前点击不记账（防按旧卡片名记录）
         detector.last_cards_raw = None
         session.on_hex_reroll()     # 浮窗回"识别中"，选中标记作废
         session.log_click({"x": x, "y": y, "card": None, "branch": "reroll",
                            "result": "reroll_rescan", "name": None,
-                           "raw": None, "image": None})
+                           "raw": None, "image": None, "ts": t_click})
         ui(lambda: print("[LEDGER] reroll → 已触发重扫"))
 
     ledger = MouseLedger(

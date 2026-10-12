@@ -751,6 +751,15 @@ class ScreenDetector(threading.Thread):
                     regions = self.layout.to_pixels(*self._screen_size(),
                                                     canvas=True)
                     self._save_templates(frame, regions)
+                    # 激活帧存档（20261003 皮城女警案：检测器认为卡在标定
+                    # 矩形处、用户点击却落在屏幕底部——每轮留一张激活帧，
+                    # 卡片真实位置一目了然）
+                    sink = getattr(self, "frame_sink", None)
+                    if sink is not None:
+                        try:
+                            sink(frame)
+                        except Exception as e:  # noqa: BLE001
+                            print(f"[WARN] 激活帧存档异常: {e}")
                 except Exception:
                     pass
             else:
@@ -763,16 +772,27 @@ class ScreenDetector(threading.Thread):
     # 描述文字里提及的其他海克斯名干扰）
     NAME_ZONE = (0.30, 0.62)
 
+    # 卡面描述文字纵向带（20261013 描述自举；真机定格帧实测：名行中心
+    # ~0.42H、标签行 ~0.46-0.48H、描述 0.50~0.65H → 取 0.44~0.75 兜住描述
+    # 并容忍分辨率/标定浮动；行级 len>=6 掐掉名行(4字)与标签行(≤5字)，
+    # 定格帧实测描述行均 ≥13 字，见 _ocr_desc_band）
+    DESC_ZONE = (0.44, 0.75)
+
     # ── 点击时刻记账支撑（活跃迟滞窗口内的点击也要能记账） ────────
 
-    def recent_hex_activity(self, within: float = 10.0) -> bool:
+    def recent_hex_activity(self, within: float = 10.0,
+                            ts: float = None) -> bool:
         """最近 within 秒内有过海克斯证据（界面活跃/标题命中/模板高分）。
 
         点击记账的门：检测状态机有 2 帧出现/3 帧消失迟滞——界面刚出现
         或刚关闭的窗口期内点击若按 state 门控会被静默丢弃（2026-09-28
-        真机复盘：台账空白的根因之一），改按证据时间窗判定。"""
+        真机复盘：台账空白的根因之一），改按证据时间窗判定。
+        ts：点击时刻（time.time() 墙钟，v4 起由鼠标链透传）——处理线程
+        被拖 late 时按点击时刻判定而非处理时刻，迟到处理不再误丢。"""
+        if ts is None:
+            ts = time.time()
         return (self.core.state == "active"
-                or time.time() - self._last_hex_evidence < within)
+                or ts - self._last_hex_evidence < within)
 
     def _grab_card_crop(self, idx: int):
         """点击时刻定格第 idx 张卡画面 → 裁剪图 | None（毫秒级，不 OCR）。
@@ -904,6 +924,51 @@ class ScreenDetector(threading.Thread):
     def count_valid_cards(self, cards: list) -> int:
         """三卡中有效库名的个数（on_cards 发射门：≥2 才上报）"""
         return sum(1 for n in cards if n and self.kb.valid_augment(n))
+
+    def _ocr_desc_band(self, frame, card_rects) -> dict:
+        """三卡描述带 OCR → {卡序: 描述文本}（无有效行的卡不进 dict）。
+
+        20261013 描述自举的取数端：卡面原文是海克斯能力的事实源——
+        标签库是离线从名字猜的压缩结论（真机实锤 大法师 被标 ap/法穿/
+        爆发，原文是技能花费返还），评级 prompt 冲突时以描述为准。
+        行级 len>=6 掐掉名行与标签行；多行按 y 排序直接拼接（中文无空格）。"""
+        out = {}
+        for i, rect in enumerate(card_rects):
+            crop = self._crop(frame, rect)
+            ch = crop.shape[0] or 1
+            y0, y1 = self.DESC_ZONE
+            band = crop[int(y0 * ch):int(y1 * ch), :]
+            lines = [(r[1], t.strip())
+                     for t, r, _c in self.ocr.recognize(band)
+                     if t and len(t.strip()) >= 6]
+            if lines:
+                lines.sort(key=lambda x: x[0])
+                out[i] = "".join(t for _y, t in lines)
+        return out
+
+    def async_ocr_descriptions(self, on_done, round_id=None) -> None:
+        """抓当前帧 → 后台线程 OCR 三卡描述带 → on_done({卡序: 文本}|None)。
+
+        评级派发时调用（界面在屏窗口内）：抓帧/OCR 都在本方法拉起的
+        daemon 线程完成（调用线程零阻塞、无锁重入——同线程此时可能刚
+        走完 _grab，threading.Lock 不可重入）；OCR 经 recognize 内部锁
+        与检测线程串行，同 async_ocr_card_raw。round_id 给出且轮次已
+        推进（reroll 换新/界面重开）→ 回调 None 作废过期结果。"""
+        def _work():
+            descs = None
+            try:
+                if round_id is None or self.core.round_id == round_id:
+                    regions = self.layout.to_pixels(*self._screen_size(),
+                                                    canvas=True)
+                    descs = self._ocr_desc_band(self._grab(),
+                                                regions["cards"])
+            except Exception as e:  # noqa: BLE001 —— 描述失败只降级不入账
+                print(f"[WARN] 卡面描述 OCR 异常: {e}")
+                descs = None
+            on_done(descs if descs else None)
+
+        threading.Thread(target=_work, daemon=True,
+                         name="card-desc-ocr").start()
 
     def _ocr_cards(self, frame, card_rects, prev_texts=None) -> tuple:
         card_texts, any_text = [], False

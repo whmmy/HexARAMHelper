@@ -10,6 +10,8 @@
 """
 import csv
 import json
+import threading
+import time
 from collections import defaultdict
 from pathlib import Path
 
@@ -56,6 +58,12 @@ class KnowledgeBase:
         # 海克斯语义标签: 名 -> {path_bias, tags, is_upgrade}
         self.augment_tags = {}
         self.augment_tags_version = ""
+        # 海克斯卡面原文描述（20261013 描述自举）：名 -> 描述文本——
+        # 对局中卡面 OCR 直出写回，随真实对局自增长（标签库是离线从名字
+        # 猜的压缩结论，真机实锤 大法师 被标 ap/法穿/爆发 而原文是技能
+        # 花费返还——原文才是事实源，评级 prompt 冲突时以描述为准）
+        self.augment_descs = {}
+        self._desc_lock = threading.Lock()
         self._load_all()
 
     # ── 加载 ──────────────────────────────────────────────────────
@@ -68,6 +76,7 @@ class KnowledgeBase:
         self._load_items()
         self._load_builds()
         self._load_augment_tags()
+        self._load_augment_descs()
         print(f"[OK] 知识库加载: {len(self.hero_augments)} 英雄先验 / "
               f"{len(self.augment_names)} 海克斯 / {len(self.items)} 装备 / "
               f"{len(self.champ_profile)} 英雄画像 / {len(self.builds)} 英雄 builds")
@@ -110,6 +119,48 @@ class KnowledgeBase:
                     self.augment_tags_version = data["version"]
             except Exception as e:
                 print(f"[WARN] augments.json 读取失败: {e}")
+
+    def _load_augment_descs(self):
+        """卡面原文描述库（20261013 描述自举；对局 OCR 写回，随版本自更新）"""
+        path = self.know_dir / "augment_descs.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                self.augment_descs = {name: (entry.get("text") or "")
+                                      for name, entry in
+                                      (data.get("descs") or {}).items()}
+            except Exception as e:
+                print(f"[WARN] augment_descs.json 读取失败: {e}")
+
+    def augment_desc(self, name: str) -> str:
+        """卡面原文描述（未收录返回空串——调用方按空值跳过，勿编造）"""
+        return self.augment_descs.get(name, "")
+
+    def record_augment_desc(self, name: str, text: str) -> bool:
+        """写回一条卡面描述（OCR 线程调用）：锁内合并 + 原子落盘。
+
+        同名已有且文本一致 → 跳过写盘（每轮评级都会回调，不刷盘）；
+        文本不同（版本改版/上轮 OCR 噪声）→ 覆盖取新。写盘失败只警告
+        （资产是增速器，丢一轮下局再长）。"""
+        if not name or not text:
+            return False
+        with self._desc_lock:
+            if self.augment_descs.get(name) == text:
+                return False
+            self.augment_descs[name] = text
+            path = self.know_dir / "augment_descs.json"
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                data = {"version": 1, "descs": {
+                    n: {"text": t, "ts": time.time()}
+                    for n, t in self.augment_descs.items()}}
+                tmp = path.with_suffix(".json.tmp")
+                tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),
+                               encoding="utf-8")
+                tmp.replace(path)
+            except Exception as e:  # noqa: BLE001 —— 资产写盘失败不影响对局
+                print(f"[WARN] augment_descs.json 写盘失败: {e}")
+            return True
 
     def _load_hero_augments(self):
         path = self.data_dir / "hero_augments.csv"

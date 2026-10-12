@@ -442,6 +442,7 @@ class LogRedirector(io.TextIOBase):
         self.log_queue = log_queue
         self.original = original_stream
         self._tee = None
+        self._tee_bol = True   # tee 写入游标在行首（行首才盖时间戳）
         if tee_path is not None:
             try:
                 self._tee = open(tee_path, "a", encoding="utf-8")
@@ -449,8 +450,8 @@ class LogRedirector(io.TextIOBase):
                 self._tee = None   # 留档失败不阻塞日志主链路
 
     def write(self, text):
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
         if text and text.strip():
-            ts = datetime.datetime.now().strftime("%H:%M:%S")
             self.log_queue.put(f"[{ts}] {text.rstrip()}")
         if self.original:
             try:
@@ -460,8 +461,14 @@ class LogRedirector(io.TextIOBase):
                 pass
         if self._tee and text:
             try:
+                # 留档盖时间戳（20261002 虚空之女案：tee 无时间戳，事后
+                # 对账只有行序没有时刻，全靠 JSON 侧反推）——仅在行首盖，
+                # 多行块（traceback）首行有戳、续行原样
+                if text.strip() and self._tee_bol:
+                    self._tee.write(f"[{ts}] ")
                 self._tee.write(text)
                 self._tee.flush()
+                self._tee_bol = text.endswith("\n")
             except Exception:
                 pass
         return len(text) if text else 0

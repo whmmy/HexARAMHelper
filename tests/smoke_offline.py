@@ -19,6 +19,10 @@
     报+timeline 留痕）+ LogRedirector tee 文件留档（2026-09-29 台账复发案）
 11. 点击链黑匣子：clicks 终点记录随复盘落盘（环形上限/纯点击局 flush 门）
     + 定格截图 capture_sink 落库 + 补扫 crop 透传（2026-09-29 二阶段）
+12. 轮次记账闸门：成功记账登记 round_id，同轮后续点击=游玩点击不入台账
+    （20261012 赏金猎人案：选卡后窗口期幻影记账）
+13. 描述自举：卡面原文描述 OCR 写回知识库（持久化/覆写取新）+ 进评级
+    prompt 且声明冲突时以描述为准（20261013 大法师误标案）
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -562,6 +566,43 @@ def test_session():
     before = len(session.augments)
     check("台账防重复", session.record_augment(REAL_AUG) is False)
     check("结束前台账非空", len(session.augments) == max(before, 1))
+
+    # ── 20261012 赏金猎人案回归：轮次记账闸门（防选卡后幻影记账）──
+    # 真机实锤：选卡完成游戏内界面即关，检测器消失迟滞（5~9s）+ 10s 证据
+    # 窗内，商店推荐面板/移动点击落在旧卡矩形上按残留卡名重复入账（一局
+    # 台账 5 条 vs 真实 3 选）。闸门数据源：成功记账登记 round_id，app 对
+    # 同轮后续卡矩形/刷新按钮点击直接丢弃（_on_click round_recorded 分支）。
+    s_gate = GameSession(kb, rules)
+    n_a, n_b = sorted(kb.augment_names)[2:4]
+    check("轮次闸门：未记账轮放行", s_gate.round_recorded(3) is False)
+    check("轮次闸门：带轮次首记",
+          s_gate.record_augment(n_a, card_idx=0, round_id=3) is True)
+    check("轮次闸门：记账登记本轮", s_gate.round_recorded(3) is True)
+    check("轮次闸门：邻轮不受影响", s_gate.round_recorded(4) is False)
+    check("轮次闸门：跨轮新名可记",
+          s_gate.record_augment(n_b, card_idx=1, round_id=4) is True
+          and s_gate.round_recorded(4) is True)
+    s_gate.reset()
+    check("轮次闸门：会话重置清登记",
+          not s_gate.round_recorded(3) and not s_gate.round_recorded(4))
+
+    # ── 20261013 描述自举：卡面原文描述知识库（写回/读取/持久化）──
+    # 真机实锤：标签库离线从名字猜（大法师被标 ap/法穿/爆发，原文是技能
+    # 花费返还）——原文才是事实源，OCR 写回随对局自增长，prompt 冲突时
+    # 以描述为准。
+    kb_desc = KnowledgeBase(data_dir=_SMOKE_BASE / "kb_desc_d",
+                            know_dir=_SMOKE_BASE / "kb_desc_k")
+    check("描述库初始为空", kb_desc.augment_desc("大法师") == "")
+    check("描述写回可读",
+          kb_desc.record_augment_desc("大法师", "施放一个技能会返还另一个随机技能的花费，数额相当于30%原技能冷却时间")
+          and kb_desc.augment_desc("大法师").startswith("施放一个技能"))
+    kb_desc.record_augment_desc("大法师", "改版后的新描述文本，长度足够入库直出")
+    check("描述覆写取新", kb_desc.augment_desc("大法师") == "改版后的新描述文本，长度足够入库直出")
+    check("描述同名同文跳过写盘", kb_desc.record_augment_desc("大法师", "改版后的新描述文本，长度足够入库直出") is False)
+    kb_desc2 = KnowledgeBase(data_dir=_SMOKE_BASE / "kb_desc_d",
+                             know_dir=_SMOKE_BASE / "kb_desc_k")
+    check("描述落盘持久化", kb_desc2.augment_desc("大法师") == "改版后的新描述文本，长度足够入库直出")
+    check("描述未收录返回空", kb_desc2.augment_desc("库外海克斯") == "")
 
     # 海克斯识别状态标识（overlay 状态流转数据源）
     session.on_hex_ui(True)
@@ -1360,6 +1401,29 @@ def test_ai_engine():
     check("评级 AI 精修回调", got_ranks is not None and got_ranks[0]["grade"] == "S",
           str(got_ranks[:1] if got_ranks else None))
 
+    # ---- 描述自举：卡面原文进评级 prompt（20261013 大法师案）----
+    # 真机实锤：标签库把 大法师 标成 ap/法穿/爆发，原文是技能花费返还——
+    # 描述（事实直出）必须进 prompt 且声明冲突时以描述为准
+    c1.script.append(_json.dumps({"grades": [
+        {"name": top[0], "grade": "A", "reason": "描述实锤跟随"}]}))
+    ret = eng.rank_cards(hero, top[:3], [], [], threat, serial=5,
+                         desc_fetcher=lambda: {
+                             top[0]: "施放一个技能会返还另一个随机技能的花费，数额相当于30%原技能冷却时间。"})
+    check("评级描述自举在途标记", isinstance(ret, tuple) and ret[1] is True,
+          str(ret[1] if isinstance(ret, tuple) else ret))
+    deadline = time.time() + 5
+    while time.time() < deadline and not any(
+            k == "augment_ranks" and p and p[0]["grade"] == "A"
+            for k, p, _s in results):
+        time.sleep(0.02)
+    check("评级 prompt 带卡面原文描述", "返还另一个随机技能" in c1.calls[-1],
+          c1.calls[-1][:120])
+    check("评级 prompt 声明描述优先", "以描述为准" in c1.calls[-1])
+    check("规则引擎接受描述参数不派发",
+          RuleDecisionEngine(kb, rules)
+          .rank_cards(hero, top[:3], [], [], None, 1,
+                      desc_fetcher=lambda: None)[1] is False)
+
     # ---- 预算守门：budget=2 时第 3 次 periodic 不发调用 ----
     eng_b, c1b, _c2b = build_ai_engine(
         script_s2=[_json.dumps(ctx_json)], budget=2)
@@ -1568,7 +1632,12 @@ def test_ai_build_pool():
 
 def test_session_ai_serial():
     print("\n[6b] GameSession × AI 精修 serial 防旧覆新")
-    session = GameSession(kb, rules)
+    session = GameSession(
+        kb, rules,
+        # 复盘 JSON mouse_stats 字段（20261002 寒冰案：鼠标双通道统计窗
+        # 随复盘落盘，台账空的局级铁证不必再翻 app_*.log）
+        mouse_stats_fn=lambda: [{"ts": 0.0, "hook": 0, "poll": 7,
+                                 "dup": 0, "game": True, "warn": False}])
     session.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
                            "my_hero": "暗裔剑魔", "source": "test"})
     session.on_in_progress()
@@ -1635,6 +1704,11 @@ def test_session_ai_serial():
         doc = _json2.loads(review_path.read_text(encoding="utf-8"))
         check("复盘日志字段", doc.get("hero") == "暗裔剑魔"
               and doc.get("suggestions"), str(doc.get("hero")))
+        check("复盘日志含鼠标双通道统计（mouse_stats）",
+              doc.get("mouse_stats")
+              and doc["mouse_stats"][0]["poll"] == 7
+              and doc["mouse_stats"][0]["game"] is True,
+              str(doc.get("mouse_stats"))[:100])
 
 
 # ── 6c. 满六神装替换建议（v4.4：格满后改推"卖X换Y"） ────────────
@@ -2626,17 +2700,17 @@ def test_mouse_ledger_hook():
     print("\n[11d] 点击捕获 v2（LL 钩子）")
     got = []
     ml = MouseLedger(
-        on_click=lambda x, y: got.append(("click", x, y)),
-        on_reroll=lambda x, y: got.append(("reroll", x, y)),
+        on_click=lambda x, y, ts=None: got.append(("click", x, y)),
+        on_reroll=lambda x, y, ts=None: got.append(("reroll", x, y)),
         reroll_rect_provider=lambda: [[900, 600, 100, 80]])
     ml.start()
     try:
         time.sleep(0.5)
         check("LL 钩子安装成功", ml.mode == "hook" and ml.is_alive(),
               f"mode={ml.mode}")
-        # 模拟钩子投递 → 处理线程路由端到端
-        ml._queue.put((940, 640))    # 命中 reroll 矩形 → on_reroll
-        ml._queue.put((100, 100))    # 矩形外 → on_click
+        # 模拟钩子投递 → 处理线程路由端到端（v3 队列带来源标记）
+        ml._queue.put(("hook", 940, 640, time.time()))    # reroll 矩形
+        ml._queue.put(("hook", 100, 100, time.time()))    # 矩形外
         deadline = time.time() + 3
         while len(got) < 2 and time.time() < deadline:
             time.sleep(0.01)
@@ -2647,6 +2721,364 @@ def test_mouse_ledger_hook():
         ml.stop()
         ml.join(timeout=3)
     check("stop 干净退出（消息循环收 WM_QUIT + unhook）", not ml.is_alive())
+
+
+def test_mouse_ledger_ll_big_pointer():
+    """LL 钩子 64 位指针溢出回归（2026-10-02 真机案）：CallNextHookEx 未设
+    原型时 ctypes 缺省把 l_param 按 32 位 c_int 转换，而 64 位下它是
+    MSLLHOOKSTRUCT 堆指针（普遍 > 2^31）——每个鼠标事件 OverflowError，
+    被回调机制吞成"Exception ignored"刷屏。修复：私有 user32 实例 +
+    钩子全家桶显式原型。断言：超 32 位 l_param 纯透传不炸（n_code≠
+    HC_ACTION 不 deref，任何环境确定性复现）；真实堆指针完整链路
+    （cast + 入队 + 透传）无异常、事件照常入队。"""
+    print("\n[11e] LL 钩子 64 位指针原型回归")
+    import ctypes as _ct
+    from hexa.core.mouse_ledger import _MSLLHOOKSTRUCT, HC_ACTION, \
+        WM_LBUTTONDOWN
+
+    got = []
+    ml = MouseLedger(on_click=lambda x, y, ts=None: got.append((x, y)))
+    try:
+        # ① 纯透传：合成超界指针不 deref，修复前此行确定性 OverflowError
+        ret = ml._hook_proc(1, WM_LBUTTONDOWN, 0xFFFF80001234)
+        check("超 32 位 l_param 纯透传不炸（返回 LRESULT）",
+              isinstance(ret, int))
+        # ② 真实事件：x64 堆地址本就 > 2^31（原案触发条件），完整走
+        #    cast + 入队 + CallNextHookEx
+        ev = _MSLLHOOKSTRUCT()
+        ev.pt.x, ev.pt.y = 137, 579
+        big = _ct.addressof(ev)
+        check("x64 堆地址确超 32 位 c_int（原案触发条件）",
+              big > 0x7FFFFFFF, hex(big))
+        ret = ml._hook_proc(HC_ACTION, WM_LBUTTONDOWN, big)
+        check("真实事件大指针 cast+透传不炸", isinstance(ret, int))
+        src, x, y, _ts = ml._queue.get(timeout=2)
+        check("事件照常入队（记账链不受影响）", src == "hook"
+              and (x, y) == (137, 579) and not got)   # 处理线程未启动不路由
+    finally:
+        ml.stop()
+    check("未启动线程直接 stop 干净收尾", not ml.is_alive())
+
+
+def test_mouse_ledger_game_mode():
+    """双通道兜底回归（2026-10-02 寒冰案）：v2 LL 钩子上线后首局实证——
+    客户端窗口期正常收沿，游戏窗口焦点期整整一局零事件（[MOUSE] 全 0、
+    台账空）。腾讯全家桶（wegame/tcls/LeagueClient*）实测 High 提权、
+    本工具 Medium，UIPI/反作弊级拦截对低级钩子生效；GetAsyncKeyState 读
+    全局异步键态不受限（牛头案轮询局内可见的定向证据）。v3：set_game_mode
+    局内并行开轮询通道；钩子/轮询同次按压 50ms 同位去重；局内双通道全零
+    连续 2 窗打前台窗口+双方 IL 现场告警。"""
+    print("\n[11f] 局内轮询兜底 + 双通道去重 + 零沿告警")
+    import io
+    from contextlib import redirect_stdout
+    from hexa.core.mouse_ledger import foreground_owner, self_il
+
+    check("self_il 返回可读 IL 标签",
+          isinstance(self_il(), str) and "0x" in self_il(), self_il())
+    check("foreground_owner 返回可读现场标签",
+          isinstance(foreground_owner(), str) and "IL=" in foreground_owner())
+
+    got = []
+    ml = MouseLedger(on_click=lambda x, y, ts=None: got.append(("click", x, y)))
+    # ① 相位切换：进局内打印一次、同值重入静默（champ select 重置重入）
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        ml.set_game_mode(True)
+        ml.set_game_mode(True)
+    check("进入局内打印一次（重入静默）",
+          buf.getvalue().count("轮询通道启用") == 1
+          and "退出局内" not in buf.getvalue(), buf.getvalue())
+    # ② 去重：钩子沿先入，轮询沿 50ms 窗内同位 → 去重不路由；异位/超窗
+    #    照常路由（钩子漏捕第一下时后续真点击不被误吞）
+    with redirect_stdout(io.StringIO()):
+        t0 = time.time()
+        ml._feed("hook", 500, 600, t0)        # 钩子沿 → 路由
+        ml._feed("poll", 503, 602, t0 + 0.01)   # 窗内同位 → 去重
+        ml._feed("poll", 800, 600, t0 + 1.0)    # 异位 → 路由
+        ml._feed("poll", 501, 599, t0 + 1.1)    # 异位 → 路由
+    check("双通道去重（同次按压不双记，真点击不误吞）",
+          [g[1:] for g in got] == [(500, 600), (800, 600), (501, 599)],
+          str(got))
+    check("分源计数 hook=1 poll=2 去重=1",
+          ml._hook_edges == 1 and ml._poll_edges == 2
+          and ml._dup_edges == 1,
+          f"h={ml._hook_edges} p={ml._poll_edges} d={ml._dup_edges}")
+    # ③ 局内 poll 沿正常 → 汇总行有数、不触发告警
+    ml2 = MouseLedger(on_click=lambda x, y, ts=None: None)
+    with redirect_stdout(io.StringIO()):
+        ml2.set_game_mode(True)
+        ml2._feed("poll", 100, 100, time.time())
+    buf2 = io.StringIO()
+    with redirect_stdout(buf2):
+        ml2._stat_ts -= 61.0
+        ml2._maybe_report_edges(time.monotonic())
+    check("局内有 poll 沿：汇总计数、不告警",
+          "poll=1" in buf2.getvalue()
+          and "[MOUSE][WARN]" not in buf2.getvalue(), buf2.getvalue())
+    # ④ 局内双通道全零连续 2 窗 → 现场告警（前台属主 + 双方 IL），再重置
+    buf3 = io.StringIO()
+    with redirect_stdout(buf3):
+        ml2._stat_ts -= 61.0
+        ml2._maybe_report_edges(time.monotonic())    # 第 1 窗全零 → 计数
+        ml2._stat_ts -= 61.0
+        ml2._maybe_report_edges(time.monotonic())    # 第 2 窗全零 → 告警
+        ml2._stat_ts -= 61.0
+        ml2._maybe_report_edges(time.monotonic())    # 重置后新窗只计数
+    warn_n = buf3.getvalue().count("[MOUSE][WARN]")
+    check("局内双通道全零 2 窗触发现场告警（仅一次）", warn_n == 1,
+          buf3.getvalue())
+    check("告警含前台属主与本进程 IL 现场",
+          "前台 " in buf3.getvalue() and "IL=" in buf3.getvalue())
+    # ⑤ 退出局内：轮询停用打印一次；局外全零不告警（非局内常态）
+    with redirect_stdout(io.StringIO()):
+        ml2.set_game_mode(True)      # 幂等（上面流程未改状态）
+    buf4 = io.StringIO()
+    with redirect_stdout(buf4):
+        ml2.set_game_mode(False)
+        ml2.set_game_mode(False)
+    check("退出局内打印一次（重入静默）",
+          buf4.getvalue().count("轮询通道停用") == 1, buf4.getvalue())
+    buf5 = io.StringIO()
+    with redirect_stdout(buf5):
+        ml2._stat_ts -= 61.0
+        ml2._maybe_report_edges(time.monotonic())
+        ml2._stat_ts -= 61.0
+        ml2._maybe_report_edges(time.monotonic())
+    check("局外全零不触发局内告警",
+          "[MOUSE][WARN]" not in buf5.getvalue(), buf5.getvalue())
+    # ⑥ 统计窗历史（复盘 JSON mouse_stats 字段源）：③④⑤ 共 6 窗，
+    # 告警窗恰 1 且 game=True；局外窗 game=False 永不标 warn
+    hist = ml2.stats_history()
+    check("统计窗历史随窗落账（6 窗全键齐全）",
+          len(hist) == 6 and all(
+              {"ts", "hook", "poll", "dup", "ev", "game", "helper",
+               "warn"} == set(e)
+              for e in hist), str(hist))
+    check("告警窗恰 1 且局内标记", [e["warn"] for e in hist].count(True) == 1
+          and next(e for e in hist if e["warn"])["game"] is True)
+    check("局外窗 game=False 不标 warn",
+          all(not e["warn"] for e in hist if not e["game"]))
+    check("局内 poll 沿进历史（③窗 poll=1）",
+          any(e["poll"] == 1 and e["game"] for e in hist))
+
+
+def test_click_watcher_proc():
+    """独立捕获子进程回归（20261002 虚空之女案）：v3 双通道首局实证——
+    选卡瞬间钩子+轮询双双零捕获（轮询 50Hz 采样、LSB 位有按压必留痕，
+    零留痕 = 采样线程在按压前后完全没跑到），而非选卡期点击（死后商店
+    等）双双正常、主进程明明活着（复盘 timeline 数秒一条）——指向主进程
+    内部 GIL/调度饥饿（选卡期 = 检测器逐秒全帧 OCR 风暴）或系统层过滤。
+    v4 加 click_watcher 独立子进程：独立解释器独立 GIL、NORMAL 优先级
+    （父进程 BELOW_NORMAL 会被子进程继承，必须显式抬回，否则白装），
+    会话文件协议（ready 行 + "ts x y" 行）、tail 进统一管道按点击时刻
+    去重、父进程死亡自动退出。它既是修复候选也是鉴别仪器（它也瞎 =
+    系统层过滤的铁证）。"""
+    print("\n[11g] 捕获子进程（click_watcher）+ tail 去重")
+    import io
+    import os
+    import subprocess as _sp
+    import tempfile
+    from contextlib import redirect_stdout
+    from pathlib import Path as _Path
+    from hexa.core.mouse_ledger import MouseLedger as _ML
+
+    script = (_Path(__file__).resolve().parent.parent
+              / "hexa" / "core" / "click_watcher.py")
+    check("click_watcher.py 就位（子进程脚本）", script.exists())
+    ml_src = script.read_text(encoding="utf-8")
+    check("子进程显式抬回 NORMAL 优先级（继承 BELOW_NORMAL 必修）",
+          "SetPriorityClass" in ml_src and "NORMAL_PRIORITY_CLASS" in ml_src)
+    check("子进程观察父进程死亡（看门狗自动收工）",
+          "WaitForSingleObject" in ml_src and "SYNCHRONIZE" in ml_src)
+
+    tmp = _Path(tempfile.mkdtemp(prefix="smoke_watcher_"))
+    out1 = tmp / "c1.txt"
+    # ① 真实拉起：ready 行落盘、terminate 收工
+    p1 = _sp.Popen([sys.executable, str(script), str(os.getpid()), str(out1)],
+                   stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    try:
+        ready = None
+        deadline = time.time() + 6
+        while time.time() < deadline and ready is None:
+            if out1.exists():
+                lines = out1.read_text(encoding="ascii").splitlines()
+                ready = next((ln for ln in lines if ln.startswith("ready")),
+                             None)
+            if ready is None:
+                time.sleep(0.1)
+        check("子进程拉起即写 ready 行（含墙钟时刻）",
+              ready is not None and len(ready.split()) == 2, str(ready))
+    finally:
+        p1.terminate()
+        p1.wait(timeout=5)
+    check("terminate 收工", p1.poll() is not None)
+
+    # ② 父进程死亡自动退出：短命"父进程"退场后子进程自行收工
+    parent = _sp.Popen([sys.executable, "-c", "import time; time.sleep(0.6)"])
+    out2 = tmp / "c2.txt"
+    p2 = _sp.Popen([sys.executable, str(script), str(parent.pid), str(out2)],
+                   stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+    parent.wait(timeout=5)
+    try:
+        p2.wait(timeout=5)
+        check("父进程死亡子进程自动退出（看门狗生效）",
+              p2.poll() is not None)
+    except _sp.TimeoutExpired:
+        p2.terminate()
+        check("父进程死亡子进程自动退出（看门狗生效）", False, "5s 未退出")
+
+    # ③ 会话文件行解析 + 跨通道按点击时刻去重（迟到副本不双记）
+    check("行解析：点击行/ready/坏行",
+          _ML._parse_helper_line("1790948751.810 1755 956")
+          == (1790948751.81, 1755, 956)
+          and _ML._parse_helper_line("ready 1790948751.8") is None
+          and _ML._parse_helper_line("garbage") is None)
+    got = []
+    ml = MouseLedger(on_click=lambda x, y, ts=None: got.append((x, y, ts)))
+    t0 = time.time()
+    with redirect_stdout(io.StringIO()):
+        ml._feed("hook", 500, 600, t0)          # 钩子先到
+        ml._feed("poll", 503, 602, t0 + 0.01)   # 子进程迟到副本 → 去重
+        ml._feed("poll", 800, 600, t0 + 1.0)    # 真新点击 → 路由（带 ts 透传）
+    check("迟到副本按点击时刻去重、真点击透传 ts",
+          [(g[0], g[1]) for g in got] == [(500, 600), (800, 600)]
+          and abs(got[1][2] - (t0 + 1.0)) < 1e-6, str(got))
+
+
+def test_input_instrument_kit():
+    """输入鉴别仪器回归（20261003 皮城女警案）：v4 子进程全程活着且采样
+    节奏正常（CPU 开销吻合）仍看不到选卡按压，而客户端/商店/任务栏点击
+    正常——"游戏画面焦点期的按压不进全局输入层"。仪器组：①钩子全事件
+    计数（游戏内移动恒流，事件=0 即钩子连移动都没收到→输入整体消失）；
+    ②全按键按下沿限频留痕（排除右/侧键选卡、驱动重映射等平凡解释）；
+    ③子进程心跳/退出报文协议（hb 停滞=被挂起的直接证据，bye 区分自行
+    退出）；④激活帧存档 + 丢弃点击全屏定格（坐标争议一锤定音）。"""
+    print("\n[11h] 输入鉴别仪器（全事件计数/全按键留痕/心跳协议/帧存档）")
+    import ctypes as _ct
+    import io
+    from contextlib import redirect_stdout
+    from hexa.core.mouse_ledger import (HC_ACTION, WM_MBUTTONDOWN,
+                                        WM_MOUSEMOVE, WM_RBUTTONDOWN,
+                                        WM_XBUTTONDOWN, _MSLLHOOKSTRUCT,
+                                        LLMHF_INJECTED)
+    from hexa.core.screen_detect import ScreenDetector
+
+    ml = MouseLedger(on_click=lambda x, y, ts=None: got.append((x, y)))
+    got = []
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        # ① 移动事件：计数、不入队不路由
+        ret = ml._hook_proc(HC_ACTION, WM_MOUSEMOVE, 0)
+        check("移动事件计入全事件数（不入队不路由）",
+              isinstance(ret, int) and ml._event_count == 1 and not got)
+        # ② 右键/中键/侧键：限频留痕、不入队（排除非左键选卡解释）
+        ev = _MSLLHOOKSTRUCT()
+        ev.pt.x, ev.pt.y, ev.flags = 941, 395, LLMHF_INJECTED
+        ml._hook_proc(HC_ACTION, WM_RBUTTONDOWN, _ct.addressof(ev))
+        ml._btn_log_ts = 0.0   # 限频重置：下一条不受 2s 窗抑制
+        ml._hook_proc(HC_ACTION, WM_MBUTTONDOWN, _ct.addressof(ev))
+        check("非左键按键留痕（含注入标记、不入队）",
+              "按键 RB (941,395) 注入" in buf.getvalue()
+              and "按键 MB" in buf.getvalue() and not got
+              and ml._event_count == 3)
+        # ③ 统计窗：事件数进汇总行与历史记录
+        ml._stat_ts -= 61.0
+        buf2 = io.StringIO()
+        with redirect_stdout(buf2):
+            ml._maybe_report_edges(time.monotonic())
+        check("汇总行含事件数", "事件=3" in buf2.getvalue(),
+              buf2.getvalue()[-200:])
+        hist = ml.stats_history()
+        check("历史记录含 ev 字段", hist and hist[-1]["ev"] == 3, str(hist[-1]))
+    # ④ 子进程心跳/退出报文协议
+    watcher_src = (Path(__file__).resolve().parent.parent
+                   / "hexa" / "core" / "click_watcher.py").read_text(
+                       encoding="utf-8")
+    check("子进程心跳协议（hb 每 5s）",
+          '"hb {now:.3f}' in watcher_src and "HB_INTERVAL = 5.0" in watcher_src)
+    check("子进程退出报文（bye）+ Win32 显式原型（64 位句柄）",
+          '"bye {time.time():.3f}' in watcher_src
+          and "WaitForSingleObject.restype" in watcher_src)
+    check("tail 识别心跳与退出报文",
+          'parts[0] == "hb"' in Path(__file__).resolve().parent.parent.joinpath(
+              "hexa/core/mouse_ledger.py").read_text(encoding="utf-8")
+          and 'parts[0] == "bye"' in Path(__file__).resolve().parent.parent
+          .joinpath("hexa/core/mouse_ledger.py").read_text(encoding="utf-8"))
+    # ⑤ 激活帧存档 + 丢弃点击全屏定格（app 接线）
+    app_src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    check("激活帧存档接线（frame_sink）",
+          "detector.frame_sink = _frame_sink" in app_src
+          and "round_{time.strftime('%Y%m%d_%H%M%S')}" in app_src)
+    check("丢弃点击全屏定格接线（rect_miss/no_hex_evidence 带截图）",
+          "_capture_full_drop(x, y)" in app_src
+          and "drop_{time.strftime('%Y%m%d_%H%M%S')}" in app_src
+          and app_src.count('"image": shot') >= 2)
+    check("检测器激活帧走 frame_sink（错位争议一锤定音）",
+          "frame_sink" in (Path(__file__).resolve().parent.parent
+                           / "hexa" / "core" / "screen_detect.py")
+          .read_text(encoding="utf-8"))
+
+
+def test_auto_elevation():
+    """自动提权回归（20261004 皮城女警案定案）：局内 ev=0 连鼠标移动都
+    收不到、切出窗口瞬间涌进 7187 事件——游戏窗口提权(High)前台期输入
+    对 Medium 进程完全不可见（UIPI），管理员实验未生效（用户 uv run 启动
+    IL=Medium）。修复：启动检测 TokenElevation，未提权自动 ShellExecute
+    runas 重启自身（UAC 一次），settings [diagnostics] elevate_auto 可关；
+    重启目标必须用仓库 venv 的 pythonw（uv run 下 sys.executable 是
+    anaconda 本体，直接重启丢虚拟环境）。附带修复：v3 的 lambda 吞掉了
+    on_end_of_game 的 reason 参数（终局流程 TypeError 中断数日）。"""
+    print("\n[11i] 自动提权 + on_end_of_game 参数透传")
+    from hexa.core.mouse_ledger import is_elevated
+
+    check("is_elevated 返回布尔（TokenElevation 探针）",
+          isinstance(is_elevated(), bool), str(is_elevated()))
+    app_src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    check("启动自动提权门控（settings 可关）",
+          'settings.get("diagnostics", "elevate_auto"' in app_src
+          and "is_elevated()" in app_src
+          and 'ShellExecuteW(\n            None, "runas"' in app_src)
+    check("提权重启用仓库 venv pythonw（uv run 兼容）",
+          '.venv" / "Scripts" / "pythonw.exe' in app_src
+          and "os.path.abspath(sys.argv[0])" in app_src)
+    check("UAC 拒绝降级 WARN（不阻塞主流程）",
+          "提权未确认" in app_src and "return" in app_src)
+    check("on_end_of_game 参数透传（v3 lambda 吞参回归）",
+          "session.on_end_of_game(*a)" in app_src)
+    # 提权子进程 = 无控制台 pythonw：stdout/stderr 为 None，tee 之前的
+    # 任何 print（知识库加载 [OK] 行等）都会 AttributeError 炸进程
+    # （20261004 UAC 点"是"后无窗实锤）——垫流 + tee 提前到 KB 之前
+    check("pythonw 垫流防护（stdout/stderr=None 兜底）",
+          "if sys.stdout is None:" in app_src
+          and "open(os.devnull" in app_src)
+    check("tee 提前到知识库加载之前（早期打印有归处）",
+          app_src.index("_tee_path = BASE_DIR")
+          < app_src.index("kb = KnowledgeBase()"))
+    # 递归保险 + 绕开 uv trampoline（20261004 提权递归案：跳板 spawn 真
+    # 解释器时丢提权令牌 → 子进程仍 Medium → 再请求 → 8 分钟 1510 实例）
+    check("提权递归保险（重启标记在身不再二次请求）",
+          '"--elevated-relaunch" in sys.argv' in app_src
+          and "提权重启未生效" in app_src)
+    check("提权重启直启基础解释器（绕开 trampoline）+ PYTHONPATH 保依赖",
+          'pyvenv.cfg' in app_src and "PYTHONPATH" in app_src
+          and '--elevated-relaunch' in app_src)
+    # 本机真值：pyvenv.cfg 能解析出存在的 pythonw（提权目标有效）
+    import os as _os
+    from hexa.config import BASE_DIR
+    cfg = BASE_DIR / ".venv" / "pyvenv.cfg"
+    if cfg.exists():
+        home = None
+        for line in cfg.read_text(encoding="utf-8").splitlines():
+            if line.lower().startswith("home"):
+                home = _os.path.dirname(line.split("=", 1)[1].strip())
+                break
+        check("pyvenv.cfg 解析出可用基础 pythonw（本机真值）",
+              home and _os.path.exists(_os.path.join(home, "pythonw.exe")),
+              str(home))
+        check("venv site-packages 存在（PYTHONPATH 依赖保底）",
+              (BASE_DIR / ".venv" / "Lib" / "site-packages").exists())
 
 
 # ── 10. 点击链诊断 + stdout tee 留档（2026-09-29 台账复发案） ─────
@@ -2766,8 +3198,8 @@ def test_click_blackbox():
     check("_record_click 终点组装 clicks（ev 上下文/direct/rescan 分支）",
           "session.log_click" in seg_rec and '"branch": branch' in seg_rec
           and '_blackbox("recorded" if ok else "duplicate"' in seg_rec)
-    check("_on_reroll 带坐标且终点 log_click（reroll_rescan）",
-          "def _on_reroll(x, y)" in seg_rr
+    check("_on_reroll 带坐标+点击时刻且终点 log_click（reroll_rescan）",
+          "def _on_reroll(x, y, ts=None)" in seg_rr
           and '"result": "reroll_rescan"' in seg_rr)
     check("丢弃分支 clicks 记录（打印限频不限记录）",
           '"result": f"dropped_{key}"' in seg_diag
@@ -2782,8 +3214,8 @@ def test_click_blackbox():
     ml_src = (Path(__file__).resolve().parent.parent
               / "hexa" / "core" / "mouse_ledger.py").read_text(
                   encoding="utf-8")
-    check("MouseLedger 路由 reroll 时传 (x, y)",
-          "self.on_reroll(x, y)" in ml_src)
+    check("MouseLedger 路由 reroll 时传 (x, y, ts)",
+          "self.on_reroll(x, y, ts)" in ml_src)
 
     # GameSession.review doc 的 clicks 序列化不含 numpy/不可 JSON 类型
     s3 = GameSession(kb, rules)
@@ -2966,6 +3398,11 @@ if __name__ == "__main__":
     test_system2_watchdog()
     test_grab_card_crop_no_deadlock()
     test_mouse_ledger_hook()
+    test_mouse_ledger_ll_big_pointer()
+    test_mouse_ledger_game_mode()
+    test_click_watcher_proc()
+    test_input_instrument_kit()
+    test_auto_elevation()
     test_session_ai_serial()
     test_swap_mode()
     test_coach_save_gap()

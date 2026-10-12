@@ -94,13 +94,14 @@ class GameSession:
     STALL_TIMEOUT = 300.0
 
     def __init__(self, kb, rules, settings=None, fixture_dumper=None,
-                 live_poller=None, engine=None):
+                 live_poller=None, engine=None, mouse_stats_fn=None):
         self.kb = kb
         self.rules = rules
         self.settings = settings
         self.dumper = fixture_dumper
         self.live = live_poller
         self.engine = engine or engine_mod.RuleDecisionEngine(kb, rules)
+        self.mouse_stats_fn = mouse_stats_fn   # fn() -> [统计窗dict]（复盘用）
         self.engine.bind(self._on_engine_result)
         self._lock = threading.RLock()
         self.reset()
@@ -116,6 +117,8 @@ class GameSession:
             self.game_map = ""            # 当前地图（"11"=峡谷/"12"=大乱斗）
             # 海克斯台账（记账 + 纠错的数据源）
             self.augments = []            # [{"name","tier","ts"}]
+            self.hex_recorded_rounds = set()   # 已记账轮次（检测器 round_id，
+                                               # 见 record_augment / round_recorded）
             # 我的实时态（live 快照维护）
             self.my_items = []
             self._prev_my_items = []
@@ -404,8 +407,14 @@ class GameSession:
             if len(self.clicks) > 300:
                 del self.clicks[:len(self.clicks) - 300]
 
-    def record_augment(self, name: str, tier: str = "", card_idx=None):
+    def record_augment(self, name: str, tier: str = "", card_idx=None,
+                       round_id=None):
         """记账入口。card_idx：点击的卡片序号（0-2），供 overlay"✓已选"标记。
+        round_id：点击时刻的检测器界面轮次（20261012 赏金猎人案）——成功
+        记账即登记本轮已选：选卡完成游戏内界面立即关闭，同轮之后命中卡
+        矩形的点击都是商店推荐面板/移动等游玩点击，但检测器消失迟滞
+        （5~9s）+ 10s 证据窗内残留卡名仍有效，真机一局被幻影多记 2 条；
+        app 按 round_recorded() 把同轮后续点击闸在台账外。
 
         同名防重复记账：拒绝时不动 hex_picked——被拒的点击不是一条新
         台账（同名已在档），把"✓已选"挪到新卡会让浮窗谎报已选而台账
@@ -425,12 +434,21 @@ class GameSession:
             if card_idx is not None:
                 self.hex_picked = (card_idx, name)
             self.augments.append({"name": name, "tier": tier, "ts": time.time()})
+            if round_id is not None:
+                self.hex_recorded_rounds.add(round_id)
             self._log("augment_recorded", f"{tier} {name}")
             if self.first_augment is None:
                 self.first_augment = name
             self._recompute_path()
             self._decide_opening_or_next()
             return True
+
+    def round_recorded(self, round_id) -> bool:
+        """本轮（检测器 round_id）是否已成功记账过海克斯。
+
+        app 点击闸门的数据源（_on_click/_on_reroll）：True = 本轮界面已
+        随选卡关闭，后续命中卡矩形/刷新按钮的点击按游玩点击丢弃。"""
+        return round_id in self.hex_recorded_rounds
 
     def revoke_augment(self, name: str):
         """台账纠错（主窗口点击区调用）；撤销首海克斯时联动状态一并回退"""
@@ -475,8 +493,10 @@ class GameSession:
             if self.my_hero != matches[0] and self.stage in ("game_start", "in_game"):
                 # 局中换英雄视为极端兜底，重置对局数据
                 augments = list(self.augments)
+                rounds = set(self.hex_recorded_rounds)
                 self.reset()
                 self.augments = augments
+                self.hex_recorded_rounds = rounds
                 self.stage = "in_game"
             elif self.stage == "idle":
                 self.stage = "champ_select"
@@ -486,8 +506,12 @@ class GameSession:
 
     # ── 海克斯时刻（screen_detect 检测到三卡片 → 评级；记账入口 record_augment） ──
 
-    def rank_augment_cards(self, card_names: list) -> list:
+    def rank_augment_cards(self, card_names: list, desc_fetcher=None) -> list:
         """三张卡片基准评级（同步）+ AI 精修（异步经 _on_engine_result 覆盖）。
+
+        desc_fetcher：卡面原文描述获取器（20261013 描述自举）——在 AI
+        精修线程内调用（内部等待后台描述 OCR，自带超时放行），描述作为
+        事实层进评级 prompt 并写回知识库；规则基准的上屏时序不受影响。
 
         AI 精修在途时 card_ranks_pending=True——UI 先显示卡名（"AI 评级中"），
         精修回调后放评级；未提交精修（规则模式/ctx 未就绪/预算耗尽）时
@@ -500,7 +524,8 @@ class GameSession:
             items = list(self.my_items)
             threat = self.threat
         ranks, ai_pending = self.engine.rank_cards(hero, card_names, taken,
-                                                   items, threat, serial)
+                                                   items, threat, serial,
+                                                   desc_fetcher=desc_fetcher)
         with self._lock:
             if serial == self._card_serial:
                 self.card_ranks = ranks
@@ -1085,6 +1110,10 @@ class GameSession:
                 # [LEDGER] 诊断日志三方互证）
                 "clicks": [dict(c, ts=round(c["ts"], 3))
                            for c in self.clicks[-200:]],
+                # 鼠标双通道统计窗历史（20261002 寒冰案：局内 LL 钩子/轮询
+                # 各收到多少按下沿、有无拦截告警——台账空的局级铁证）
+                "mouse_stats": list(self.mouse_stats_fn())
+                               if self.mouse_stats_fn else [],
             }
             path = out_dir / self._review_path
             path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),

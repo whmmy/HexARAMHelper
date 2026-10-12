@@ -302,13 +302,16 @@ def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
 
 def rank_augments(client, ctx, hero: str, card_names: list, augments_taken: list,
                   my_items: list, threat_summary: str,
-                  rule_ranks: list, enemy=None) -> list:
+                  rule_ranks: list, enemy=None, descriptions=None) -> list:
     """海克斯三卡片评级（S/A/B + 一句理由）。
 
     ctx.augment_affinity 已是 System2 翻译结果——先按位次给基准档，
     System1 用极短 prompt 做语境微调；失败 → 规则版 rule_ranks 原样返回。
     rule_ranks: rules_engine.rank_augments 的输出（含 name/grade/reason）。
     enemy: 敌方明细行（评级也吃阵容语境，如全 AD 局抗性海克斯升值）。
+    descriptions: {卡名: 卡面原文描述}（20261013 描述自举：OCR 直出的
+    事实层——标签/亲和是离线压缩结论，真机实锤 大法师 被标 ap/法穿/爆发
+    而原文是技能花费返还；prompt 明示冲突时以描述为准）。
     输出格式（grades）只在 user prompt 声明——SYSTEM_PROMPT 已不再全局
     写死 picks 格式，二者曾互斥导致评级精修静默回落规则版。
     """
@@ -324,14 +327,24 @@ def rank_augments(client, ctx, hero: str, card_names: list, augments_taken: list
                 f"身上装备：{'、'.join(my_items) or '无'}；威胁：{threat_summary or '未知'}")
         if enemy:
             head += f"；敌方：{'、'.join(enemy)}"
-        user = "\n\n".join([
+        parts = [
             head,
             f"《该英雄海克斯亲和（ChampionContext）》\n{aff}",
+        ]
+        # 原文描述段（有才加）：事实直出，冲突时压过压缩结论
+        desc_lines = [f"- {r['name']}：{descriptions[r['name']]}"
+                      for r in rule_ranks if descriptions.get(r["name"])] \
+            if descriptions else []
+        if desc_lines:
+            parts.append("《本轮卡片原文描述（卡面 OCR 直出；与亲和标签冲突时"
+                         "以描述为准——标签可能过时或误标）》\n" + "\n".join(desc_lines))
+        parts += [
             "《本轮三张卡片（含规则基准档）》\n" + "\n".join(
                 f"- {r['name']}：基准 {r['grade']}（{r['reason']}）" for r in rule_ranks),
             "结合当前局面微调档位与理由。只输出 JSON："
             '{"grades":[{"name":"卡片原名","grade":"S|A|B|C","reason":"<=20字"}]}',
-        ])
+        ]
+        user = "\n\n".join(parts)
         text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=260)
         data = parse_json(text)
         valid = {r["name"] for r in rule_ranks}

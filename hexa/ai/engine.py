@@ -51,13 +51,14 @@ class DecisionEngine(ABC):
 
     @abstractmethod
     def rank_cards(self, hero, card_names, taken, my_items, threat,
-                   serial: int) -> tuple:
+                   serial: int, desc_fetcher=None) -> tuple:
         """海克斯三卡片评级，返回 (基准评级, AI精修是否在途)。
 
         基准评级 [{name, grade, reason}] 同步可立即上屏；AI 在途=True 时
         UI 先显示卡名等评级（"先显卡名后放评级"），精修结果经
         on_result(KIND_RANKS) 回调覆盖（失败也回调 None 通知清等待态，
-        规则基准成为最终展示）。"""
+        规则基准成为最终展示）。desc_fetcher：卡面原文描述获取器
+        （20261013 描述自举）——AI 精修线程内调用，None=无描述可用。"""
 
     @abstractmethod
     def skill_order(self, hero: str) -> str:
@@ -100,7 +101,8 @@ class RuleDecisionEngine(DecisionEngine):
                                          hero=self._hero,
                                          game_map=self.game_map, pool=pool)
 
-    def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
+    def rank_cards(self, hero, card_names, taken, my_items, threat, serial,
+                   desc_fetcher=None):
         return self.rules.rank_augments(hero, card_names, taken), False
 
     def skill_order(self, hero):
@@ -390,7 +392,8 @@ class AIDecisionEngine(DecisionEngine):
         self._submit(KIND_NEXT, serial, fn)
         return base
 
-    def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
+    def rank_cards(self, hero, card_names, taken, my_items, threat, serial,
+                   desc_fetcher=None):
         base = self.delegate.rank_cards(hero, card_names, taken, my_items,
                                         threat, serial)[0]
         if not (self._ctx_ready() and self._try_reserve()):
@@ -399,9 +402,17 @@ class AIDecisionEngine(DecisionEngine):
         summary = threat.summary() if threat else ""
 
         def fn():
+            # 描述自举（20261013）：AI 线程内等描述 OCR（fetcher 自带超时
+            # 放行）——派发时序/频次不变，只多等 ~1s 事实进 prompt
+            descs = None
+            if desc_fetcher is not None:
+                try:
+                    descs = desc_fetcher()
+                except Exception as e:  # noqa: BLE001 —— 描述失败只降级
+                    print(f"[WARN] 卡面描述获取失败，评级退回无描述: {e}")
             return self.s1.rank_augments(
                 self.client_s1, ctx, hero, card_names, taken or [], my_items,
-                summary, base, enemy=self._enemy_detail())
+                summary, base, enemy=self._enemy_detail(), descriptions=descs)
         self._submit(KIND_RANKS, serial, fn)
         return base, True
 
@@ -469,9 +480,10 @@ class JevEngine(DecisionEngine):
                                              threat, serial, reason, augments,
                                              pool=pool)
 
-    def rank_cards(self, hero, card_names, taken, my_items, threat, serial):
+    def rank_cards(self, hero, card_names, taken, my_items, threat, serial,
+                   desc_fetcher=None):
         return self.delegate.rank_cards(hero, card_names, taken, my_items,
-                                        threat, serial)
+                                        threat, serial, desc_fetcher)
 
     def skill_order(self, hero):
         return self.delegate.skill_order(hero)
