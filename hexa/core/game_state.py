@@ -25,6 +25,7 @@ COACH_MAX_NOTES = 3            # 滚动保留最近 3 条（任务口径）
 COACH_REPEAT_COOLDOWN = 60.0   # 同 key 提示最小重复间隔：5s 轮询下防状态回摆刷屏
 WIND_EDGE = 6.0                # 顺/逆风判定分界（动量差 + 权重×人均传说件差）
 WIND_ITEM_WEIGHT = 4.0         # 装备成型度差权重：一件传说件差 ≈ 4 分动量差
+KDA_ALERT_LIMIT = 2            # 敌方 KDA 起飞提示每局限触发次数（P3 杂项：暴露 ui_state 供仪表区展示）
 
 
 @dataclass
@@ -888,8 +889,10 @@ class GameSession:
                                      f"敌方{champ}出了{item}：{note}")
                     self._log("enemy_key_item", f"{champ} {item}")
 
-        # 3. 敌方 KDA 起飞（每局限 2 次）
-        if triggers.get("enemy_kda", True) and self._kda_alerts < 2:
+        # 3. 敌方 KDA 起飞（每局限 KDA_ALERT_LIMIT 次，上限常量与
+        #    ui_state 暴露的 kda_alerts_limit 同源）
+        if (triggers.get("enemy_kda", True)
+                and self._kda_alerts < KDA_ALERT_LIMIT):
             threshold = float(triggers.get("kda_threshold", 3.0))
             for p in enemies:
                 if p.kills >= 4 and p.deaths <= 1 and (p.kills / (p.deaths + 1)) >= threshold:
@@ -1271,5 +1274,10 @@ class GameSession:
                 "hex_last": self.hex_last,
                 "skill_order": skill,
                 "dd_version": self.kb.dd_version,
+                # 起飞提示计数（P3 杂项②）：enemy_kda 触发每局限
+                # KDA_ALERT_LIMIT 次，已用/上限直出给主窗口 AI 仪表区
+                # （"起飞提示 1/2"），玩家可见本局还剩几次提示
+                "kda_alerts_used": self._kda_alerts,
+                "kda_alerts_limit": KDA_ALERT_LIMIT,
                 "engine": engine_stats,
             }

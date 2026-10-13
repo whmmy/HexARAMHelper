@@ -19,6 +19,59 @@ import time
 import tkinter as tk
 
 
+# ── 启动延迟自动数据刷新（P3 杂项①） ─────────────────────────────
+AUTO_REFRESH_DELAY_S = 60.0   # 启动后延迟抓取 OP.GG 的秒数（避开启动瞬间的网络/CPU 抢占）
+
+
+class DelayedAutoRefresh:
+    """延迟触发、可取消的一次性任务（启动 60s 后自动抓 OP.GG 用）。
+
+    用 threading.Timer 而非 root.after：不依赖 Tk 对象——应用退出路径
+    （mainloop 退出后的 finally / 托盘退出）与手动按钮入口都能直接
+    cancel，且离线冒烟不开窗即可断言"挂起→取消→不执行 / 到点→仅执行
+    一次"（20261013 P3 杂项案）。
+    """
+
+    def __init__(self, delay_s: float = AUTO_REFRESH_DELAY_S):
+        self._delay_s = delay_s
+        self._lock = threading.Lock()
+        self._timer = None
+
+    @property
+    def pending(self) -> bool:
+        with self._lock:
+            return self._timer is not None
+
+    def schedule(self, fn) -> bool:
+        """挂起延迟触发；已有挂起时不重复排（返回 False，防到点抓两遍）。"""
+        with self._lock:
+            if self._timer is not None:
+                return False
+            timer = threading.Timer(self._delay_s, self._fire, args=(fn,))
+            timer.daemon = True
+            timer.name = "AutoDataRefresh"
+            self._timer = timer
+        timer.start()
+        return True
+
+    def _fire(self, fn):
+        # cancel 与到点并发的窄窗：锁内谁先拿走 _timer 谁赢——cancel 先
+        # 清走则 fn 不执行（这正是"取消挂起的刷新"的语义）
+        with self._lock:
+            if self._timer is None:
+                return
+            self._timer = None
+        fn()
+
+    def cancel(self):
+        """取消挂起的触发（幂等；未挂起/已到点后再调是无害空转）。"""
+        with self._lock:
+            timer = self._timer
+            self._timer = None
+        if timer is not None:
+            timer.cancel()
+
+
 def main():
     # pythonw 下 stdout/stderr 为 None——任何 print 都 AttributeError
     # （20261004 提权重启静默死亡案：UAC 点"是"后无窗即此故，知识库
@@ -526,51 +579,91 @@ def main():
         ui(lambda: print("[CALIB] 标定中…（10 秒内把海克斯三选一界面切到前台）"))
         threading.Thread(target=run, daemon=True, name="Calibrate").start()
 
-    def _start_data_refresh(on_done):
-        """一键数据刷新：后台线程顺序跑 OP.GG 重抓 + 知识派生重生成，
-        输出逐行 print 进日志面板。脚本产物落 data/，知识库启动时一次性
-        加载——完成后提示重启生效（不做运行时热替换 kb，防锁内状态半新
-        半旧）。打包版无 scripts/ 目录，直接提示不支持。"""
+    # ── 数据刷新：手动按钮 + 启动延迟自动抓取（P3 杂项①） ──────────
+    # 任务级在途闸：按钮侧本有 _refresh_busy 防自重入，但自动路径绕过
+    # 按钮——手动全量抓取要几分钟，60s 自动抓取到点完全可能撞上在途的
+    # 手动刷新，两路并发写 data/ 会半新半旧，故共用任务体统一持闸
+    _refresh_mutex = threading.Lock()
+    _refresh_state = {"running": False}
+
+    def _run_data_refresh(on_done=None):
+        """刷新任务体（手动按钮与启动延迟自动抓取共用，同源同参）：后台
+        线程顺序跑 OP.GG 重抓 + 知识派生重生成，输出逐行 print 进日志
+        面板。脚本产物落 data/，知识库启动时一次性加载——完成后提示
+        重启生效（不做运行时热替换 kb，防锁内状态半新半旧）。打包版无
+        scripts/ 目录，直接提示不支持。on_done 为空即自动路径（无按钮
+        要恢复）。"""
+        with _refresh_mutex:
+            if _refresh_state["running"]:
+                print("[DATA] 数据刷新已在进行，本次跳过（防两路并发重抓写坏 data/）")
+                if on_done:
+                    ui(on_done)
+                return
+            _refresh_state["running"] = True
+
         scripts_dir = BASE_DIR / "scripts"
         jobs = [["fetch_opgg_builds.py", "--all"],
                 ["gen_champ_profile.py"]]
         if not scripts_dir.exists():
+            with _refresh_mutex:
+                _refresh_state["running"] = False
             ui(lambda: print("[DATA] 打包版无 scripts/ 目录，请在源码目录运行刷新"))
-            ui(on_done)   # 恢复按钮的回调必须回 UI 线程（Tk 跨线程唯一通道）
+            if on_done:
+                ui(on_done)   # 恢复按钮的回调必须回 UI 线程（Tk 跨线程唯一通道）
             return
 
         def run():
             import subprocess
             ok = True
-            for job in jobs:
-                script = scripts_dir / job[0]
-                if not script.exists():
-                    print(f"[DATA] 缺少 {job[0]}，跳过")
-                    continue
-                print(f"[DATA] 运行 {job[0]} {' '.join(job[1:])} …")
-                try:
-                    proc = subprocess.Popen(
-                        [sys.executable, str(script), *job[1:]],
-                        cwd=str(BASE_DIR), stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT, text=True,
-                        encoding="utf-8", errors="replace")
-                    for line in proc.stdout or []:
-                        print(f"[DATA] {line.rstrip()}")
-                    code = proc.wait()
-                    if code != 0:
+            try:
+                for job in jobs:
+                    script = scripts_dir / job[0]
+                    if not script.exists():
+                        print(f"[DATA] 缺少 {job[0]}，跳过")
+                        continue
+                    print(f"[DATA] 运行 {job[0]} {' '.join(job[1:])} …")
+                    try:
+                        proc = subprocess.Popen(
+                            [sys.executable, str(script), *job[1:]],
+                            cwd=str(BASE_DIR), stdout=subprocess.PIPE,
+                            stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace")
+                        for line in proc.stdout or []:
+                            print(f"[DATA] {line.rstrip()}")
+                        code = proc.wait()
+                        if code != 0:
+                            ok = False
+                            print(f"[WARN] {job[0]} 退出码 {code}")
+                    except Exception as e:  # noqa: BLE001 —— 单脚本失败不断链
                         ok = False
-                        print(f"[WARN] {job[0]} 退出码 {code}")
-                except Exception as e:  # noqa: BLE001 —— 单脚本失败不断链
-                    ok = False
-                    print(f"[WARN] {job[0]} 运行异常: {e}")
+                        print(f"[WARN] {job[0]} 运行异常: {e}")
+            finally:
+                with _refresh_mutex:
+                    _refresh_state["running"] = False
             ui(lambda: print(
                 "[OK] 数据已刷新，重启应用后生效（知识库启动时加载）"
                 if ok else
                 "[WARN] 数据刷新部分失败，详见上方 [DATA] 输出"))
-            ui(on_done)   # DataRefresh 线程内直调会跨线程摸 Tk 控件（Tkinter 非线程安全）
+            if on_done:
+                ui(on_done)   # DataRefresh 线程内直调会跨线程摸 Tk 控件（Tkinter 非线程安全）
 
         ui(lambda: print("[DATA] 开始刷新（OP.GG 全量抓取需几分钟，可继续游戏）"))
         threading.Thread(target=run, daemon=True, name="DataRefresh").start()
+
+    def _start_data_refresh(on_done):
+        """手动『刷新数据』按钮入口（行为不变）。顺带取消挂起的启动延迟
+        自动抓取——用户已手动触发，到点就不必再后台抓一遍。"""
+        auto_refresh.cancel()
+        _run_data_refresh(on_done)
+
+    def _auto_refresh_fire():
+        """启动延迟自动抓取到点：走与手动按钮同一个任务体（同源同参），
+        无按钮回调。"""
+        print(f"[DATA] 启动已 {AUTO_REFRESH_DELAY_S:.0f}s，自动刷新开始"
+              "（OP.GG 全量抓取在后台跑，可继续游戏）")
+        _run_data_refresh(None)
+
+    auto_refresh = DelayedAutoRefresh(AUTO_REFRESH_DELAY_S)
 
     main_win = MainWindow(root, session, ui_queue, log_queue,
                           on_open_settings=_open_settings,
@@ -685,6 +778,10 @@ def main():
     detector.start()
     ledger.start()
     phase_watch()
+    # 启动延迟自动抓取（P3 杂项①）：启动满 60s 才后台抓 OP.GG，避开
+    # 启动瞬间的网络/CPU 抢占；挂起中的抓取在退出路径 finally 与手动
+    # 按钮入口都会被取消，手动按钮行为不变
+    auto_refresh.schedule(_auto_refresh_fire)
     root.deiconify()
     if os.environ.get("HEXA_SMOKE"):
         # UI 冒烟模式：3 秒后自动退出（验证 GUI 可启动，无人工交互）
@@ -743,6 +840,7 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
+        auto_refresh.cancel()   # 挂起的启动延迟刷新随应用退出作废（P3 杂项①）
         phase.stop()
         live.stop()
         detector.stop()
