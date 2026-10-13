@@ -494,3 +494,21 @@ class KnowledgeBase:
 
     def augment_tag_info(self, name: str) -> dict:
         return self.augment_tags.get(name, {})
+
+    # 『升级：』为升级型海克斯的官方命名前缀（升级：中娅/升级：收集者…，
+    # 强化对应基础海克斯效果）；标签库另有不带前缀的强化型条目，以
+    # is_upgrade 字段标注（升级联动案 20261013 起供局内联动判定消费）
+    UPGRADE_PREFIX = "升级："
+
+    def augment_is_upgrade(self, name: str) -> bool:
+        """升级型海克斯判定（事实层：读标签库 is_upgrade 字段，不做任何
+        出装语义判断——方案怎么适配是模型的判断工作）。
+
+        双保险：名称以『升级：』前缀开头亦可判——标签库落后于游戏
+        新出的升级型海克斯时不漏判。空名/两者皆否 → False。
+        """
+        if not name:
+            return False
+        if name.startswith(self.UPGRADE_PREFIX):
+            return True
+        return bool(self.augment_tags.get(name, {}).get("is_upgrade"))

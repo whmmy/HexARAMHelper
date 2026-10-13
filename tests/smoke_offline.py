@@ -33,6 +33,10 @@
 16. 选人期 System2 预派发（ctx 提前案）：阵容锁定即预生成/开局同键复用
     零新增调用/键归一（ally 含我口径）/骰子换人失效重派/开局未就绪照旧
     派发或在途等待/reset 重排不串局/纯规则模式零调用/预生成计入预算
+17. 升级型海克斯局内联动（升级联动案 20261013）：is_upgrade+前缀双保险
+    判定/升级型记账恰好一次事件式刷新（event 绕开 periodic min_interval）/
+    军师纯事实提示/非升级型零触发/同轮防重复/撤销后台账与状态一致/
+    出门装在屏不覆盖/AI 模式 System1 派发+serial 回写
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -4100,6 +4104,184 @@ def test_stability_batch():
           and "gen_champ_profile" in app_src)
 
 
+# ── 17. 升级型海克斯局内联动（升级联动案 20261013） ──────────────
+
+def test_upgrade_augment_link():
+    """升级型海克斯（『升级：X』强化基础海克斯效果）此前选中后零联动：
+    建议不刷新、军师不出声。本组断言：①KB 升级型判定（is_upgrade
+    字段 + 前缀双保险）；②升级型记账成功 → 恰好一次事件式建议刷新
+    （同 _suggest_next_items(reason="event")，引擎侧不受 periodic 20s
+    min_interval 守门）+ 军师纯事实提示（不带出装结论，走 _push_coach
+    去重/冷却）；③同轮防重复触发 / 撤销后台账与状态一致 / 出门装在屏
+    不覆盖（KIND_CTX 口径）/ AI 模式 System1 真被派发且回写。"""
+    print("\n[17] 升级型海克斯局内联动（升级联动案）")
+    import json as _json
+
+    # ① KB 判定：标签库字段全命中 + 前缀双保险（标签库滞后不漏判）
+    ups = [n for n, v in kb.augment_tags.items() if v.get("is_upgrade")]
+    check("升级型判定：is_upgrade 字段全命中",
+          len(ups) >= 10 and all(kb.augment_is_upgrade(n) for n in ups),
+          str(ups[:3]))
+    check("升级型判定：『升级：』前缀双保险（库外名）",
+          kb.augment_is_upgrade("升级：标签库滞后的新海克斯") is True)
+    check("升级型判定：非升级型/库外名/空名判否",
+          kb.augment_is_upgrade(REAL_AUG) is False
+          and kb.augment_is_upgrade("不存在的海克斯") is False
+          and kb.augment_is_upgrade("") is False)
+
+    def tl_count(s, event):
+        return sum(1 for e in s.timeline if e[1] == event)
+
+    upgrade_name = "升级：中娅"
+    hero = "暗裔剑魔"
+    base_aug = next(n for n in sorted(kb.augment_names)
+                    if not kb.augment_is_upgrade(n))
+    non_up = next(n for n in sorted(kb.augment_names)
+                  if n not in (base_aug, upgrade_name)
+                  and not kb.augment_is_upgrade(n))
+
+    # ② 规则模式主链：升级型记账 → 恰好一次事件式刷新 + 军师纯事实
+    # （本组规则场景全程零异常即"纯规则模式零异常"断言本身）
+    s = GameSession(kb, rules)
+    check("纯规则模式", s.engine.mode == "rule")
+    s.on_game_start({"ally": [hero], "enemy": ["黑暗之女"],
+                     "my_hero": hero, "source": "test"})
+    s.on_in_progress()
+    s.record_augment(base_aug, tier="棱彩")
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"]))
+    check("主线模式就位", s.opening_state == "bypassed"
+          and s.suggestion.kind == "next_items")
+    check("升级型记账成功",
+          s.record_augment(upgrade_name, card_idx=2, round_id=20) is True)
+    check("升级型记账触发恰好一次事件刷新",
+          tl_count(s, "upgrade_refresh") == 1
+          and tl_count(s, "upgrade_refresh_skip") == 0,
+          str([e[2] for e in s.timeline if e[1].startswith("upgrade")]))
+    check("刷新后建议即时重算为出装主线",
+          s.suggestion.kind == "next_items", s.suggestion.kind)
+    coach = {c["key"]: c["text"] for c in s.coach_notes}
+    check("军师纯事实提示（不带出装结论，走 _push_coach）",
+          coach.get(f"upgrade:{upgrade_name}")
+          == f"已选升级型海克斯 {upgrade_name}：基础效果强化", str(coach))
+
+    # 非升级型记账：零触发
+    n_ref = tl_count(s, "upgrade_refresh")
+    check("非升级型记账成功但不触发",
+          s.record_augment(non_up, round_id=21) is True
+          and tl_count(s, "upgrade_refresh") == n_ref)
+
+    # 撤销 → 台账与状态一致（幂等撤/首海克斯回退/建议仍在）
+    check("撤销后台账与状态一致",
+          s.revoke_augment(upgrade_name) is True
+          and all(a["name"] != upgrade_name for a in s.augments)
+          and s.first_augment == base_aug
+          and s.suggestion is not None
+          and s.revoke_augment(upgrade_name) is False)
+    check("同轮重记不重复触发",
+          s.record_augment(upgrade_name, round_id=20) is True
+          and tl_count(s, "upgrade_refresh") == n_ref)
+    check("换轮重记照常触发一次",
+          s.revoke_augment(upgrade_name) is True
+          and s.record_augment(upgrade_name, round_id=23) is True
+          and tl_count(s, "upgrade_refresh") == n_ref + 1)
+
+    # ③ 首海克斯即升级型且未购装备：出门装建议在屏不覆盖
+    # （KIND_CTX 口径：opening 本就结合首海克斯生成，刷新只会打乱流程）
+    s2 = GameSession(kb, rules)
+    s2.on_game_start({"ally": [hero], "enemy": ["黑暗之女"],
+                      "my_hero": hero, "source": "test"})
+    s2.on_in_progress()
+    check("首海克斯即升级型：出门装在屏、跳过刷新",
+          s2.record_augment(upgrade_name, tier="棱彩") is True
+          and s2.suggestion.kind == "opening"
+          and tl_count(s2, "upgrade_refresh") == 0
+          and tl_count(s2, "upgrade_refresh_skip") == 1,
+          s2.suggestion.kind)
+    check("升级型首海克斯仍推军师事实",
+          any(c["key"] == f"upgrade:{upgrade_name}" for c in s2.coach_notes))
+    s2.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"]))
+    check("出门装期购物后周期刷新照常接管（无升级刷新残留）",
+          s2.opening_state == "bypassed"
+          and s2.suggestion.kind == "next_items"
+          and tl_count(s2, "upgrade_refresh") == 0)
+
+    # ④ AI 模式：升级记账派发 System1 精修——先证 min_interval 对 periodic
+    # 类确实拦得住（对照），再证升级记账的 event 类派发照样放行；结果按
+    # serial 覆盖回写（防旧覆新机制不被新路径绕过）。
+    # 注：_last_refine 初始 0 使本局首个 periodic 必然放行（time.time()-0
+    # ≥ min_iv），第二次起才被拦——正好构成"守门对 periodic 有效、对
+    # event 无效"的对照组。
+    def ctx_json():
+        pool = kb.core_item_pool(hero) or ["长剑"]
+        return _json.dumps({
+            "augment_affinity": [{"name": n, "bias": "ad", "note": "t"}
+                                 for n in kb.top_augments(hero, 8)],
+            "opening_items": [{"combo": pool[:1], "when": "标准"},
+                              {"combo": ["多兰之刃"], "when": "进攻"},
+                              {"combo": ["红水晶"], "when": "防守"}],
+            "builds": [{"name": "爆杀流", "path": "ad", "items": pool[:3],
+                        "note": "主线"}],
+            "skill_order": "主Q副E",
+            "component_rules": [],
+            "augment_item_links": []})
+
+    eng_ai, fc1, _fc2 = build_ai_engine(
+        script_s2=[ctx_json()],
+        # 三段按序弹出：①首海克斯出门装精修 ②首快照 periodic 下一件精修
+        #（picks 首位=焚天，与升级段区分开）③升级记账后事件式下一件精修
+        script_s1=[_json.dumps({"picks": [
+                        {"name": "红水晶", "reason": "出门防守"}]}),
+                   _json.dumps({"picks": [
+                       {"name": "焚天", "reason": "periodic 版本答案"}]}),
+                   _json.dumps({"picks": [
+                       {"name": "星蚀",
+                        "reason": "升级型海克斯强化攻击特效，优先成型"},
+                       {"name": "焚天", "reason": "次选"}]})],
+        min_interval=9999.0)
+    s3 = GameSession(kb, rules, settings=FakeSettings(min_interval=9999.0),
+                     engine=eng_ai)
+    s3.on_game_start({"ally": [hero], "enemy": ["黑暗之女"],
+                      "my_hero": hero, "source": "test"})
+    s3.on_in_progress()
+    deadline = time.time() + 6
+    while time.time() < deadline and eng_ai.cache.get() is None:
+        time.sleep(0.02)
+    check("AI ctx 就绪", eng_ai.cache.get() is not None
+          and not eng_ai.cache.pending)
+    s3.record_augment(base_aug, tier="棱彩")        # 出门装精修派发（段①）
+    s3.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                             my_gold=4000))          # 首个 periodic 派发（段②）
+    deadline = time.time() + 6
+    while time.time() < deadline and eng_ai._last_refine["next_items"] == 0:
+        time.sleep(0.02)   # 等 refine 时间戳异步落位（落位后拦截窗口才生效）
+    n_calls0 = len(fc1.calls)
+    s3.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                             my_gold=4250))          # 金币跨档：periodic 再试
+    check("periodic 类被 min_interval 拦下（对照组：守门有效）",
+          len(fc1.calls) == n_calls0,
+          f"{len(fc1.calls)} vs 基线 {n_calls0}")
+    check("升级型记账触发事件式刷新（AI 模式）",
+          s3.record_augment(upgrade_name, round_id=30) is True
+          and tl_count(s3, "upgrade_refresh") == 1)
+    target_serial = s3.suggestion.serial   # 升级刷新 synchronous 落位的 serial
+    deadline = time.time() + 6
+    while time.time() < deadline and not (
+            s3.suggestion.serial == target_serial
+            and s3.suggestion.source == "ai"):
+        time.sleep(0.02)
+    check("System1 恰好多派发一次（event 类绕开 min_interval 锁）",
+          len(fc1.calls) == n_calls0 + 1,
+          f"{len(fc1.calls)} vs 基线 {n_calls0}")
+    check("AI 精修按 serial 覆盖回写（防旧覆新不被新路径绕过）",
+          s3.suggestion.serial == target_serial
+          and s3.suggestion.source == "ai"
+          and s3.suggestion.kind == "next_items"
+          and s3.suggestion.candidates[0].name == "星蚀",
+          f"serial={s3.suggestion.serial}/{target_serial} "
+          f"source={s3.suggestion.source} "
+          f"cands={[c.name for c in s3.suggestion.candidates]}")
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -4129,6 +4311,7 @@ if __name__ == "__main__":
     test_coach_save_gap()
     test_build_progress()
     test_review_fixes()
+    test_upgrade_augment_link()
     test_thinking_params()
     test_click_diag_and_tee()
     test_click_blackbox()

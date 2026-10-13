@@ -119,6 +119,9 @@ class GameSession:
             self.augments = []            # [{"name","tier","ts"}]
             self.hex_recorded_rounds = set()   # 已记账轮次（检测器 round_id，
                                                # 见 record_augment / round_recorded）
+            # 已触发升级联动的轮次（升级联动案 20261013：同一轮次防重复
+            # 触发建议刷新，见 record_augment）
+            self._upgrade_fired_rounds = set()
             # 我的实时态（live 快照维护）
             self.my_items = []
             self.my_level = 0             # 我的英雄等级（快照直出，UI 英雄行）
@@ -465,7 +468,19 @@ class GameSession:
         缺条（2026-09-29 核验实锤的错位）。模式是否允许同名强化跨轮
         重复选取无仓库数据可证（离线不可判），留 augment_duplicate_click
         轨迹事件供真机对局定性后再决定是否改按 (name, 轮次) 记账。
+
+        升级型海克斯联动（升级联动案 20261013）：记账成功且为升级型
+        （kb.augment_is_upgrade，事实层判定）→ ①军师推一条纯事实提示
+        （不带出装结论，方案适配是模型的判断工作；先于刷新派发，
+        _suggest_next_items 的 _set_coach_context 会把它喂给 System1）；
+        ②事件式触发一次建议刷新——与死亡边沿同类派发（reason="event"，
+        引擎侧不受 periodic 20s min_interval 守门），同一轮次
+        （round_id）防重复触发，撤销后同轮重记不再刷（换轮照常）；
+        出门装建议在屏时不覆盖（同 KIND_CTX 派发口径：opening 本就
+        结合首海克斯生成）。刷新在锁外派发（同 _on_engine_result
+        规矩：持锁中不调要拿锁的方法，AI 模式内部还要起线程）。
         """
+        upgrade_refresh = False
         with self._lock:
             if not name:
                 return False
@@ -484,8 +499,30 @@ class GameSession:
             if self.first_augment is None:
                 self.first_augment = name
             self._recompute_path()
-            self._decide_opening_or_next()
-            return True
+            fired_by_opening = self._decide_opening_or_next()
+            if self.kb.augment_is_upgrade(name):
+                self._push_coach(f"upgrade:{name}",
+                                 f"已选升级型海克斯 {name}：基础效果强化")
+                if (round_id is None
+                        or round_id not in self._upgrade_fired_rounds):
+                    if round_id is not None:
+                        self._upgrade_fired_rounds.add(round_id)
+                    if self.opening_state == "offered":
+                        if not self.my_items:
+                            self._log("upgrade_refresh_skip",
+                                      f"{name}（出门装建议在屏，不覆盖）")
+                        else:
+                            self.opening_state = "bypassed"
+                            self._log("opening_bypassed",
+                                      "已购装备，转入下一件模式")
+                            upgrade_refresh = True
+                    elif not fired_by_opening:
+                        upgrade_refresh = True
+            if upgrade_refresh:
+                self._log("upgrade_refresh", name)
+        if upgrade_refresh:
+            self._suggest_next_items(reason="event")
+        return True
 
     def round_recorded(self, round_id) -> bool:
         """本轮（检测器 round_id）是否已成功记账过海克斯。
@@ -538,9 +575,11 @@ class GameSession:
                 # 局中换英雄视为极端兜底，重置对局数据
                 augments = list(self.augments)
                 rounds = set(self.hex_recorded_rounds)
+                up_rounds = set(self._upgrade_fired_rounds)
                 self.reset()
                 self.augments = augments
                 self.hex_recorded_rounds = rounds
+                self._upgrade_fired_rounds = up_rounds
                 self.stage = "in_game"
             elif self.stage == "idle":
                 self.stage = "champ_select"
@@ -613,25 +652,29 @@ class GameSession:
 
     # ── 出门装两分支状态机（v4.1 §2：先海克斯后出门装） ────────────
 
-    def _decide_opening_or_next(self):
+    def _decide_opening_or_next(self) -> bool:
         """首个海克斯记账后：未购买任何装备 → 出门装三选（结合刚选海克斯）；
-        已购买 → 不再推出门装，转下一件。"""
+        已购买 → 不再推出门装，转下一件。
+
+        返回本次是否已自行派发过一次 next_items 刷新（bypassed 分支）——
+        调用方（record_augment 升级联动）据此避免同一记账事件双派发。"""
         if self.opening_state != "wait_first_augment" or not self.first_augment:
-            return
+            return False
         if self.my_items:
             self.opening_state = "bypassed"
             self._log("opening_bypassed", "已购装备，直接进入下一件模式")
             self._suggest_next_items(reason="event")
-        else:
-            self.opening_state = "offered"
-            serial = self._new_serial()
-            threat = self.threat
-            first = self.first_augment
-            cands = self.engine.opening_candidates(first, threat, serial)
-            note = f"首个海克斯【{first}】已联动"
-            self._set_suggestion(Suggestion("opening", cands, note=note,
-                                            serial=serial))
-            self._log("opening_offered", first)
+            return True
+        self.opening_state = "offered"
+        serial = self._new_serial()
+        threat = self.threat
+        first = self.first_augment
+        cands = self.engine.opening_candidates(first, threat, serial)
+        note = f"首个海克斯【{first}】已联动"
+        self._set_suggestion(Suggestion("opening", cands, note=note,
+                                        serial=serial))
+        self._log("opening_offered", first)
+        return False
 
     def _suggest_next_items(self, reason: str = "event"):
         """出装主线序列（v4.2）：金币按序累计——够买第 1 件后剩余继续判第 2 件，
@@ -713,17 +756,6 @@ class GameSession:
                              else synth_hint)
             if save_note and seq:
                 self._push_coach(f"save:{seq[0].name}", save_note)
-        # AI 模式：把军师提示（阵容缺口/顺逆风/攒钱/满装替换等，含本帧
-        # 刚生成的）喂给 System1 作上下文——必须先于派发写入
-        self._set_coach_context()
-        # 精修派发（AI 模式在 next_candidates 内发起，后台线程组装 prompt
-        # 读取上方写入的军师上下文）：内部重算的规则底线与上方预演同源
-        # 同参、确定性一致，建议统一沿用上方已备好的 seq
-        if self.engine.mode != "rule":
-            self.engine.next_candidates(self.my_items, self._my_gold,
-                                        self.current_path, threat, serial,
-                                        reason=reason,
-                                        augments=list(self.augments))
         # 满六神装（v4.4）：格满后"下一件"买不进格，切到替换建议流；
         # 未满装行为完全不变（build_sequence 内按占格装备数分流）
         if full_build:
@@ -732,13 +764,25 @@ class GameSession:
                     "swap_items", [], note="六神装成型，暂无更优替换（保持现装）",
                     gold=self._my_gold, serial=serial))
                 self._log("swap_mode", "满装无替换候选")
-                return
-            self._suggest_swap(seq, serial, reason)
-            return
-        # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
-        self._apply_afford(seq)
-        self._set_suggestion(Suggestion("next_items", seq, note=save_note,
-                                        gold=self._my_gold, serial=serial))
+            else:
+                self._suggest_swap(seq, serial, reason)
+        else:
+            # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
+            self._apply_afford(seq)
+            self._set_suggestion(Suggestion("next_items", seq, note=save_note,
+                                            gold=self._my_gold, serial=serial))
+        # 精修派发必须在建议落位之后：AI 回包按 serial 认领"当前建议"——
+        # 派发先于落位时，瞬时回包会写进即将被 _set_suggestion 整体替换的
+        # 旧建议对象，AI 精修无声丢失（升级联动案 20261013 冒烟实测命中：
+        # _suggest_next_items 经升级联动/ctx 刷新存在锁外调用路径，回包
+        # 可在落位前插入）。军师上下文仍先于派发写入（后台线程组装
+        # prompt 时读取）；内部重算的规则底线与上方预演同源同参。
+        self._set_coach_context()
+        if self.engine.mode != "rule":
+            self.engine.next_candidates(self.my_items, self._my_gold,
+                                        self.current_path, threat, serial,
+                                        reason=reason,
+                                        augments=list(self.augments))
 
     # ── 满六神装替换建议（v4.4） ─────────────────────────────────
 
