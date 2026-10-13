@@ -4298,7 +4298,7 @@ def test_stability_batch():
           and "gen_champ_profile" in app_src)
 
 
-# ── 17. 升级型海克斯局内联动（升级联动案 20261013） ──────────────
+# ── 18. 升级型海克斯局内联动（升级联动案 20261013） ──────────────
 
 def test_upgrade_augment_link():
     """升级型海克斯（『升级：X』强化基础海克斯效果）此前选中后零联动：
