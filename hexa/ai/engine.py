@@ -159,6 +159,8 @@ class AIDecisionEngine(DecisionEngine):
         self._pending_since = 0.0  # System2 生成起点（挂死看门狗计时）
         self._ctx_failed = False   # 看门狗落位后置真（stats 显示"生成失败"）
         self._prepare_key = None   # 选人期预生成的阵容键（None=无预生成在途/就绪）
+        self._prepare_epoch = -1   # 预生成派发时的游戏代际（-1=无；开局判
+                                   # "预生成属本局选人期"，见 start_game）
 
     # ── 守门 ──────────────────────────────────────────────────────
 
@@ -175,6 +177,18 @@ class AIDecisionEngine(DecisionEngine):
                 return False
             self._calls += 1
             return True
+
+    def _reset_usage_window(self):
+        """两槽位本局用量窗清零（UsageStats.game_*，费用/本局调用仪表）。
+
+        局窗基线两个起点：选人期（重）派发预生成、开局全新派发/复用上一局
+        预生成时的整窗重置——"本局 ¥"自基线起算，上一局残留绝不带入
+        （20261013 复核案：同键复用路径漏清，cost_game 跨局累计）。
+        引擎锁内调用安全：UsageStats 自持独立锁，无重入。"""
+        for _c in (self.client_s1, self.client_s2):
+            _u = getattr(_c, "usage", None)
+            if _u:
+                _u.new_game()
 
     def _interval_ok(self, kind: str, reason: str) -> bool:
         if reason != "periodic":
@@ -314,7 +328,8 @@ class AIDecisionEngine(DecisionEngine):
           期回调每 ~2s 刷新一次，靠这里去重）；键变化（骰子换人/阵容变化）
           → 旧 ctx 立即失效并重派，旧在途结果按键丢弃。
         - 预算守门：派发计入本局预算（budget_per_game>0 占 1 个名额，
-          开局复用不重复计入；<=0 不限）。预算窗自选人期起算。
+          开局复用不重复计入；<=0 不限）。预算窗自选人期起算；本局费用
+          窗（"本局 ¥"）同基线——（重）派发即清零重算，上一局残留不带入。
         - 英雄缺失/槽位未配置 → 静默跳过（开局路径照旧兜底，行为同旧）。
         """
         hero = str(hero or "")
@@ -329,8 +344,12 @@ class AIDecisionEngine(DecisionEngine):
                          or self.cache.pending_for(key))):
                 return   # 同键已就绪/在途：幂等（选人期 2s 轮询去重）
             self._prepare_key = key
+            self._prepare_epoch = self._epoch  # 开局按代际判"预生成属本局"
             self._calls = 0          # 新一局预算窗自选人期起算
             self._ctx_failed = False
+            # 费用窗同步自选人期起算（预生成花费属本局）；骰子换人重派=
+            # 新一局选人起点，上一把选人期的花费一并清掉
+            self._reset_usage_window()
         # 骰子换人/阵容变化：旧 ctx 立即失效（开局绝不复用错阵容的方案池）
         self.cache.invalidate()
         if not self._try_reserve():
@@ -363,18 +382,33 @@ class AIDecisionEngine(DecisionEngine):
             reuse_ready = self.cache.ready_for(key)      # 选人期已生成同键 ctx
             reuse_pending = (not reuse_ready
                              and self.cache.pending_for(key))  # 同键生成在途
+            # 预生成是否属本局选人期：prepare 在上一代（epoch-1）派发过才
+            # 算。连续两局同阵容时 prepare 幂等早退不派发，_prepare_epoch
+            # 停留在上一局代际，开局据此区分"延续本局预生成的窗"与
+            # "清掉上一局残留"（20261013 复核案，两局同阵容回归 ⑦）
+            prepare_this_game = self._prepare_epoch == epoch - 1
             if not reuse_ready and not reuse_pending:
                 # 全新派发（未预生成/键失配）：旧语义整窗重置，费用窗口
                 # 自开局起算（本路径 System2 派发不入预算，与旧行为一致）
                 self._calls = 0
                 self._prepare_key = None
-                for _c in (self.client_s1, self.client_s2):
-                    _u = getattr(_c, "usage", None)
-                    if _u:
-                        _u.new_game()
+                self._prepare_epoch = -1
+                self._reset_usage_window()
+            elif not prepare_this_game:
+                # 复用但 ctx 是上一局预生成（连续两局同阵容，prepare 幂等
+                # 早退没派新的）：本局窗口照样重置基线——否则上一局
+                # System1 预算余量与 token 花费直接带进本局（"本局 ¥"虚
+                # 高、budget_per_game>0 时本局 System1 精修被上一局余量
+                # 挤没）。"预生成花费/名额属本局"仅当预生成是本局选人期
+                # 自己派的；若本局选人期派过（prepare_this_game）则延续，
+                # 不走此分支
+                self._calls = 0
+                self._prepare_epoch = -1
+                self._reset_usage_window()
         if reuse_ready or reuse_pending:
-            # 复用/等待选人期结果：开局零新增 LLM 调用。预算窗延续选人期
-            # （预生成已计入）；费用窗口延续（预生成花费属本局）。就绪分支
+            # 复用/等待选人期结果：开局零新增 LLM 调用。预算/费用窗按
+            # prepare_this_game 判定：本局选人期预生成→延续选人期基线
+            # （预生成已计入）；复用上一局 ctx→上面已重置基线。就绪分支
             # 补发 KIND_CTX（复盘时间线留"开局复用"痕；session 此刻必为
             # 刚 reset 的空会话，回调只落日志无刷新副作用）；在途分支由
             # gen 线程落位时自会发，此处不重复。

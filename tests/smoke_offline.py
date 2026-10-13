@@ -2046,7 +2046,10 @@ def test_ctx_early_dispatch():
     ③开局时 ctx 未就绪→未预生成照旧派发不炸，已预生成在途则等待不重复派发；
     ④选人后 reset/重排→旧 serial/旧 ctx 不覆盖新局；
     ⑤纯规则模式零 LLM 调用零行为变化；
-    ⑥选人期派发计入本局预算（>0 占名额、<=0 不限）。
+    ⑥选人期派发计入本局预算（>0 占名额、<=0 不限）；
+    ⑦连续两局同阵容（prepare 幂等早退+开局同键复用）：上一局的预算余量
+    与 token 花费不带入第二局——"本局 ¥"清零重算、System1 名额重置；
+    本局选人期预生成的花费/名额仍延续到本局（20261013 复核案）。
     """
     print("\n[6d] System2 选人期预派发（ctx 提前案）")
     from hexa.ai.system2 import ContextCache as _CC
@@ -2179,6 +2182,59 @@ def test_ctx_early_dispatch():
     time.sleep(0.5)
     check("⑥budget=0 不限（预生成后 System1 照发）", len(c1b0.calls) == 1,
           f"{len(c1b0.calls)}")
+
+    # ---- ⑦ 连续两局同阵容：本局窗口基线（20261013 复核案回归） ----
+    # 复核案：prepare 幂等早退与开局同键复用都不重置本局窗口，上一局
+    # 的 token 花费（主窗口"本局 ¥"）与 System1 预算余量直接带进第二局。
+    # 修复后开局按"预生成是否属本局选人期"判定：本局预生成→窗延续；
+    # 复用上一局 ctx→预算/费用窗清零重算。
+    eng_g1, c1g1, c2g1 = build_ai_engine(
+        script_s2=[_make_ctx_json(hero_a)])
+    eng_g1.bind(lambda *a: None)
+    # 第一局：选人预生成 → 开局同键复用（预生成花费属本局，窗口延续）
+    eng_g1.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    _wait_ctx(eng_g1, key_a)
+    eng_g1.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    time.sleep(0.3)
+    check("⑦第一局复用保留预生成花费（本局 ¥>0）",
+          eng_g1.stats()["cost_game"] > 0, str(eng_g1.stats()["cost_game"]))
+    check("⑦第一局预算窗延续选人期（_calls=1）", eng_g1._calls == 1,
+          str(eng_g1._calls))
+    # 第二局：同阵容 prepare 幂等早退（零派发）→ 开局同键复用上一局 ctx
+    eng_g1.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    time.sleep(0.2)
+    check("⑦第二局选人零新增 System2（幂等早退）", len(c2g1.calls) == 1,
+          f"{len(c2g1.calls)}")
+    eng_g1.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    time.sleep(0.3)
+    st_g2 = eng_g1.stats()
+    check("⑦第二局开局本局 ¥ 清零（上一局花费不带入）",
+          st_g2["cost_game"] == 0.0, str(st_g2["cost_game"]))
+    check("⑦第二局开局累计花费保留（cost_total 不清）",
+          st_g2["cost_total"] > 0, str(st_g2["cost_total"]))
+    check("⑦第二局开局仍同键复用（零新增调用）", len(c2g1.calls) == 1,
+          f"{len(c2g1.calls)}")
+
+    # 预算余量不跨局：budget=1 时第二局 System1 恢复可派发
+    eng_g2, c1g2, _c2g2 = build_ai_engine(
+        script_s2=[_make_ctx_json(hero_a)], budget=1)
+    eng_g2.bind(lambda *a: None)
+    eng_g2.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    _wait_ctx(eng_g2, key_a)
+    eng_g2.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])  # 第一局开局
+    time.sleep(0.2)
+    check("⑦第一局预算窗延续（预生成占 1 名额）", eng_g2._calls == 1,
+          str(eng_g2._calls))
+    eng_g2.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])  # 幂等早退
+    eng_g2.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])  # 第二局复用
+    time.sleep(0.2)
+    check("⑦第二局开局预算窗重置（_calls=0）", eng_g2._calls == 0,
+          str(eng_g2._calls))
+    c1g2.script.append('{"picks": [{"name": "红水晶", "reason": "防守"}]}')
+    eng_g2.opening_candidates(kb.top_augments(hero_a, 1)[0], threat, serial=7)
+    time.sleep(0.5)
+    check("⑦第二局 System1 恢复可派发（不被上一局余量挤没）",
+          len(c1g2.calls) == 1, f"{len(c1g2.calls)}")
 
 
 def test_session_ai_serial():
