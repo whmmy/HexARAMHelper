@@ -364,21 +364,57 @@ def generate(kb, rules, client, hero: str, ally: list, enemy: list,
 
 
 class ContextCache:
-    """整局缓存：新局 start_game 覆盖，线程安全（System2 在后台线程生成）"""
+    """整局缓存：按 (hero, ally, enemy) 阵容键控，线程安全（System2 在后台线程生成）。
+
+    选人期预生成（engine.prepare_game）→ 开局同键命中复用（零新增 LLM 调用）；
+    骰子换人/阵容变化 → 键失配即视为无效（开局照旧重派，绝不复用错阵容的
+    方案池）。不带键的 get()/pending 为兼容口径：只看"当前缓存"本身，键
+    匹配判断由 engine 侧经 ready_for/pending_for 完成。"""
 
     def __init__(self):
         self._lock = threading.Lock()
         self._ctx = None
+        self._key = None             # _ctx 对应的阵容键
         self._pending = False
+        self._pending_key = None     # 在途生成对应的阵容键
 
-    def set(self, ctx: ChampionContext):
+    @staticmethod
+    def make_key(hero: str, ally: list, enemy: list) -> tuple:
+        """阵容键：英雄 + 己方名单（剔除英雄并排序去重）+ 敌方名单（排序去重）。
+
+        己方剔除英雄本人：同一局的三个派发点 ally 口径不一（LCU 选人/
+        GameFlow 含我、Live 快照兜底不含我），归一后同局必同键；排序去重
+        防名单顺序抖动造成假性失配（失配的代价只是开局重派一次，不会
+        复用错阵容的上下文，宁失配勿错配）。"""
+        hero = str(hero or "")
+        mates = tuple(sorted({str(a) for a in (ally or []) if a} - {hero}))
+        foes = tuple(sorted({str(e) for e in (enemy or []) if e}))
+        return (hero, mates, foes)
+
+    def set(self, ctx: ChampionContext, key: tuple = None):
         with self._lock:
             self._ctx = ctx
+            self._key = key
             self._pending = False
+            self._pending_key = None
 
-    def get(self) -> ChampionContext | None:
+    def get(self, key: tuple = None) -> ChampionContext | None:
+        """取当前上下文；给定 key 时键失配返回 None（防跨局/跨阵容串用）"""
         with self._lock:
+            if key is not None and self._key != key:
+                return None
             return self._ctx
+
+    def ready_for(self, key: tuple) -> bool:
+        """键匹配且已生成完毕（开局复用的判据）"""
+        with self._lock:
+            return (self._ctx is not None and self._key == key
+                    and not self._pending)
+
+    def pending_for(self, key: tuple) -> bool:
+        """键匹配的生成在途（开局等待其落位、不重复派发的判据）"""
+        with self._lock:
+            return self._pending and self._pending_key == key
 
     @property
     def pending(self) -> bool:
@@ -388,11 +424,14 @@ class ContextCache:
     def invalidate(self):
         with self._lock:
             self._ctx = None
+            self._key = None
 
-    def start_pending(self):
+    def start_pending(self, key: tuple = None):
         with self._lock:
             self._ctx = None
+            self._key = None
             self._pending = True
+            self._pending_key = key
 
     def fail(self):
         """生成失败落位：清 pending（ctx_source 从"生成中"转"生成失败"）。
@@ -402,4 +441,6 @@ class ContextCache:
         qwen3 思考挂死 12 分钟，ctx_source 全局卡"生成中"）。"""
         with self._lock:
             self._ctx = None
+            self._key = None
             self._pending = False
+            self._pending_key = None

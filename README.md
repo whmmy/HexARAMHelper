@@ -40,9 +40,11 @@ HEXA_MOCK=1 uv run python -u app.py
 
 ## AI 双槽位（可选，无 Key 自动纯规则）
 
-设置界面开启 AI 后：System 2（默认 qwen3.8-max）在加载期生成 ChampionContext
-（海克斯亲和/出门装方案/多路线/海克斯→出装联动），System 1（默认 qwen3.8-flash）
-在局内按快照给三选+理由。守门：每局 System1 硬上限（默认 15 次）、periodic
+设置界面开启 AI 后：System 2（默认 qwen3.8-max）在选人期阵容锁定即后台
+预生成 ChampionContext（海克斯亲和/出门装方案/多路线/海克斯→出装联动），
+开局直接复用（首个海克斯零等待；未预生成则开局照旧派发），System 1
+（默认 qwen3.8-flash）在局内按快照给三选+理由。守门：每局 AI 调用上限
+budget_per_game（默认 0=不限；选人期预生成与局内精修共用计数）、periodic
 精修最小间隔、超时自动降级模型、失败自动回退规则建议。费用仪表实时显示
 本局/累计花费（~¥0.07~0.12/局）。
 

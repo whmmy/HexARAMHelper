@@ -169,6 +169,7 @@ class GameSession:
     # ── PhaseMachine 回调（状态机线程） ────────────────────────────
 
     def on_champ_select(self, teams):
+        prep = None
         with self._lock:
             my_hero = self.kb.validate_hero(teams.get("my_hero") or "")
             # 上一局终局事件丢失（中途启动/秒退）时补写复盘（flush 幂等，
@@ -186,6 +187,21 @@ class GameSession:
                 self._log("hero_selected", my_hero)
             if self.dumper:
                 self.dumper.dump_lcu("/lol-champ-select/v1/session", teams)
+            # System2 选人期预派发（20261013 ctx 迟到案：海克斯大乱斗第一个
+            # 海克斯出现很早，GameStart 才派发的 ctx 迟到最伤）。阵容锁定
+            # （my_hero 就位）即后台预生成，开局 start_game 同键命中复用；
+            # 骰子换人/阵容变化由引擎按 (hero, ally, enemy) 键比对自动失效
+            # 重派。纯规则引擎 prepare 为空操作，行为零变化。
+            # 锁内只提取实参，锁外派发（同 on_game_start 规矩：不持锁起线程）
+            if my_hero:
+                prep = (self.engine, my_hero,
+                        [c for c in teams.get("ally", [])
+                         if c and self.kb.validate_hero(c)],
+                        [c for c in teams.get("enemy", [])
+                         if c and self.kb.validate_hero(c)])
+        if prep:
+            engine, hero, ally, enemy = prep
+            engine.prepare_game(hero, ally, enemy)
 
     def on_game_start(self, teams):
         with self._lock:
