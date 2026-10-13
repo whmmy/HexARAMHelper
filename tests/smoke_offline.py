@@ -37,6 +37,10 @@
     判定/升级型记账恰好一次事件式刷新（event 绕开 periodic min_interval）/
     军师纯事实提示/非升级型零触发/同轮防重复/撤销后台账与状态一致/
     出门装在屏不覆盖/AI 模式 System1 派发+serial 回写
+18. 提示语优化（20261013 开局定调案）：识别等待态纠错指引单源 theme
+    （UI 契约 6b）/评级理由带先验位次（kb 统计直出非语义表）/
+    ChampionContext.briefing 开局定调（AI 生成+校验截断+降级威胁/缺口
+    事实句+KIND_CTX 推送同 key 去重+System1 prompt 消费）
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -48,8 +52,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from hexa.ai.client import UsageStats
-from hexa.ai.engine import (AIDecisionEngine, KIND_NEXT, KIND_OPENING,
-                            KIND_RANKS, RuleDecisionEngine)
+from hexa.ai.engine import (AIDecisionEngine, KIND_CTX, KIND_NEXT,
+                            KIND_OPENING, KIND_RANKS, RuleDecisionEngine)
 from hexa.core.game_state import GameSession
 from hexa.core.live_api import LivePoller, LiveSnapshot, PlayerInfo
 from hexa.core.lcu import PhaseMachine
@@ -1603,6 +1607,7 @@ def test_ai_engine():
     top = kb.top_augments(hero, 10)
     pool = kb.core_item_pool(hero)
     ctx_json = {
+        "briefing": "敌方坦克偏多，优先破甲开局",
         "augment_affinity": [{"name": n, "bias": "ad", "note": "测试"} for n in top],
         "opening_items": [{"combo": pool[:1] or ["长剑"], "when": "标准"},
                           {"combo": ["多兰之刃"], "when": "进攻"},
@@ -1627,6 +1632,9 @@ def test_ai_engine():
     ctx = eng.cache.get()
     check("System2 上下文生成", ctx is not None and ctx.source == "ai")
     check("亲和表有效", ctx and len(ctx.augment_affinity) == 10)
+    check("开局定调随 ctx 生成（briefing 字段贯通）",
+          ctx and ctx.briefing == "敌方坦克偏多，优先破甲开局",
+          str(ctx.briefing if ctx else None))
     check("加点来自 ctx（顶层单值）", eng.skill_order(hero) == "主Q副E")
     check("规则模式无 ctx 时加点", RuleDecisionEngine(kb, rules)
           .skill_order(hero) == "主Q副E")
@@ -3920,6 +3928,19 @@ def test_ui_design_system():
     check("UI 不再显示「路线」行（current_path 仍在引擎内供选候选/复盘）",
           not route, str(route))
 
+    # 6b) 海克斯时刻等待态文案契约（提示语优化案 20261013）：识别等待态
+    #     必须带纠错指引（OCR 未识别/误记时玩家要知道台账与 F9 入口），
+    #     且两段文案单源 theme.py——overlay 曾自带一份 DETECT_TEXT 漂移
+    check("识别等待态文案单源 theme 且带纠错指引（台账/F9）",
+          "识别中" in _theme.DETECT_TEXT
+          and "台账" in _theme.UNRECOGNIZED_HINT
+          and "F9" in _theme.UNRECOGNIZED_HINT,
+          f"{_theme.DETECT_TEXT} / {_theme.UNRECOGNIZED_HINT}")
+    check("overlay 识别等待态引用 theme（不再自带文案，拼接指引）",
+          'DETECT_TEXT = "' not in srcs["overlay.py"]
+          and "DETECT_BODY = DETECT_TEXT + " in srcs["overlay.py"]
+          and "UNRECOGNIZED_HINT" in srcs["overlay.py"])
+
     # 7) 应用版本号单一来源（hexa.__version__ ↔ pyproject 不得漂移）
     import tomllib as _toml
     from hexa import __version__
@@ -4282,6 +4303,172 @@ def test_upgrade_augment_link():
           f"cands={[c.name for c in s3.suggestion.candidates]}")
 
 
+def test_prompt_copy():
+    """提示语优化（20261013 开局定调案）三件套：
+
+    ① 识别等待态操作指引——OCR 未识别成功/疑似误记时，浮窗直接给出
+       纠错入口（主窗口台账 / F9 撤销最近一条），玩家不再对着
+       "识别中…"干等无处下手；文案单源 theme.py（契约断言在
+       test_ui_design_system 6b，这里断组合正文）。
+    ② 规则评级理由带先验依据——kb.augment_prior_rank 的 (档位, 档内
+       位次) 统计直出（"先验黄金位第2"），不是新语义表；榜外 C 档
+       无据不编。
+    ③ ChampionContext.briefing 开局定调（<=40 字）——System2 prompt
+       要求生成、校验超长截断；降级 rule_context 用威胁画像/阵容缺口
+       组事实句；KIND_CTX 就绪推军师（同 key 去重，overlay 经
+       coach_latest 常驻展示）；System1 prompt 消费。
+    """
+    print("\n[18] 提示语优化（失败指引/先验依据/开局定调）")
+    import json as _json
+    from hexa.ai import system1 as _s1
+    from hexa.ai import system2 as _s2
+    from hexa.core.rules_engine import Candidate as _Cand
+    hero = "暗裔剑魔"
+
+    # ---- ① 识别等待态正文 = 状态行 + 操作指引 ----
+    from hexa.ui import overlay as _ov
+    from hexa.ui import theme as _theme
+    check("识别等待态正文拼接指引（状态行；台账/F9 指引）",
+          _ov.DETECT_BODY == _theme.DETECT_TEXT + "；" + _theme.UNRECOGNIZED_HINT
+          and "F9" in _ov.DETECT_BODY and "台账" in _ov.DETECT_BODY,
+          _ov.DETECT_BODY)
+
+    # ---- ② 评级理由带先验依据（kb 统计直出，非语义表） ----
+    top3 = kb.top_augments(hero, 3)
+    ranks = rules.rank_augments(hero, top3)
+    ok_prior = True
+    for r in ranks:
+        prior = kb.augment_prior_rank(hero, r["name"])
+        if prior is None or f"先验{prior[0]}位第{prior[1]}" not in r["reason"]:
+            ok_prior = False
+    check("评级理由含先验依据（先验X位第N，与库逐条同源）",
+          ranks and ok_prior, str(ranks))
+    t0 = kb.augment_prior_rank(hero, top3[0])
+    check("kb 先验位次查询与 CSV 同源（tier+档内位次）",
+          t0 == (kb.hero_augments[hero][top3[0]]["tier"],
+                 kb.hero_augments[hero][top3[0]]["t_rank"])
+          and kb.augment_prior_rank(hero, "不存在的海克斯名") is None,
+          str(t0))
+    offmeta = sorted(kb.augment_names - set(kb.top_augments(hero, 40)))[0]
+    r_c = rules.rank_augments(hero, [offmeta])[0]
+    check("榜外 C 档不带先验位次文案（无据不编，「先验榜外」字样不受影响）",
+          r_c["grade"] == "C" and "位第" not in r_c["reason"], str(r_c))
+
+    # ---- ③ briefing：校验截断 / 降级事实句 / KIND_CTX 推送去重 ----
+    base_ctx = {
+        "briefing": "敌方坦克偏多，优先破甲开局",
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "t"}
+                             for n in kb.top_augments(hero, 8)],
+        "opening_items": [{"combo": ["长剑"], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"}],
+        "builds": [{"name": "爆杀流", "path": "ad",
+                    "items": ["焚天", "星蚀", "死亡之舞"], "note": "主线"}],
+        "skill_order": "主Q副E", "augment_item_links": []}
+    cleaned = _s2.validate_and_clean(_json.loads(_json.dumps(base_ctx)),
+                                     kb, hero)
+    check("briefing 校验保留", cleaned["briefing"] == "敌方坦克偏多，优先破甲开局",
+          str(cleaned.get("briefing")))
+    cleaned_long = _s2.validate_and_clean(
+        {**base_ctx, "briefing": "超" * 60}, kb, hero)
+    check("briefing 超长截断 40 字", len(cleaned_long["briefing"]) == 40,
+          str(len(cleaned_long["briefing"])))
+    no_brief = {k: v for k, v in base_ctx.items() if k != "briefing"}
+    check("briefing 缺失不炸校验（空串容忍）",
+          _s2.validate_and_clean(no_brief, kb, hero)["briefing"] == "")
+
+    # 降级 rule_context：威胁画像 / 阵容缺口两条现成事实句（数据直出）
+    ally5 = [hero, "九尾妖狐", "皎月女神", "盲僧", "众星之子"]
+    enemy5 = ["深海泰坦", "雷霆咆哮", "牛头酋长", "蒸汽机器人", "众星之子"]
+    rc = _s2.rule_context(kb, hero, rules, ally=ally5, enemy=enemy5)
+    expect_bits = []
+    ts = rules.threat_profile(enemy5).summary()
+    if ts and ts != "暂无数据":
+        expect_bits.append("敌方" + ts)
+    gs = rules.ally_gap(ally5, hero).summary()
+    if gs and gs != "暂无数据":
+        expect_bits.append("我方" + gs)
+    check("降级 briefing 与规则层事实逐字同源（<=40 字）",
+          rc["briefing"] == "；".join(expect_bits)[:40]
+          and 0 < len(rc["briefing"]) <= 40, rc["briefing"])
+    check("降级无名单不出声（空串不编造）",
+          _s2.rule_context(kb, hero)["briefing"] == "")
+
+    class _Boom2:
+        """恒返回坏 JSON：打穿 generate() 两连败 → 降级路径"""
+
+        configured = True
+        usage = UsageStats()
+
+        def __init__(self):
+            self.calls = []
+
+        def chat(self, system, user, max_tokens=None, json_mode=True):
+            self.calls.append(user)
+            return "not a json", {}
+
+    boom = _Boom2()
+    ctx_dg = _s2.generate(kb, rules, boom, hero, ally5, enemy5)
+    check("System2 降级路径 briefing 兜底（事实句非空）",
+          ctx_dg.source == "rule" and ctx_dg.briefing
+          and len(ctx_dg.briefing) <= 40,
+          f"{ctx_dg.source} {ctx_dg.briefing!r}")
+
+    # KIND_CTX 就绪 → 军师推送（引擎 payload 携带 → 会话推送 → ui_state）
+    eng = build_ai_engine(script_s2=[_json.dumps(base_ctx)])[0]
+    session = GameSession(kb, rules)
+    session.engine = eng
+    eng.bind(session._on_engine_result)
+    session.on_game_start({"ally": [hero, "九尾妖狐"],
+                           "enemy": ["黑暗之女"],
+                           "my_hero": hero, "source": "test"})
+    deadline = time.time() + 6
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    check("KIND_CTX 就绪推开局定调进军师（key=ctx_briefing）",
+          session.coach_notes
+          and session.coach_notes[-1]["key"] == "ctx_briefing"
+          and session.coach_notes[-1]["text"] == "敌方坦克偏多，优先破甲开局",
+          str([(c["key"], c["text"]) for c in session.coach_notes]))
+    check("overlay 消费链贯通（coach_latest=briefing）",
+          session.ui_state()["coach_latest"] == "敌方坦克偏多，优先破甲开局")
+    n_brief = len(session.coach_notes)
+    session._on_engine_result(KIND_CTX,
+                              {"source": "ai",
+                               "briefing": "敌方坦克偏多，优先破甲开局"}, 0)
+    session._on_engine_result(KIND_CTX, {"source": "error"}, 0)
+    check("开局定调推送同 key 去重 + 空 briefing 不推",
+          len(session.coach_notes) == n_brief)
+
+    # System1 prompt 消费（随 ctx 免费进 prompt，零新增调用）
+    ctx_b = _s2.ChampionContext(_s2.validate_and_clean(
+        _json.loads(_json.dumps(base_ctx)), kb, hero), hero)
+
+    class _Cap:
+        configured = True
+        usage = UsageStats()
+
+        def __init__(self):
+            self.user = ""
+
+        def chat(self, system, user, max_tokens=None, json_mode=True):
+            self.user = user
+            return _json.dumps({"picks": []}), {}
+
+    cap = _Cap()
+    _s1.suggest_next(cap, ctx_b, ["长剑"], 900, "ad", "威胁", [],
+                     [_Cand("焚天", "r", price=3300)])
+    check("System1 下一件 prompt 带本局定调",
+          "《本局定调》敌方坦克偏多" in cap.user, cap.user[:120])
+    cap2 = _Cap()
+    _s1.rank_augments(cap2, ctx_b, hero, top3, [], [], "威胁",
+                      rules.rank_augments(hero, top3))
+    check("System1 评级 prompt 带本局定调",
+          "《本局定调》" in cap2.user, cap2.user[:120])
+    check("_briefing_line 空上下文安全（无 briefing 不占位）",
+          _s1._briefing_line(None) == ""
+          and _s1._briefing_line(_s2.ChampionContext(no_brief, hero)) == "")
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -4317,6 +4504,7 @@ if __name__ == "__main__":
     test_click_blackbox()
     test_stability_batch()
     test_ui_design_system()
+    test_prompt_copy()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

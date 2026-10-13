@@ -286,7 +286,10 @@ class AIDecisionEngine(DecisionEngine):
                       f"亲和{len(ctx.augment_affinity)}"
                       f" 出门{len(ctx.opening_items)} 方案{len(ctx.builds)} — {src}")
                 if self.on_result:
-                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+                    # briefing 随包（提示语优化案 20261013）：GameSession
+                    # KIND_CTX 分段推送军师，不再回头挖引擎 cache
+                    self.on_result(KIND_CTX, {"source": ctx.source,
+                                              "briefing": ctx.briefing}, 0)
             except Exception as e:  # noqa: BLE001 —— generate 内部已兜
                 # LLM/解析异常，此处兜 kb/规则层意外异常：漏掉即线程静默
                 # 死亡、pending 永挂（直到看门狗落位），必须可见
@@ -381,7 +384,10 @@ class AIDecisionEngine(DecisionEngine):
             if reuse_ready and self.on_result:
                 ctx = self.cache.get(key)
                 if ctx is not None:
-                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+                    # briefing 随包（提示语优化案 20261013）：复用选人期
+                    # ctx 时同包带上，开局定调不因复用路径缺席
+                    self.on_result(KIND_CTX, {"source": ctx.source,
+                                              "briefing": ctx.briefing}, 0)
             return
         # 新局开始必须无条件使上一局上下文失效（清缓存 + 置 pending），
         # 早退路径（hero 缺失 / 槽位未配置）也不例外：否则 LCU 迟到时

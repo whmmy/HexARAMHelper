@@ -24,6 +24,7 @@ SYSTEM_PROMPT = """你是英雄联盟「海克斯大乱斗（ARAM Mayhem）」�
 
 输出 JSON schema（字段缺一不可）：
 {
+ "briefing":         "<=40字开局定调",                                                      // 一句话概括本局要点：敌方构成威胁/我方阵容缺口/出装大方向，供局内常驻展示
  "augment_affinity": [{"name":"海克斯名","bias":"ad|ap|tank|none","note":"<=18字"}],   // 12~20 个，按该英雄适配度降序
  "opening_items":    [{"combo":["装备名"],"when":"<=10字适用场景"}],                    // 恰好 3 组
  "builds":           [{"name":"<=8字流派名","path":"ap|ad|tank","items":["装备名"],      // 2~4 个方案
@@ -114,6 +115,10 @@ class ChampionContext:
         self.hero = hero
         self.source = source          # ai / rule（降级）
         self.meta = meta or {}
+        # 开局定调（提示语优化案 20261013）：<=40 字一句话，KIND_CTX 就绪
+        # 时由 GameSession 推进军师列表常驻展示；缺失容忍为空（旧 mock/旧
+        # 模型输出不带此字段不炸）
+        self.briefing = str(data.get("briefing") or "").strip()
         self.augment_affinity = data.get("augment_affinity", [])
         self.opening_items = data.get("opening_items", [])
         self.builds = data.get("builds", [])          # 出装方案列表（流派制）
@@ -246,14 +251,19 @@ def validate_and_clean(data: dict, kb, hero: str) -> dict:
 
     # component_rules 已从 schema 移除：全项目零消费（小件持有决策由规则层
     # component_advice/saving_advice 承担），每局白烧 ~150 输出 token。
-    return {"augment_affinity": affinity, "opening_items": openings,
+    # briefing 开局定调：超长截断 40 字（防大模型啰嗦把 overlay 军师行撑爆），
+    # 缺失容忍为空串——它是增强展示不是结构骨架，不参与"结构不完整→重试"判定。
+    briefing = str(data.get("briefing") or "").strip()[:40]
+    return {"briefing": briefing,
+            "augment_affinity": affinity, "opening_items": openings,
             "builds": builds, "skill_order": skill_order,
             "augment_item_links": links}
 
 
 # ── 规则版 Context（离线兜底，全部确定性） ───────────────────────────
 
-def rule_context(kb, hero: str, rules=None) -> dict:
+def rule_context(kb, hero: str, rules=None, ally: list = None,
+                 enemy: list = None) -> dict:
     top = kb.top_augments(hero, 16)
     affinity = [{"name": n, "bias": (kb.augment_tag_info(n).get("path_bias") or "none"),
                  "note": "先验榜第" + str(i + 1)}
@@ -310,9 +320,38 @@ def rule_context(kb, hero: str, rules=None) -> dict:
                       "reason": str(info.get("opening_shift_reason") or "")[:28]})
         if len(links) >= 5:
             break
-    return {"augment_affinity": affinity, "opening_items": openings,
+    return {"briefing": _rule_briefing(kb, rules, hero, ally, enemy),
+            "augment_affinity": affinity, "opening_items": openings,
             "builds": builds, "skill_order": kb.skill_advice(hero)["priority"],
             "augment_item_links": links}
+
+
+def _rule_briefing(kb, rules, hero: str, ally: list, enemy: list) -> str:
+    """降级版开局定调：威胁画像 / 阵容缺口两条现成事实句拼接（<=40 字）。
+
+    只组事实不组结论（数据直出口径，同 _fmt_enemy_comp）：敌方构成取
+    threat_profile.summary()（法伤×N | 坦克×N | 治疗:…），我方缺口取
+    ally_gap().summary()（缺前排/缺AP…）。名单不全（<5 人/空名单）时
+    相应侧落"暂无数据"，按空跳过不编造；两者都缺 → 空串（KIND_CTX
+    消费侧对空 briefing 不推送）。
+    """
+    if rules is None:
+        return ""
+    ally5 = list(dict.fromkeys(
+        [c for c in (ally or []) if c] + ([hero] if hero else [])))
+    enemy5 = [c for c in (enemy or []) if c]
+    if not ally5 and not enemy5:
+        return ""
+    bits = []
+    if enemy5:
+        ts = rules.threat_profile(enemy5).summary()
+        if ts and ts != "暂无数据":
+            bits.append("敌方" + ts)
+    if len(ally5) >= 5:
+        gs = rules.ally_gap(ally5, hero).summary()
+        if gs and gs != "暂无数据":
+            bits.append("我方" + gs)
+    return "；".join(bits)[:40]
 
 
 # ── 生成入口 ─────────────────────────────────────────────────────────
@@ -359,8 +398,8 @@ def generate(kb, rules, client, hero: str, ally: list, enemy: list,
             # engine.gen 后台线程无兜底 except，漏掉即静默挂起 pending。
             last_err = e
     print(f"[WARN] System2 降级规则版 Context: {last_err}")
-    return ChampionContext(rule_context(kb, hero, rules), hero,
-                           source="rule", meta={"error": str(last_err)[:120]})
+    return ChampionContext(rule_context(kb, hero, rules, ally=ally, enemy=enemy),
+                           hero, source="rule", meta={"error": str(last_err)[:120]})
 
 
 class ContextCache:

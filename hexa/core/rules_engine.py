@@ -870,6 +870,9 @@ class RulesEngine:
 
         评分 = 英雄先验排名（top5=S / top12=A / 榜内=B）+ 语境修正
         （与当前路线一致 +1 档上限 S；"升级：X"型标注依赖已购装备）。
+        理由带先验依据（提示语优化案 20261013）：kb.augment_prior_rank
+        的 (档位, 档内位次) 统计直出（如"先验黄金位第2"），非语义表；
+        榜外 C 档无先验可引，理由保持原文。
         """
         taken = taken or []
         top = self.kb.top_augments(hero_cn, 40)
@@ -889,6 +892,10 @@ class RulesEngine:
                 grade, reason = "A", f"该英雄海克斯第{i + 1}位"
             else:
                 grade, reason = "B", f"该英雄海克斯第{i + 1}位"
+            if i is not None:
+                prior = self.kb.augment_prior_rank(hero_cn, name)
+                if prior:
+                    reason += f"，先验{prior[0]}位第{prior[1]}"
             tag_info = self.kb.augment_tag_info(name)
             bias = tag_info.get("path_bias") or AUGMENT_PATH_BIAS.get(name)
             if bias and path and bias == path and grade != "S":

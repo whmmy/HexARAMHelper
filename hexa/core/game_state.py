@@ -867,6 +867,13 @@ class GameSession:
         with self._lock:
             if kind == KIND_CTX:
                 self._log("engine_ctx", str(payload.get("source")))
+                # 开局定调（System2 briefing，提示语优化案 20261013）→
+                # 军师列表常驻展示。沿用现有 key 去重：迟到补开局触发的
+                # 二次 KIND_CTX / 同局重复回调不刷屏；空 briefing（名单
+                # 缺失兜底不出事实句）不推送。
+                brief = str(payload.get("briefing") or "").strip()
+                if brief:
+                    self._push_coach("ctx_briefing", brief)
                 # 适配方案就绪 → 刷新下一件建议，规则底线从 OP.GG 兜底切到
                 # 方案池。仅下一件模式刷新：出门装态（opening 建议在展示，
                 # 不消费方案池）与满装替换态（replacement_candidates 不吃

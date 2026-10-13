@@ -81,6 +81,16 @@ def _clean_coach(text) -> str:
     return str(text or "").strip()[:30]
 
 
+def _briefing_line(ctx) -> str:
+    """开局定调一行（System2 预生成的 <=40 字事实/判断句；空则不占位）。
+
+    随 ctx 免费进 prompt（不新增调用）：给局内模型一个"这局打什么"的
+    锚，评级/换装微调时口径不漂。
+    """
+    text = (getattr(ctx, "briefing", "") or "").strip()
+    return f"《本局定调》{text}" if text else ""
+
+
 def _builds_line(ctx, current_path: str) -> str:
     """ChampionContext 出装方案 → 语境段（全部方案，当前路线方案置前）。
 
@@ -172,7 +182,7 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
     allowed = set()
     for grp in combos:
         allowed.update(grp.get("combo", []))
-    user = "\n\n".join([
+    parts = [
         _fmt_snapshot([], 0, "", threat_summary,
                       [first_augment] if first_augment else [],
                       enemy=enemy or [],
@@ -182,7 +192,11 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
             for i, g in enumerate(combos)),
         "选出装顺序建议的三组出门装（每组=组合里的一个主件，按主件名输出 picks）。",
         PICKS_FORMAT,
-    ])
+    ]
+    brief = _briefing_line(ctx)
+    if brief:
+        parts.insert(1, brief)
+    user = "\n\n".join(parts)
     try:
         text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=300)
         picks = _dedup_picks(parse_json(text).get("picks"), allowed)
@@ -232,6 +246,9 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
         "《候选清单（只能从中选）》\n" + "\n".join(
             _cand_line(c) for c in rule_candidates),
     ]
+    brief = _briefing_line(ctx)
+    if brief:
+        parts.append(brief)
     route = _builds_line(ctx, current_path)
     if route:
         parts.append(route)
@@ -278,6 +295,9 @@ def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
         f"- 卖[{c.sell}] → 买[{c.buy}]（卖回{c.sell_price}G / 买价{c.price}G）：{c.reason}"
         for c in swap_candidates
     ]
+    brief = _briefing_line(ctx)
+    if brief:
+        parts.append(brief)
     route = _builds_line(ctx, current_path)
     if route:
         parts.append(route)
@@ -343,6 +363,9 @@ def rank_augments(client, ctx, hero: str, card_names: list, augments_taken: list
         # 队友装备摘要段（快照直出，有才加）
         if allies:
             parts.append("《队友装备摘要（快照直出）》\n" + "\n".join(allies))
+        brief = _briefing_line(ctx)
+        if brief:
+            parts.append(brief)
         # 原文描述段（有才加）：事实直出，冲突时压过压缩结论
         desc_lines = [f"- {r['name']}：{descriptions[r['name']]}"
                       for r in rule_ranks if descriptions.get(r["name"])] \
