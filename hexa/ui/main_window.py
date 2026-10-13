@@ -330,7 +330,9 @@ class MainWindow:
             self._render_ranks(state.get('card_ranks') or [],
                                bool(state.get('card_ranks_pending')))
             self._render_freshness(state)
-            self._render_engine(state.get('engine') or {})
+            self._render_engine(state.get('engine') or {},
+                                state.get('kda_alerts_used'),
+                                state.get('kda_alerts_limit'))
             self._render_review()
         except Exception as e:
             # 渲染异常只记日志不冒出：异常冒出会让本 after 链不再续约，
@@ -457,20 +459,26 @@ class MainWindow:
         elif not ranks and not self.ranks_hint.winfo_ismapped():
             self.ranks_hint.pack(anchor=tk.W)
 
-    def _render_engine(self, st):
+    def _render_engine(self, st, kda_used=None, kda_limit=None):
+        """AI 仪表行：模式/调用次数/费用/上下文 + 起飞提示计数（P3 杂项：
+        enemy_kda 触发每局限次的已用/上限直出 ui_state，这里原样拼接，
+        规则/AI 两种模式都显示——该触发不依赖 AI 是否开启）"""
         P = Palette
+        kda_txt = (f" | 起飞提示 {kda_used}/{kda_limit}"
+                   if kda_used is not None and kda_limit is not None else "")
         if not st:
             # stats 异常被上游吞掉时不误报"关"（AI 可能实际在跑）
-            self.lbl_engine.config(text="AI: -", fg=P["text_mute"])
+            self.lbl_engine.config(text=f"AI: -{kda_txt}", fg=P["text_mute"])
             return
         mode = st.get("mode", "rule")
         if mode == "rule":
-            txt, color = "AI: 关（规则模式）", P["text_mute"]
+            txt, color = f"AI: 关（规则模式）{kda_txt}", P["text_mute"]
         else:
             budget = st.get('budget', 0)
             budget_txt = "∞" if budget <= 0 else budget   # <=0 = 不限次
             txt = (f"AI: {mode} | 本局 {st.get('calls', 0)}/{budget_txt} 次"
-                   f" | ¥{st.get('cost_game', 0):.4f} | 上下文 {st.get('ctx_source', '-')}")
+                   f" | ¥{st.get('cost_game', 0):.4f} | 上下文 {st.get('ctx_source', '-')}"
+                   f"{kda_txt}")
             color = P["success"]
         self.lbl_engine.config(text=txt, fg=color)
 

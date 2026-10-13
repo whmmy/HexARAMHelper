@@ -45,6 +45,10 @@
     玩家看不到——数据准备纯函数对完整/缺字段/类型异常样例不炸且字段
     映射正确/latest_review_path 按 mtime 选最新/load_review 坏 JSON 安全
     None/真局落盘读回渲染吻合（落盘格式零改动）/主窗口 card_frame 接线
+20. P3 杂项（20261013）：启动延迟 60s 自动刷新可被取消（挂起中取消不
+    执行/重复 schedule 不叠加/退出 finally 与手动入口取消挂起，手动按
+    钮行为不变）+ 起飞提示计数进 ui_state（触发 1/2→2/2 封顶→换局归
+    零）+ 主窗口 AI 仪表区渲染接线
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -3970,6 +3974,115 @@ def test_ui_design_system():
           titles[:60])
 
 
+# ── 17. P3 杂项：启动延迟刷新可取消 + 起飞提示计数可见（20261013） ──
+
+def test_misc_p3_refresh_and_kda():
+    """P3 杂项回归（20261013）。
+
+    ① 启动延迟自动刷新：启动满 60s 才后台抓 OP.GG（避开启动瞬间抢占）；
+       挂起中的抓取在应用退出 / 手动按钮入口被取消，重复 schedule 不
+       叠加（防到点抓两遍写坏 data/）；手动按钮行为不变。
+    ② 起飞提示计数：enemy_kda 触发每局限 KDA_ALERT_LIMIT 次的已用/上限
+       暴露 ui_state，主窗口 AI 仪表区展示"起飞提示 n/2"（换局归零）。
+    """
+    print("\n[17] P3 杂项（启动延迟刷新 + 起飞提示计数）")
+    import app as _app  # 模块级无副作用（不建窗），仅引入 DelayedAutoRefresh
+    root = Path(__file__).resolve().parent.parent
+    app_src = (root / "app.py").read_text(encoding="utf-8")
+
+    # ① 行为：到点执行且仅一次
+    fired = []
+    r1 = _app.DelayedAutoRefresh(0.05)
+    check("延迟刷新：schedule 挂起成功", r1.schedule(lambda: fired.append(1)) is True
+          and r1.pending)
+    deadline = time.time() + 2.0
+    while not fired and time.time() < deadline:
+        time.sleep(0.01)
+    check("延迟刷新：到点执行且仅一次", len(fired) == 1 and not r1.pending,
+          f"fired={len(fired)} pending={r1.pending}")
+
+    # ① 行为：挂起中取消 → 不执行（应用退出/手动入口取消挂起的语义）
+    fired2 = []
+    r2 = _app.DelayedAutoRefresh(0.3)
+    r2.schedule(lambda: fired2.append(1))
+    r2.cancel()
+    time.sleep(0.5)
+    check("延迟刷新：挂起中取消后不执行", fired2 == [] and not r2.pending,
+          f"fired={fired2}")
+
+    # ① 行为：已挂起时重复 schedule 被拒（不会到点抓两遍）
+    fired3 = []
+    r3 = _app.DelayedAutoRefresh(0.2)
+    dup = r3.schedule(lambda: fired3.append("a"))
+    refired = r3.schedule(lambda: fired3.append("b"))
+    r3.cancel()
+    time.sleep(0.4)
+    check("延迟刷新：重复 schedule 被拒 + cancel 幂等不炸",
+          dup is True and refired is False and fired3 == []
+          and r3.cancel() is None,
+          f"dup={dup} refired={refired} fired={fired3}")
+
+    # ① 接线：main 调度 + 退出 finally 取消 + 手动入口取消挂起
+    check("延迟刷新接线：main 调度 + 退出路径取消",
+          "auto_refresh.schedule(" in app_src
+          and "root.mainloop()" in app_src)
+    teardown = app_src[app_src.index("root.mainloop()"):]
+    check("延迟刷新接线：退出 finally 取消挂起刷新",
+          "auto_refresh.cancel()" in teardown)
+    seg = app_src[app_src.index("def _start_data_refresh")
+                  :app_src.index("def _auto_refresh_fire")]
+    check("延迟刷新接线：手动按钮入口取消挂起自动抓取",
+          "auto_refresh.cancel()" in seg and "_run_data_refresh(on_done)" in seg)
+    body = app_src[app_src.index("def _run_data_refresh")
+                   :app_src.index("def _start_data_refresh")]
+    check("手动按钮行为不变（任务体仍跑 OP.GG 重抓 + 知识派生）",
+          "fetch_opgg_builds" in body and "gen_champ_profile" in body
+          and '"--all"' in body)
+    check("自动路径与手动按钮同源同参（共用 _run_data_refresh）",
+          "_run_data_refresh(None)" in app_src)
+
+    # ② 起飞提示计数：触发→计数进 ui_state→到上限不再发→换局归零
+    from hexa.core import game_state as _gs
+    check("起飞提示上限常量锚定 2", _gs.KDA_ALERT_LIMIT == 2)
+    sess = GameSession(kb, rules)
+    # on_snapshot 有 stage 门（idle 直接丢弃），先推进到对局中
+    sess.on_champ_select({"my_hero": "暗裔剑魔", "ally": [], "enemy": [],
+                          "source": "smoke"})
+    sess.on_in_progress()
+    sess.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                               enemy_kda=(6, 0, 4)))
+    st = sess.ui_state()
+    check("起飞提示计数：首触发 1/2", st["kda_alerts_used"] == 1
+          and st["kda_alerts_limit"] == 2,
+          f"{st['kda_alerts_used']}/{st['kda_alerts_limit']}")
+    sess.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                               enemy_kda=(6, 0, 4)))
+    st = sess.ui_state()
+    check("起飞提示计数：二触发 2/2", st["kda_alerts_used"] == 2,
+          st["kda_alerts_used"])
+    n_takeoff = sum(1 for _, _, txt in sess.history if "起飞" in txt)
+    sess.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                               enemy_kda=(6, 0, 4)))
+    st = sess.ui_state()
+    check("起飞提示计数：到上限不再发（仍 2/2）",
+          st["kda_alerts_used"] == 2
+          and sum(1 for _, _, txt in sess.history if "起飞" in txt) == n_takeoff,
+          f"used={st['kda_alerts_used']} history={n_takeoff}")
+    sess.reset()
+    check("起飞提示计数：换局 reset 归零",
+          sess.ui_state()["kda_alerts_used"] == 0)
+
+    # ② 接线：ui_state 暴露字段 + 主窗口 AI 仪表区渲染
+    gs_src = (root / "hexa" / "core" / "game_state.py").read_text(encoding="utf-8")
+    check("起飞提示计数：ui_state 暴露 used/limit 字段",
+          '"kda_alerts_used"' in gs_src and '"kda_alerts_limit"' in gs_src
+          and "KDA_ALERT_LIMIT" in gs_src)
+    mw_src = (root / "hexa" / "ui" / "main_window.py").read_text(encoding="utf-8")
+    check("起飞提示计数：AI 仪表区渲染接线（起飞提示 n/N）",
+          "kda_alerts_used" in mw_src and "kda_alerts_limit" in mw_src
+          and "起飞提示" in mw_src)
+
+
 def test_stability_batch():
     """稳定性批修回归（20261013 全项目盘点案）。样板是 is_elevated 的
     wt NameError：探针函数引用未定义名，NameError 被外层 except 吞成
@@ -4652,6 +4765,7 @@ if __name__ == "__main__":
     test_click_diag_and_tee()
     test_click_blackbox()
     test_stability_batch()
+    test_misc_p3_refresh_and_kda()
     test_ui_design_system()
     test_prompt_copy()
     test_review_panel()
