@@ -1,4 +1,4 @@
-"""主窗口：状态/阵容/建议/成型度对比/台账(可纠错)/数据新鲜度/AI 仪表/日志
+"""主窗口：状态/阵容/建议/成型度对比/台账(可纠错)/上局回顾/数据新鲜度/AI 仪表/日志
 
 线程模型：后台线程（PhaseMachine/LivePoller/检测器）→ ui_queue → after 轮询。
 ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度的统一出口）。
@@ -17,12 +17,15 @@ ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度�
   玩法，具名方案未进 UI，这行既没用又与系统自身的方案制矛盾）
 - 去 emoji，逻辑层文案里的彩色 emoji 在渲染边界统一剥离（`strip_emoji`）
 - 卡片/段落顺序、轮询频率、`ui_state()` 消费方式一字未改
+- 20261013 增『上局回顾』卡：只读渲染 log/games/ 最近一份复盘 JSON
+  （落盘早已存在但玩家看不到；数据准备纯函数在 review.py，见冒烟 [16]）
 """
 import queue
 import time
 import tkinter as tk
 from tkinter import ttk
 
+from hexa.ui.review import format_review, latest_review_path, load_review
 from hexa.ui.theme import (GRADES, Metrics, PENDING_WAIT, Palette, Theme, Type,
                            card_frame, grade_badge, retint_badge,
                            stage_color, strip_emoji, version_label)
@@ -50,6 +53,8 @@ class MainWindow:
         self._refresh_busy = False     # 数据刷新按钮在途标记
         self._ledger_cache = None      # 台账按钮去重重建
         self._bp_cache = None          # 成型度面板去重重建（同台账惯例）
+        self._review_cache = None      # 上局回顾 (路径, mtime) 变化才重建
+        self._review_checked = 0.0     # 上局回顾目录扫描时刻（15s 限频）
         self._last_poll_err = None     # 轮询异常签名（限频去重，防 500ms 刷屏）
         self._last_poll_err_ts = 0.0
         self._wraps = []               # 需随窗口宽度重排的标签（wraplength）
@@ -165,6 +170,16 @@ class MainWindow:
                             pack=dict(fill=tk.X, pady=(8, 0)))
         self.ledger_box = tk.Frame(ledger, bg=P["surface"])
         self.ledger_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+
+        # 上局回顾（20261013 回顾面板案）：复盘 JSON 局终落盘早已存在
+        # （game_state._write_review_log → log/games/），此前玩家看不到。
+        # 只读渲染最近一份；缺文件/缺字段一律占位不炸（渲染链断链会让
+        # 全部卡片冻结，见 _poll_ui 注释）。内容静态：目录扫描 15s 限频、
+        # (路径, mtime) 变化才重建（台账同款缓存惯例）。
+        self.card_review = self._card(main, "上局回顾", note="log/games 最近一份")
+        self.card_review.config(
+            text="-（完成一局后自动显示：英雄/时长/海克斯台账/建议/终局出装）",
+            fg=P["text_mute"])
 
         self._build_ranks_card(main)
 
@@ -316,6 +331,7 @@ class MainWindow:
                                bool(state.get('card_ranks_pending')))
             self._render_freshness(state)
             self._render_engine(state.get('engine') or {})
+            self._render_review()
         except Exception as e:
             # 渲染异常只记日志不冒出：异常冒出会让本 after 链不再续约，
             # 状态卡/评级/仪表全冻结且 ui_queue 无人消费（F10 显隐、托盘退出失效）。
@@ -454,6 +470,42 @@ class MainWindow:
                    f" | ¥{st.get('cost_game', 0):.4f} | 上下文 {st.get('ctx_source', '-')}")
             color = P["success"]
         self.lbl_engine.config(text=txt, fg=color)
+
+    def _render_review(self):
+        """上局回顾：最近一份复盘 JSON 只读渲染（format_review 纯映射）。
+
+        目录扫描 15s 限频（500ms 轮询里 glob 太重）；(路径, mtime) 未
+        变化不重建（台账同款缓存惯例）。读失败/缺字段一律占位行不冒泡
+        ——异常冒出会断开 after 轮询链，全部卡片随之冻结（同 _poll_ui）。
+        建议文本可能带彩色 emoji，渲染边界统一剥离（同其余卡片口径）。
+        """
+        now = time.monotonic()
+        if now - self._review_checked < 15:
+            return
+        self._review_checked = now
+        path = latest_review_path()
+        try:
+            key = (str(path), path.stat().st_mtime) if path else None
+        except OSError:
+            key = None
+        if key == self._review_cache:
+            return
+        self._review_cache = key
+        if path is None:
+            # 复盘文件消失（清理/换目录）：回占位，不留上一份的残影
+            self.card_review.config(
+                text="-（完成一局后自动显示：英雄/时长/海克斯台账/建议/终局出装）",
+                fg=Palette["text_mute"])
+            return
+        doc = load_review(path)
+        if doc is None:
+            self.card_review.config(
+                text=f"复盘读取失败: {path.name}（只读跳过，不影响本局）",
+                fg=Palette["warning"])
+            return
+        self.card_review.config(
+            text=strip_emoji("\n".join(format_review(doc))),
+            fg=Palette["text"])
 
     def _render_freshness(self, state):
         P = Palette
