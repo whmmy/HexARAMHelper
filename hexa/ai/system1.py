@@ -122,7 +122,7 @@ def _cand_line(c) -> str:
 
 
 def _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                  enemy, first_augment="", coach=None) -> str:
+                  enemy, first_augment="", coach=None, allies=None) -> str:
     lines = [
         f"我英雄已选海克斯：{'、'.join(augments) or '暂无'}",
         f"我身上装备：{'、'.join(my_items) or '无'}（金币 {gold:.0f}）",
@@ -131,6 +131,9 @@ def _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
     ]
     if enemy:
         lines.append("敌方明细：" + "；".join(enemy))
+    # 队友出装摘要（快照直出，含我；判断"谁在游走/谁缺装"归模型）
+    if allies:
+        lines.append("《队友装备摘要（快照直出）》\n" + "\n".join(allies))
     if first_augment:
         lines.append(f"首海克斯联动参考：{first_augment}")
     # 军师上下文（v4.5）：coach=None 表示读取模块态（GameSession 写入）；
@@ -201,13 +204,14 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
 def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
                  threat_summary: str, augments: list,
                  rule_candidates: list, coach_lines=None, enemy=None,
-                 extra_allowed: list = None) -> list:
+                 allies=None, extra_allowed: list = None) -> list:
     """下一件三选重排+写理由。返回 [{"name","reason"}]；失败/有效<2 → 规则版。
 
     rule_candidates: 层 0 Candidate 列表（已带规则理由，作降级文案）。
     满六神装时层 0 传 SwapCandidate 替换对 → 自动切 suggest_swap。
     coach_lines: 军师上下文（None=读模块态；GameSession 已写入）。
-    enemy: 敌方明细行 ["名(伤害,Role)"]。ctx：出装方案段进 prompt。
+    enemy: 敌方明细行 ["名(伤害,Role)[ 召唤师技能:X+Y]"]。ctx：出装方案段进 prompt。
+    allies: 队友出装摘要行 ["英雄: 装备1、装备2"]（快照直出，含我）。
     extra_allowed: 跨方案权衡白名单（全方案池并集，engine 已过校验/
     地图可买性/杂项过滤）——模型可从其他方案取件，防幻觉边界不变。
     模型可选输出 coach 字段（≤30字）→ 模块态 last_coach，由
@@ -218,12 +222,13 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
     if isinstance(rule_candidates[0], SwapCandidate):
         return suggest_swap(client, ctx, my_items, gold, current_path,
                             threat_summary, augments, rule_candidates,
-                            coach_lines=coach_lines, enemy=enemy)
+                            coach_lines=coach_lines, enemy=enemy,
+                            allies=allies)
     allowed = {c.name for c in rule_candidates}
     allowed |= {n for n in (extra_allowed or []) if isinstance(n, str)}
     parts = [
         _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                      enemy=enemy or [], coach=coach_lines),
+                      enemy=enemy or [], coach=coach_lines, allies=allies),
         "《候选清单（只能从中选）》\n" + "\n".join(
             _cand_line(c) for c in rule_candidates),
     ]
@@ -253,20 +258,21 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
 
 def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
                  threat_summary: str, augments: list,
-                 swap_candidates: list, coach_lines=None, enemy=None) -> list:
+                 swap_candidates: list, coach_lines=None, enemy=None,
+                 allies=None) -> list:
     """满六神装替换对选优。返回 [{"name","reason"}]（name=买件名，
     与 suggest_next 同构，引擎层按 Candidate 协议转换）；失败/有效<2 → 规则版原序。
 
     铁律延续：只能从候选对的买件里选（卖件由对子绑定，不存在单独选），
     理由 <=22 字。净差已含在规则理由/对子事实里，模型只判断"哪对最值得"。
-    coach_lines 语义同 suggest_next；enemy/ctx 同 suggest_next。
+    coach_lines 语义同 suggest_next；enemy/allies/ctx 同 suggest_next。
     """
     if not swap_candidates:
         return []
     allowed = {c.buy for c in swap_candidates}
     parts = [
         _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                      enemy=enemy or [], coach=coach_lines),
+                      enemy=enemy or [], coach=coach_lines, allies=allies),
         "已满六神装，以下是《替换候选对（只能从中选，name 填买件名）》：",
     ] + [
         f"- 卖[{c.sell}] → 买[{c.buy}]（卖回{c.sell_price}G / 买价{c.price}G）：{c.reason}"
@@ -302,13 +308,16 @@ def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
 
 def rank_augments(client, ctx, hero: str, card_names: list, augments_taken: list,
                   my_items: list, threat_summary: str,
-                  rule_ranks: list, enemy=None, descriptions=None) -> list:
+                  rule_ranks: list, enemy=None, descriptions=None,
+                  allies=None) -> list:
     """海克斯三卡片评级（S/A/B + 一句理由）。
 
     ctx.augment_affinity 已是 System2 翻译结果——先按位次给基准档，
     System1 用极短 prompt 做语境微调；失败 → 规则版 rule_ranks 原样返回。
     rule_ranks: rules_engine.rank_augments 的输出（含 name/grade/reason）。
     enemy: 敌方明细行（评级也吃阵容语境，如全 AD 局抗性海克斯升值）。
+    allies: 队友出装摘要行（同 enemy 参数模式，快照直出——队友成型度/
+    装备方向是评级语境事实，怎么用归模型）。
     descriptions: {卡名: 卡面原文描述}（20261013 描述自举：OCR 直出的
     事实层——标签/亲和是离线压缩结论，真机实锤 大法师 被标 ap/法穿/爆发
     而原文是技能花费返还；prompt 明示冲突时以描述为准）。
@@ -331,6 +340,9 @@ def rank_augments(client, ctx, hero: str, card_names: list, augments_taken: list
             head,
             f"《该英雄海克斯亲和（ChampionContext）》\n{aff}",
         ]
+        # 队友装备摘要段（快照直出，有才加）
+        if allies:
+            parts.append("《队友装备摘要（快照直出）》\n" + "\n".join(allies))
         # 原文描述段（有才加）：事实直出，冲突时压过压缩结论
         desc_lines = [f"- {r['name']}：{descriptions[r['name']]}"
                       for r in rule_ranks if descriptions.get(r["name"])] \

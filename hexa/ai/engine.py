@@ -30,6 +30,13 @@ KIND_RANKS = "augment_ranks"
 class DecisionEngine(ABC):
     mode = "rule"
 
+    # ── Live 免费事实挂载点（GameSession.on_snapshot 整体替换写入）──
+    # 类属性仅作缺省（规则/占位引擎无 prompt 不消费）；GameSession 用
+    # setattr 写实例属性，轮询线程写 / AI 后台线程读，整引用赋值原子。
+    # 数据均为 Live API 原文直出（判断归模型，代码不做预消化结论）。
+    enemy_spells: dict = {}   # 敌方英雄名 → [召唤师技能 displayName]
+    ally_builds: list = []    # 队友出装摘要行 "英雄: 装备1、装备2"
+
     def bind(self, on_result):
         """on_result(kind, payload, serial) —— AI 结果回调（UI/会话线程安全由调用方保证）"""
         self.on_result = on_result
@@ -215,11 +222,15 @@ class AIDecisionEngine(DecisionEngine):
     # ── 生命周期 ──────────────────────────────────────────────────
 
     def _enemy_detail(self) -> list:
-        """敌方明细行 ["名(伤害,Role)"]：start_game 名单 + champ_damage_profile。
+        """敌方明细行 ["名(伤害,Role)[ 召唤师技能:X+Y]"]：start_game 名单 +
+        champ_damage_profile + 快照召唤师技能（Live 免费事实直出，缺数据
+        的英雄不带技能段）。
 
         _fmt_snapshot 的 enemy 管道此前恒为空（死参数），威胁只有计数摘要；
         补上名字+画像后 System1 才能做"全 AD 局早护甲"级别的语境判断。
-        Role 标签（Tank/Support/Mage…）数据直出，治疗系/坦克识别交给模型。
+        Role 标签（Tank/Support/Mage…）数据直出，治疗系/坦克识别交给模型；
+        召唤师技能同样只给事实（displayName 原文），"这人是 XX 流"的结论
+        由模型自己下。
         """
         out = []
         for name in self._enemy[:5]:
@@ -227,8 +238,19 @@ class AIDecisionEngine(DecisionEngine):
             dmg = prof.get("damage") or "?"
             tags = prof.get("tags") or []
             role = "/".join(tags[:2]) if tags else ""
-            out.append(f"{name}({dmg}" + (f",{role})" if role else ")"))
+            line = f"{name}({dmg}" + (f",{role})" if role else ")")
+            spells = (self.enemy_spells or {}).get(name) or []
+            if spells:
+                line += f" 召唤师技能:{'+'.join(str(s) for s in spells)}"
+            out.append(line)
         return out
+
+    def _ally_detail(self) -> list:
+        """队友出装摘要行（GameSession 快照直出，本处只透传+截断 5 人）。
+
+        行形如 "牛头酋长: 圣物之盾、生命药水"（含我，全员直出）。规则/
+        占位引擎该字段为类默认空列表——无 prompt 不消费，零开销。"""
+        return [str(x) for x in (self.ally_builds or [])][:5]
 
     def _spawn_system2(self, hero: str, ally: list, enemy: list,
                        stale_check, tag: str):
@@ -323,6 +345,10 @@ class AIDecisionEngine(DecisionEngine):
         self._hero = hero
         self._enemy = [str(x) for x in (enemy or [])]
         self.game_map = game_map or ""
+        # 新局清空 Live 免费事实挂载（上一局快照残留；新局首帧快照即回填，
+        # 空窗期 _enemy_detail 不带技能段/队友行为空——宁缺勿错局）
+        self.enemy_spells = {}
+        self.ally_builds = []
         self.delegate._hero = hero
         self.delegate.game_map = self.game_map
         self._last_refine = {"opening": 0.0, "next_items": 0.0,
@@ -474,6 +500,7 @@ class AIDecisionEngine(DecisionEngine):
             picks = self.s1.suggest_next(
                 self.client_s1, ctx, my_items, gold, current_path, summary,
                 taken, base, enemy=self._enemy_detail(),
+                allies=self._ally_detail(),
                 extra_allowed=self._extra_allowed())
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
@@ -502,7 +529,8 @@ class AIDecisionEngine(DecisionEngine):
                     print(f"[WARN] 卡面描述获取失败，评级退回无描述: {e}")
             return self.s1.rank_augments(
                 self.client_s1, ctx, hero, card_names, taken or [], my_items,
-                summary, base, enemy=self._enemy_detail(), descriptions=descs)
+                summary, base, enemy=self._enemy_detail(),
+                allies=self._ally_detail(), descriptions=descs)
         self._submit(KIND_RANKS, serial, fn)
         return base, True
 

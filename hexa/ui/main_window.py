@@ -24,7 +24,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from hexa.ui.theme import (GRADES, Metrics, PENDING_WAIT, Palette, Theme, Type,
-                           card_frame, grade_badge, retint_badge,
+                           card_frame, grade_badge, ledger_line, retint_badge,
                            stage_color, strip_emoji, version_label)
 
 STAGE_CN = {
@@ -331,9 +331,12 @@ class MainWindow:
             self.root.after(500, self._poll_ui)
 
     def _render_ledger(self, augments):
-        """台账纠错：点名字撤销（列表变化才重建，防每 500ms 重建闪烁）"""
+        """台账纠错：点名字撤销（列表变化才重建，防每 500ms 重建闪烁）。
+
+        条目为 ui_state 直出的 {"name","tier"}；行文与 overlay 同口径走
+        theme.ledger_line——『① 贪欲束缚（棱彩）』，tier 缺省省略括号。"""
         P = Palette
-        key = tuple(augments)
+        key = tuple((a.get("name", ""), a.get("tier", "")) for a in augments)
         if key == self._ledger_cache:
             return
         self._ledger_cache = key
@@ -344,13 +347,13 @@ class MainWindow:
                      font=(Theme.FAMILY, Type["small"]), bg=P["surface"],
                      fg=P["text_mute"], anchor=tk.W).pack(anchor=tk.W)
             return
-        for i, name in enumerate(augments, 1):
+        for i, a in enumerate(augments):
+            name = a.get("name", "?")
             row = tk.Frame(self.ledger_box, bg=P["surface"])
             row.pack(anchor=tk.W, fill=tk.X, pady=2)
-            tk.Label(row, text=f"{i}.", font=(Theme.FAMILY, Type["small"]),
-                     bg=P["surface"], fg=P["text_mute"]).pack(side=tk.LEFT)
-            tk.Label(row, text=name, font=Theme.FONT, bg=P["surface"],
-                     fg=P["text"]).pack(side=tk.LEFT, padx=(5, 0))
+            tk.Label(row, text=ledger_line(i, name, a.get("tier") or ""),
+                     font=Theme.FONT, bg=P["surface"],
+                     fg=P["text"]).pack(side=tk.LEFT)
             ttk.Button(row, text="撤销", width=5,
                        command=lambda n=name: self.session.revoke_augment(n)
                        ).pack(side=tk.RIGHT)

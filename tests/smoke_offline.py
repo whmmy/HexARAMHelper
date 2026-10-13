@@ -660,8 +660,8 @@ def test_session():
           and session.suggestion is None and session.my_hero is None)
 
     # ui_state 快照完整性
-    check("ui_state 键齐全", {"stage", "my_hero", "ally", "enemy", "augments",
-                              "current_path", "threat", "suggestion",
+    check("ui_state 键齐全", {"stage", "my_hero", "my_level", "ally", "enemy",
+                              "augments", "current_path", "threat", "suggestion",
                               "dd_version", "path_drift",
                               "build_progress"} <= set(st.keys()))
     fresh = session.data_freshness()
@@ -1039,6 +1039,207 @@ def test_runes_probe():
           and "allgamedata" in (proc.stdout or ""),
           f"rc={proc.returncode} out={(proc.stdout or '')[:200]} "
           f"err={(proc.stderr or '')[:200]}")
+
+
+# ── 4.7 Live 免费事实入上下文与 UI（等级/召唤师技能/队友出装/台账品质） ──
+# 案由（20261013）：Live API 已返回但没进 ui_state/模型上下文的四件免费事实。
+# 全部数据直出、不做代码侧预消化结论（判断归模型，AGENTS.md §1/§4）；
+# 解析一律防御式——真机无 fixtures 样本，字段缺失/脏值不许炸快照线程。
+
+def test_live_facts_context():
+    print("\n[4.7] Live 免费事实：等级/敌方召唤师技能/队友出装/台账品质")
+    import json as _json
+
+    # ---- ① 等级 + ② 召唤师技能：poller 解析层（monkeypatch 断网） ----
+    fake = {
+        "/activeplayer": {"championName": "Annie", "currentGold": 100.0,
+                          "level": 7},
+        "/playerlist": [
+            {"championName": "曙光女神", "team": "ORDER", "level": 9,
+             "summonerSpells": {"summonerSpell1": {"displayName": "闪现"},
+                                "summonerSpell2": {"displayName": "点燃"}},
+             "items": [{"displayName": "圣物之盾", "count": 1}]},
+            {"championName": "Annie", "team": "CHAOS", "level": 7,
+             "summonerSpells": {"summonerSpell1": {"displayName": "闪现"},
+                                "summonerSpell2": {"displayName": "屏障"}}},
+            # 防御式对照：level 脏值 / displayName=null / 两个键都缺
+            {"championName": "盲僧", "team": "CHAOS", "level": "abc",
+             "summonerSpells": {"summonerSpell1": {"displayName": None}}},
+            {"championName": "MonkeyKing", "team": "ORDER"},
+        ],
+        "/eventdata": {"events": []},
+    }
+    poller = LivePoller(kb)
+    poller._get_json = lambda endpoint: fake.get(endpoint)
+    snap = poller._poll_once()
+    by_champ = {p.champion or p.champion_en: p for p in snap.players}
+    mk = snap.players[3]   # MonkeyKing（英文经 KB 转 中文名，按位置取）
+    check("等级解析：playerlist level 直出",
+          by_champ["曙光女神"].level == 9 and by_champ["黑暗之女"].level == 7,
+          str({k: p.level for k, p in by_champ.items()}))
+    check("等级解析：脏值/缺字段归 0 不炸",
+          by_champ["盲僧"].level == 0 and mk.level == 0,
+          str([p.level for p in snap.players]))
+    check("召唤师技能 displayName 直出（两技能保序）",
+          by_champ["曙光女神"].spells == ["闪现", "点燃"]
+          and by_champ["黑暗之女"].spells == ["闪现", "屏障"],
+          str({k: p.spells for k, p in by_champ.items()}))
+    check("召唤师技能缺失/None 安全跳过",
+          by_champ["盲僧"].spells == [] and mk.spells == [],
+          str([p.spells for p in snap.players]))
+    check("我的等级：activeplayer 优先",
+          snap.my_level == 7, str(snap.my_level))
+
+    # 我的等级兜底：activeplayer 缺 level（国服字段缺失同 championName）
+    fake2 = dict(fake)
+    fake2["/activeplayer"] = {"championName": "Annie", "currentGold": 100.0}
+    poller2 = LivePoller(kb)
+    poller2._get_json = lambda endpoint: fake2.get(endpoint)
+    snap2 = poller2._poll_once()
+    check("我的等级：activeplayer 缺失回退 playerlist 匹配条",
+          snap2.my_level == 7, str(snap2.my_level))
+
+    # ---- 快照进会话：ui_state.my_level + 引擎挂载（enemy_spells/ally_builds） ----
+    session = GameSession(kb, rules)
+    session.on_game_start({"ally": ["黑暗之女", "牛头酋长"],
+                           "enemy": ["盲僧"],
+                           "my_hero": "黑暗之女", "source": "test"})
+    session.on_in_progress()
+    snap3 = LiveSnapshot(ts=time.time(), ok=True)
+    snap3.my_champion_en = "Annie"
+    snap3.my_champion = "黑暗之女"
+    snap3.my_level = 8
+    snap3.players = [
+        PlayerInfo(champion="黑暗之女", champion_en="Annie", team="ORDER",
+                   level=8, items=[{"name": "多兰之刃", "count": 1}]),
+        PlayerInfo(champion="牛头酋长", team="ORDER", level=6),   # 无装备
+        PlayerInfo(champion="盲僧", team="CHAOS", level=9,
+                   spells=["闪现", "点燃"],
+                   items=[{"name": "长剑", "count": 1}]),
+        PlayerInfo(champion="放逐之刃", team="CHAOS", level=4),   # 无技能
+    ]
+    session.on_snapshot(snap3)
+    st = session.ui_state()
+    check("ui_state 增 my_level（快照直出）", st["my_level"] == 8,
+          str(st["my_level"]))
+    check("敌方召唤师技能进引擎（英雄名映射，整表替换）",
+          getattr(session.engine, "enemy_spells", {}).get("盲僧")
+          == ["闪现", "点燃"]
+          and "放逐之刃" not in session.engine.enemy_spells,
+          str(getattr(session.engine, "enemy_spells", {})))
+    ally_rows = list(getattr(session.engine, "ally_builds", []))
+    check("队友出装摘要逐人行（含我，装备顿号连接）",
+          "黑暗之女: 多兰之刃" in ally_rows, str(ally_rows))
+    check("队友出装摘要：无装备标「无」不空串",
+          "牛头酋长: 无" in ally_rows, str(ally_rows))
+    # 会话重置清等级（UI 侧无数据即省略 Lv.，不得残留上一局数值）
+    session.reset()
+    check("会话重置清 my_level", session.ui_state()["my_level"] == 0,
+          str(session.ui_state()["my_level"]))
+
+    # ---- ②③ 进 System1 prompt（FakeClient，不联网） ----
+    hero = "暗裔剑魔"
+    top = kb.top_augments(hero, 8)
+    pool = kb.core_item_pool(hero) or ["长剑"]
+    ctx_json = {
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "t"} for n in top],
+        "opening_items": [{"combo": pool[:1], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "builds": [{"name": "爆杀流", "path": "ad", "items": pool[:3],
+                    "note": "主线"}],
+        "skill_order": "主Q副E",
+        "augment_item_links": []}
+    eng, c1, _c2 = build_ai_engine(script_s2=[_json.dumps(ctx_json)])
+    results = []
+    eng.bind(lambda kind, payload, serial: results.append((kind, payload, serial)))
+    eng.start_game(hero, [], ["黑暗之女"])
+    deadline = time.time() + 6
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    check("测试前置：ctx 就绪", eng.cache.get() is not None)
+    # 引擎挂载直填（GameSession.on_snapshot 写入点的等效形态）
+    eng.enemy_spells = {"黑暗之女": ["闪现", "屏障"]}
+    eng.ally_builds = ["牛头酋长: 圣物之盾", "黑暗之女: 多兰之刃"]
+    det = eng._enemy_detail()
+    check("engine 敌方明细带召唤师技能（displayName 原文直出）",
+          det == ["黑暗之女(ap,Mage/Support) 召唤师技能:闪现+屏障"], str(det))
+    check("engine 队友摘要透传截断（≤5 行）",
+          eng._ally_detail() == ["牛头酋长: 圣物之盾", "黑暗之女: 多兰之刃"],
+          str(eng._ally_detail()))
+    # 新局开局清空跨局残留（早退路径 hero 空 也必须清）
+    eng_stale, _, _ = build_ai_engine()
+    eng_stale.enemy_spells = {"旧敌": ["闪现"]}
+    eng_stale.ally_builds = ["旧友: 旧装"]
+    eng_stale.start_game("", [], [])
+    check("新局开局清空 Live 事实挂载（防跨局残留）",
+          eng_stale.enemy_spells == {} and eng_stale.ally_builds == [],
+          f"{eng_stale.enemy_spells} {eng_stale.ally_builds}")
+
+    # 下一件精修 prompt：队友摘要段 + 敌方召唤师技能行
+    from hexa.ai.engine import KIND_NEXT as _KN
+    threat = ThreatProfile(ap_count=1)
+    c1.script.append(_json.dumps({"picks": [
+        {"name": pool[0], "reason": "r1"},
+        {"name": pool[1] if len(pool) > 1 else "焚天", "reason": "r2"}]}))
+    eng.next_candidates(["多兰之刃"], 0, "ad", threat, serial=31,
+                        reason="event")
+    deadline = time.time() + 6
+    while not any(k == _KN for k, _p, _s in results) and time.time() < deadline:
+        time.sleep(0.02)
+    check("下一件 prompt 带《队友装备摘要》段",
+          "《队友装备摘要（快照直出）》" in c1.calls[-1]
+          and "牛头酋长: 圣物之盾" in c1.calls[-1], c1.calls[-1][:150])
+    check("下一件 prompt 敌方行带召唤师技能",
+          "召唤师技能:闪现+屏障" in c1.calls[-1], c1.calls[-1][:150])
+
+    # 海克斯时刻评级 prompt：同吃队友摘要（参考 enemy 参数模式）
+    from hexa.ai.engine import KIND_RANKS as _KR
+    c1.script.append(_json.dumps({"grades": [
+        {"name": top[0], "grade": "S", "reason": "r"}]}))
+    eng.rank_cards(hero, top[:3], [], [], threat, serial=32)
+    deadline = time.time() + 6
+    while not any(k == _KR for k, _p, _s in results) and time.time() < deadline:
+        time.sleep(0.02)
+    check("评级 prompt 带队友出装摘要",
+          "牛头酋长: 圣物之盾" in c1.calls[-1], c1.calls[-1][:150])
+
+    # ---- ④ 台账品质：ui_state 带 tier + ledger_line 渲染单源 ----
+    s_tier = GameSession(kb, rules)
+    other = sorted(kb.augment_names)[1]
+    s_tier.record_augment(REAL_AUG, tier="棱彩")
+    s_tier.record_augment(other)                       # 未带 tier（OCR 缺品质）
+    entries = s_tier.ui_state()["augments"]
+    check("台账条目带品质（name+tier 直出）",
+          entries == [{"name": REAL_AUG, "tier": "棱彩"},
+                      {"name": other, "tier": ""}], str(entries))
+
+    from hexa.ui import theme as _theme
+    check("台账行渲染：轮序+品质『① 贪欲束缚（棱彩）』",
+          _theme.ledger_line(0, "贪欲束缚", "棱彩") == "① 贪欲束缚（棱彩）",
+          _theme.ledger_line(0, "贪欲束缚", "棱彩"))
+    check("台账行渲染：tier 缺省省略括号",
+          _theme.ledger_line(0, "贪欲束缚", "") == "① 贪欲束缚"
+          and _theme.ledger_line(2, "秘术射击", None) == "③ 秘术射击",
+          f"{_theme.ledger_line(0, '贪欲束缚', '')!r}")
+    check("台账行渲染：脏 tier（纯空白）省略括号",
+          _theme.ledger_line(1, "x", "  ") == "② x",
+          _theme.ledger_line(1, "x", "  "))
+    check("台账行渲染：超带圈数字表回退 N. 不炸",
+          _theme.ledger_line(10, "x", "y") == "11. x（y）"
+          and _theme.ledger_line(-1, "x", "") == "0. x",
+          _theme.ledger_line(10, "x", "y"))
+    check("带圈轮序过 emoji 清洗（渲染边界不误伤）",
+          _theme.strip_emoji("① 贪欲束缚（棱彩）") == "① 贪欲束缚（棱彩）")
+
+    # UI 消费点接线守卫（防 tier 进 ui_state 后漏接某个面板）
+    ui_dir = Path(__file__).resolve().parent.parent / "hexa" / "ui"
+    ov_src = (ui_dir / "overlay.py").read_text(encoding="utf-8")
+    mw_src = (ui_dir / "main_window.py").read_text(encoding="utf-8")
+    check("台账渲染单源接线（overlay/main_window 均走 theme.ledger_line）",
+          "ledger_line(" in ov_src and "ledger_line(" in mw_src)
+    check("overlay 英雄行接 my_level（Lv. 直出）",
+          "my_level" in ov_src and "Lv." in ov_src)
 
 
 # ── 5. 画面检测状态机 / 坐标 / 记账映射（纯逻辑，离线） ──────────
@@ -3909,6 +4110,7 @@ if __name__ == "__main__":
     test_phase_machine()
     test_live_me_match()
     test_runes_probe()
+    test_live_facts_context()
     test_detect_and_layout()
     test_ai_engine()
     test_ai_build_pool()

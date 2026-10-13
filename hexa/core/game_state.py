@@ -121,6 +121,7 @@ class GameSession:
                                                # 见 record_augment / round_recorded）
             # 我的实时态（live 快照维护）
             self.my_items = []
+            self.my_level = 0             # 我的英雄等级（快照直出，UI 英雄行）
             self._prev_my_items = []
             self._prev_dead = False
             self._enemy_items_seen = set()
@@ -300,7 +301,25 @@ class GameSession:
                                   self.game_map)
             self.my_items = [it["name"] for it in snap.my_items if it.get("name")]
             self._my_gold = float(snap.my_current_gold or 0)
+            # 我的等级（Live 免费事实直出；activeplayer 缺失时已由 poller
+            # 用 playerlist 匹配条兜底，无数据保持 0，UI 省略 Lv.）
+            self.my_level = int(getattr(snap, "my_level", 0) or 0)
             enemies = snap.enemies()
+            # ── Live 免费事实喂模型（20261013：API 已返回但没进上下文的
+            #    三件直出）——全部原文直出、不做代码侧预消化结论 ──
+            # ①敌方召唤师技能：英雄名 → [displayName]，整体替换（轮询线程写
+            #   /AI 线程读，GIL 下整引用赋值原子）；引擎按英雄名自取
+            self.engine.enemy_spells = {
+                (p.champion or p.champion_en): list(p.spells)
+                for p in enemies
+                if (p.champion or p.champion_en) and p.spells}
+            # ③队友出装摘要：allies 逐人"英雄: 装备名列表"行（含我，直出
+            # 全员；无装备标"无"），喂 System1 next/rank 上下文
+            self.engine.ally_builds = [
+                f"{p.champion or p.champion_en or '?'}: "
+                + ("、".join(it["name"] for it in p.items if it.get("name"))
+                   or "无")
+                for p in snap.allies() if (p.champion or p.champion_en)]
             # LCU 阵容缺失兜底（国服偶发/中途启动）：快照名单直接回填，
             # 否则威胁画像按空名单计算恒为"暂无数据"
             if not self.enemy and enemies:
@@ -1256,9 +1275,13 @@ class GameSession:
             return {
                 "stage": self.stage,
                 "my_hero": self.my_hero,
+                # 我的等级（快照直出；0=无数据，UI 英雄行省略 Lv.）
+                "my_level": self.my_level,
                 "ally": list(self.ally),
                 "enemy": list(self.enemy),
-                "augments": [a["name"] for a in self.augments],
+                # 台账带品质（tier 快照缺省为空串，UI 省略括号）
+                "augments": [{"name": a["name"], "tier": a.get("tier") or ""}
+                             for a in self.augments],
                 "my_items": list(self.my_items),
                 "current_path": self.current_path,
                 "path_drift": drift,
