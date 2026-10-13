@@ -364,6 +364,23 @@ class KnowledgeBase:
     def augment_info(self, hero_cn: str, augment_name: str):
         return self.hero_augments.get(hero_cn, {}).get(augment_name)
 
+    def augment_prior_rank(self, hero_cn: str, augment_name: str):
+        """该英雄先验榜内 (档位, 档内位次)，如 ("黄金", 2) → "先验黄金位第2"。
+
+        位次取 CSV 档内序 t_rank（档位内的名次），与 top_augments 的
+        全局序（overall_rank）互补——评级理由带依据用，统计直出、
+        非语义表。未收录（该英雄榜外）/位次异常（上游占位 999）返回
+        None，调用方按 None 跳过先验文案，不编造。
+        """
+        info = self.hero_augments.get(hero_cn, {}).get(augment_name)
+        if not info:
+            return None
+        tier = info.get("tier") or ""
+        t_rank = info.get("t_rank") or 0
+        if not tier or not 0 < t_rank < 999:
+            return None
+        return tier, t_rank
+
     # ── 装备查询（rules_engine / 幻觉校验用） ──────────────────────
 
     def item_path_bias(self, item_name: str):

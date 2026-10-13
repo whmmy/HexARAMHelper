@@ -27,10 +27,11 @@ import ctypes
 import queue
 import tkinter as tk
 
-from hexa.ui.theme import (CIRCLED, GRADES, Metrics, PENDING_TEXT, PENDING_WAIT,
-                           PICKED_MARK, Palette, Type, grade_badge,
-                           left_rail_box, ov_font, retint_badge, rule_row,
-                           stage_color, strip_emoji)
+from hexa.ui.theme import (CIRCLED, DETECT_TEXT, GRADES, Metrics,
+                            PENDING_TEXT, PENDING_WAIT, PICKED_MARK,
+                            Palette, UNRECOGNIZED_HINT, Type, grade_badge,
+                            left_rail_box, ov_font, retint_badge, rule_row,
+                            stage_color, strip_emoji)
 
 # ── Win32 扩展样式 ────────────────────────────────────────────
 GWL_EXSTYLE = -20
@@ -59,7 +60,9 @@ STAGE_SUFFIX = {
 # 提示语（沿用旧文案，去掉 emoji）
 COACH_PREFIX = "军师"
 AI_BUSY_TEXT = "AI 生成中…"
-DETECT_TEXT = "识别中…（读取三张卡面）"
+# 识别等待态正文 = 状态行 + 操作指引（两段均单源 theme.py，
+# 本地不再自带文案——曾各写一份漂移过，见 theme.py 顶部注释）
+DETECT_BODY = DETECT_TEXT + "；" + UNRECOGNIZED_HINT
 
 
 def ui_scale(screen_h: int) -> float:
@@ -443,7 +446,9 @@ class Overlay:
                 self._render_grade_row(i, ranks[i] if i < len(ranks) else None,
                                        pending, picked_name)
         elif active:
-            self._show_moment("海克斯时刻", P["warning"], DETECT_TEXT)
+            # 识别等待态带操作指引（提示语优化案 20261013）：OCR 未识别
+            # 成功/疑似误记时，直接告诉玩家纠错入口（台账 / F9）
+            self._show_moment("海克斯时刻", P["warning"], DETECT_BODY)
             self._clear_grade_rows()
         else:
             self._show_moment("海克斯时刻",

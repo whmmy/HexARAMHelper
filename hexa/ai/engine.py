@@ -302,7 +302,10 @@ class AIDecisionEngine(DecisionEngine):
                 print(f"[AI] System2 完成（{ctx.source}）：亲和{len(ctx.augment_affinity)}"
                       f" 出门{len(ctx.opening_items)} 方案{len(ctx.builds)} — {src}")
                 if self.on_result:
-                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+                    # briefing 随包（提示语优化案 20261013）：GameSession
+                    # KIND_CTX 分段推送军师，不再回头挖引擎 cache
+                    self.on_result(KIND_CTX, {"source": ctx.source,
+                                              "briefing": ctx.briefing}, 0)
             except Exception as e:  # noqa: BLE001 —— generate 内部已兜
                 # LLM/解析异常，此处兜 kb/规则层意外异常：漏掉即线程静默
                 # 死亡、pending 永挂（直到看门狗落位），必须可见
