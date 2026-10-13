@@ -41,6 +41,10 @@
     （UI 契约 6b）/评级理由带先验位次（kb 统计直出非语义表）/
     ChampionContext.briefing 开局定调（AI 生成+校验截断+降级威胁/缺口
     事实句+KIND_CTX 推送同 key 去重+System1 prompt 消费）
+19. 上局回顾面板（20261013 回顾面板案）：复盘 JSON 局终落盘早已存在但
+    玩家看不到——数据准备纯函数对完整/缺字段/类型异常样例不炸且字段
+    映射正确/latest_review_path 按 mtime 选最新/load_review 坏 JSON 安全
+    None/真局落盘读回渲染吻合（落盘格式零改动）/主窗口 card_frame 接线
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -4469,6 +4473,151 @@ def test_prompt_copy():
           and _s1._briefing_line(_s2.ChampionContext(no_brief, hero)) == "")
 
 
+def test_review_panel():
+    """上局回顾面板（20261013 回顾面板案）：复盘 JSON 局终落盘早已存在
+    （game_state._write_review_log → log/games/*.json）但玩家看不到——
+    主窗口增『上局回顾』区只读渲染最近一份。断言数据准备纯函数
+    （hexa.ui.review.format_review）对完整/缺字段/类型异常样例不炸且
+    字段映射正确；latest_review_path 按 mtime 选最新（空/缺目录 None）；
+    load_review 坏 JSON/顶层非 dict 安全 None；真局落盘读回渲染行吻合
+    （落盘格式零改动的兼容证明）；主窗口走 theme card_frame 体系 +
+    strip_emoji 渲染边界 + 限频/缓存接线（源级断言，无 Tk 窗口）。"""
+    import os as _os
+    import json as _json
+    from hexa.ui.review import format_review, latest_review_path, load_review
+
+    print("\n[19] 上局回顾面板（复盘 JSON 只读渲染）")
+
+    # 1) 完整样例：字段映射正确（含台账空名/非 dict 条目剔除）
+    full = {
+        "hero": "寒冰",
+        "started_at": "2026-10-13 21:07:00",
+        "duration_s": 1404.0,
+        "ally": ["寒冰", "黑暗之女"], "enemy": ["盲僧"],
+        "augments": [{"name": "心之刚", "tier": "S", "ts": 1.0},
+                     {"name": "冲击波", "tier": "A", "ts": 2.0},
+                     {"name": "", "tier": "B", "ts": 3.0},
+                     "垃圾条目"],
+        "final_items": ["暴风之剑", "无尽之刃", "幻影之舞"],
+        "current_path": "ad",
+        "suggestions": [{"ts": 10.0, "kind": "opening",
+                         "text": "① 出门装三选\n② 备选"},
+                        {"ts": 99.0, "kind": "next_items",
+                         "text": "① 无尽之刃"}],
+    }
+    lines = format_review(full)
+    check("完整样例：头行 英雄·时刻·时长 映射",
+          len(lines) == 5 and "寒冰" in lines[0]
+          and "2026-10-13 21:07:00" in lines[0]
+          and "23.4 分钟" in lines[0], str(lines))
+    check("完整样例：海克斯台账行 序号+档位，空名/垃圾条目剔除",
+          "1. S 心之刚" in lines[1] and "2. A 冲击波" in lines[1]
+          and "垃圾" not in lines[1] and "B" not in lines[1], lines[1])
+    check("完整样例：建议次数=列表长度，最近一条取首行",
+          lines[2] == "建议 2 次（最近: ① 无尽之刃）", lines[2])
+    check("完整样例：终局出装顿号连接",
+          lines[3] == "终局出装: 暴风之剑、无尽之刃、幻影之舞", lines[3])
+    check("完整样例：主线(终局) 原值直出", lines[4] == "主线(终局): ad",
+          lines[4])
+
+    # 2) 缺字段/空 dict/类型异常样例：不炸且占位
+    ls = format_review({"hero": "寒冰"})
+    check("缺字段样例：占位不炸（时长/台账/建议/出装/主线全占位）",
+          len(ls) == 5 and "寒冰" in ls[0] and "-" in ls[0]
+          and ls[1] == "海克斯台账: -" and ls[2] == "建议 0 次"
+          and ls[3] == "终局出装: -" and ls[4] == "主线(终局): -", str(ls))
+    ls = format_review({})
+    check("空 dict 样例：全占位（英雄回落 -）",
+          len(ls) == 5 and ls[0].startswith("- ") and ls[1] == "海克斯台账: -",
+          str(ls))
+    try:
+        ls = format_review({"augments": "oops", "suggestions": None,
+                            "final_items": 42, "current_path": ["x"],
+                            "duration_s": "abc", "started_at": 7,
+                            "hero": 3})
+        check("类型异常样例：不炸且按占位处理",
+              len(ls) == 5 and ls[0].startswith("- ")
+              and ls[2] == "建议 0 次" and ls[3] == "终局出装: -"
+              and ls[4] == "主线(终局): -", str(ls))
+    except Exception as e:  # noqa: BLE001
+        check("类型异常样例：不炸且按占位处理", False, repr(e))
+
+    # 3) latest_review_path：mtime 最新（非文件名字典序）；空/缺目录 None
+    rdir = _SMOKE_BASE / "review_panel"
+    gdir = rdir / "log" / "games"
+    gdir.mkdir(parents=True, exist_ok=True)
+    check("无复盘文件 → None", latest_review_path(rdir) is None)
+    old = gdir / "20260101_080000_寒冰.json"
+    new = gdir / "20260102_090000_安妮.json"
+    old.write_text("{}", encoding="utf-8")
+    new.write_text("{}", encoding="utf-8")
+    _os.utime(old, (1000, 1000))
+    _os.utime(new, (2000, 2000))
+    check("最近一份按 mtime 选取（文件名更旧但写得更晚者胜）",
+          latest_review_path(rdir) == new,
+          str(latest_review_path(rdir)))
+    _os.utime(old, (3000, 3000))
+    check("mtime 翻转后选取跟随", latest_review_path(rdir) == old)
+    check("目录不存在 → None", latest_review_path(
+        _SMOKE_BASE / "review_no_such_dir") is None)
+
+    # 4) load_review：坏 JSON/顶层非 dict/缺文件 一律 None，不抛
+    bad = gdir / "bad.json"
+    bad.write_text("{broken", encoding="utf-8")
+    check("load_review 坏 JSON → None", load_review(bad) is None)
+    arr = gdir / "arr.json"
+    arr.write_text("[1,2]", encoding="utf-8")
+    check("load_review 顶层非 dict → None", load_review(arr) is None)
+    check("load_review 缺文件 → None",
+          load_review(gdir / "nope.json") is None)
+
+    # 5) 真写一局读回（GameSession flush 链不因本功能改动 → 落盘格式
+    #    零改动的兼容证明：写出的文件 format_review 直接可渲染）
+    s = GameSession(kb, rules)
+    s._game_t0 = time.time() - 60
+    s.stage = "in_game"
+    s.my_hero = "寒冰"
+    s.augments.append({"name": "心之刚", "tier": "S", "ts": time.time()})
+    s.history.append((time.time(), "opening", "① 出门装 A\n② 出门装 B"))
+    s.log_click({"x": 1, "y": 2, "card": 0, "branch": "direct",
+                 "result": "recorded", "name": "心之刚"})
+    games_dir = _SMOKE_BASE / "log" / "games"
+    n_before = len(list(games_dir.glob("*.json"))) if games_dir.exists() else 0
+    s.flush_pending_review()
+    games = list(games_dir.glob("*.json"))
+    check("真局落盘 +1（flush 兜底链行为不变）",
+          len(games) == n_before + 1, f"{n_before} -> {len(games)}")
+    doc = load_review(max(games, key=lambda p: p.stat().st_mtime))
+    ls = format_review(doc) if doc is not None else None
+    check("真局复盘读回渲染：英雄/台账/建议与 _write_review_log 字段吻合",
+          ls is not None and "寒冰" in ls[0] and "S 心之刚" in ls[1]
+          and ls[2].startswith("建议 1 次")
+          and _json.dumps(doc.get("clicks", []), ensure_ascii=False)
+          .count("recorded") == 1, str(ls))
+
+    # 6) 主窗口接线（源级断言，无 Tk 窗口——同 C2 刷新按钮口径）
+    root = Path(__file__).resolve().parent.parent
+    mw_src = (root / "hexa" / "ui" / "main_window.py").read_text(
+        encoding="utf-8")
+    check("主窗口『上局回顾』卡走 _card/card_frame 体系（不另立样式）",
+          '"上局回顾"' in mw_src and "self.card_review" in mw_src
+          and 'self._card(main, "上局回顾"' in mw_src)
+    rv_seg = mw_src[mw_src.index("def _render_review"):]
+    check("主窗口渲染链：review 三函数接入 + strip_emoji 渲染边界",
+          "latest_review_path(" in rv_seg and "load_review(" in rv_seg
+          and "format_review(" in rv_seg
+          and "strip_emoji(" in rv_seg)
+    check("主窗口轮询接线：_poll_ui 调 _render_review",
+          "self._render_review()" in mw_src)
+    check("上局回顾扫描限频 + (路径, mtime) 缓存（台账同款惯例）",
+          "self._review_checked" in rv_seg and "self._review_cache" in rv_seg)
+    rv_src = (root / "hexa" / "ui" / "review.py").read_text(encoding="utf-8")
+    check("review 数据准备模块零 Tk 依赖（纯函数离线可断言）",
+          "tkinter" not in rv_src)
+    check("review 缺字段占位不放宽读取面（只读，不写 log/games）",
+          "write_text" not in rv_src and "mkdir" not in rv_src)
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -4505,6 +4654,7 @@ if __name__ == "__main__":
     test_stability_batch()
     test_ui_design_system()
     test_prompt_copy()
+    test_review_panel()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)
