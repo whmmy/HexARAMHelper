@@ -29,8 +29,8 @@ import tkinter as tk
 
 from hexa.ui.theme import (CIRCLED, GRADES, Metrics, PENDING_TEXT, PENDING_WAIT,
                            PICKED_MARK, Palette, Type, grade_badge,
-                           left_rail_box, ov_font, retint_badge, rule_row,
-                           stage_color, strip_emoji)
+                           ledger_line, left_rail_box, ov_font, retint_badge,
+                           rule_row, stage_color, strip_emoji)
 
 # ── Win32 扩展样式 ────────────────────────────────────────────
 GWL_EXSTYLE = -20
@@ -317,8 +317,11 @@ class Overlay:
         state = self.session.ui_state()
         stage = state["stage"]
         hero = state["my_hero"]
+        # 等级直出（快照免费事实）：英雄名后缀 Lv.N，无数据（0）省略
+        level = state.get("my_level") or 0
         if hero:
-            self.lbl_hero.config(text=hero, fg=P["text"])
+            hero_text = f"{hero} Lv.{level}" if level else hero
+            self.lbl_hero.config(text=hero_text, fg=P["text"])
             self.lbl_stage.config(text=STAGE_SUFFIX.get(stage, ""),
                                   fg=stage_color(stage))
         else:
@@ -327,8 +330,11 @@ class Overlay:
                                   fg=stage_color(stage))
         self._render_coach(state.get("coach_latest") or "")
         self.lbl_skill.config(text=f"加点: {state.get('skill_order') or '-'}")
+        # 台账带品质：『① 贪欲束缚（棱彩）』，tier 缺省省略括号
         self.lbl_augments.config(
-            text="\n".join(f"{i + 1}. {a}" for i, a in enumerate(state["augments"])) or "-")
+            text="\n".join(
+                ledger_line(i, a.get("name", "?"), a.get("tier") or "")
+                for i, a in enumerate(state["augments"])) or "-")
         self.lbl_threat.config(text=strip_emoji(state["threat"]) or "-")
         # 满六神装替换建议：左轨转琥珀（正文恒为主文本，多行琥珀字可读性差）
         swap = state.get("suggestion_kind") == "swap_items"

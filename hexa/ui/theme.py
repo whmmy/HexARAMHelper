@@ -72,6 +72,19 @@ PENDING_TEXT = "AI 评级中…"      # 块级：识别成功但 AI 精修在途
 PENDING_WAIT = "等待 AI 评级"    # 行级：三行各自的占位理由
 PICKED_MARK = "✓已选"
 CIRCLED = "①②③"
+# 台账轮序带圈数字（一局海克斯最多 ~6 轮，留余量到 ⑩；超出回退 "N."）
+LEDGER_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
+
+
+def ledger_line(index: int, name: str, tier: str = "") -> str:
+    """台账行渲染（overlay 与主窗口同口径，20261013 免费事实批）：
+    『① 贪欲束缚（棱彩）』——轮序 + 名字 + 品质；tier 缺省（空/None）
+    省略括号；轮序超出带圈数字表回退 "11." 纯数字（防 IndexError）。
+    纯函数，离线断言。"""
+    num = (LEDGER_CIRCLED[index] if 0 <= index < len(LEDGER_CIRCLED)
+           else f"{index + 1}.")
+    t = str(tier or "").strip()
+    return f"{num} {name}" + (f"（{t}）" if t else "")
 
 # ══════════════════════════════════════════════════════════════
 # Type / Metrics

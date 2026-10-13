@@ -17,6 +17,14 @@ TIMEOUT = 2
 _SESSION = requests.Session()  # 复用连接，省去每请求 TLS 握手
 
 
+def _def_int(v) -> int:
+    """防御式整数转换：缺字段/None/脏值一律 0（绝不因异常字段炸快照线程）"""
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
 @dataclass
 class PlayerInfo:
     champion: str = ""          # 中文英雄名（经 KB 转换）
@@ -27,6 +35,8 @@ class PlayerInfo:
     kills: int = 0
     deaths: int = 0
     assists: int = 0
+    level: int = 0              # 等级（playerlist level 字段直出；缺字段=0）
+    spells: list = field(default_factory=list)  # 召唤师技能 displayName 直出
     items: list = field(default_factory=list)  # [{"name": ..., "count": ...}]
     riot_id: str = ""
 
@@ -290,7 +300,7 @@ class LivePoller(threading.Thread):
         # activeplayer（免密；只在游戏内可用）
         # 国服实测 championName=null：or "" 防旧写法 .get(k, "") 取到 None 崩线程
         snap.my_champion_en = str(active.get("championName") or "") if active else ""
-        snap.my_level = int(active.get("level") or 0) if active else 0
+        snap.my_level = _def_int(active.get("level")) if active else 0
         # gold 字段名按实测为准（currentGold / goldTotal 均做容错）
         snap.my_current_gold = float(active.get("currentGold") or 0) if active else 0.0
         snap.my_total_gold = float(active.get("goldTotal") or 0) if active else 0.0
@@ -308,6 +318,16 @@ class LivePoller(threading.Thread):
                 en = raw
                 cn = self.kb.champion_cn(en) or ""
             scores = p.get("scores") or {}
+            # 召唤师技能（playerlist summonerSpells 防御式直出）：displayName
+            # 原文进列表，缺字段/None/非 dict 一律安全跳过——只给事实，
+            # 不做"这人是 XX 流"的代码侧结论（判断归模型）
+            sp = p.get("summonerSpells") or {}
+            spells = []
+            if isinstance(sp, dict):
+                for key in ("summonerSpell1", "summonerSpell2"):
+                    disp = str((sp.get(key) or {}).get("displayName") or "").strip()
+                    if disp:
+                        spells.append(disp)
             info = PlayerInfo(
                 champion=cn,
                 champion_en=en,
@@ -317,6 +337,8 @@ class LivePoller(threading.Thread):
                 kills=int(scores.get("kills") or 0),
                 deaths=int(scores.get("deaths") or 0),
                 assists=int(scores.get("assists") or 0),
+                level=_def_int(p.get("level")),
+                spells=spells,
                 items=[{"name": str(it.get("displayName") or it.get("name") or ""),
                         "count": it.get("count", 1)}
                        for it in (p.get("items") or [])],
@@ -333,6 +355,10 @@ class LivePoller(threading.Thread):
                 snap.my_is_dead = info.is_dead
                 snap.my_respawn_timer = info.respawn_timer
                 snap.my_items = info.items
+                # 等级兜底：activeplayer 缺 level（国服字段缺失同 championName）
+                # 时取 playerlist 匹配条的 level；两者都有以 activeplayer 为准
+                if not snap.my_level:
+                    snap.my_level = info.level
         if via and via != self._me_matched_via:
             self._me_matched_via = via
             print(f"[LIVE] 本地玩家定位成功（{via}）→ {snap.my_champion or '?'}")
