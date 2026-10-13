@@ -30,11 +30,15 @@
 15. runes 落库探针（§6 复核）：extract_players 有/无 runes 字段与
     id>100000 启发式/JSONL 落盘字段齐+局号递增/探针炸不影响 _poll_once
     快照主链/summarize 脚本对样例 exit 0
+16. 选人期 System2 预派发（ctx 提前案）：阵容锁定即预生成/开局同键复用
+    零新增调用/键归一（ally 含我口径）/骰子换人失效重派/开局未就绪照旧
+    派发或在途等待/reset 重排不串局/纯规则模式零调用/预生成计入预算
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
 import sys
 import time
+import threading
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -1753,6 +1757,207 @@ def test_ai_build_pool():
           s and s.kind == "next_items"
           and s.candidates and s.candidates[0].name == "焚天",
           s.render() if s else "no suggestion")
+
+
+# ── 6d. System2 选人期预派发（ctx 提前到阵容锁定，开局复用零调用） ──
+
+def _make_ctx_json(hero):
+    """构造指定英雄的合法 System2 canned 输出（全部真实库内名字）"""
+    import json as _json
+    top = kb.top_augments(hero, 10)
+    pool = kb.core_item_pool(hero)
+    return _json.dumps({
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "测试"}
+                             for n in top],
+        "opening_items": [{"combo": pool[:1] or ["长剑"], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "builds": [{"name": "爆杀流", "path": "ad", "items": pool[:4],
+                    "note": "主线"}],
+        "skill_order": "主Q副E",
+        "augment_item_links": [],
+    })
+
+
+class _GatedRoutedClient(FakeClient):
+    """门闩 + 按英雄路由的假 System2 客户端。
+
+    多个预生成在途并发时结果确定（按 prompt 头"英雄：X"路由 canned 输出，
+    与线程完成次序无关）；calls 在 gate 等待前记录=派发即计数。"""
+
+    def __init__(self, routes):
+        super().__init__([])
+        self.routes = dict(routes)     # hero → canned 文本
+        self.gate = threading.Event()
+
+    def chat(self, system, user, max_tokens=None, json_mode=True):
+        self.calls.append(user)
+        self.gate.wait(timeout=5)
+        hero = user.split("英雄：", 1)[1].split("\n", 1)[0]
+        text = self.routes.get(hero, "{}")
+        self.usage.add(100, 50)
+        return text, {"model": "fake", "latency": 0.01,
+                      "tokens_in": 100, "tokens_out": 50}
+
+
+def _wait_ctx(eng, key, timeout=5.0):
+    deadline = time.time() + timeout
+    while not eng.cache.ready_for(key) and time.time() < deadline:
+        time.sleep(0.02)
+    return eng.cache.ready_for(key)
+
+
+def _wait_calls(client, n, timeout=5.0):
+    """等待后台线程把派发计入 calls（线程调度滞后，轮询防假失败）"""
+    deadline = time.time() + timeout
+    while len(client.calls) < n and time.time() < deadline:
+        time.sleep(0.02)
+    return len(client.calls)
+
+
+def test_ctx_early_dispatch():
+    """20261013 ctx 迟到案：System2 原在 GameStart 才派发生成 ChampionContext，
+    海克斯大乱斗第一个海克斯出现很早，ctx 迟到最伤。改为选人期阵容锁定
+    （my_hero 就位）即后台预生成，开局按 (hero, ally, enemy) 阵容键命中
+    复用（零新增 LLM 调用、零等待）：
+    ①选人锁定→ctx 只生成 1 次→开局复用不再调用；
+    ②选人期换人（骰子）→缓存失效并重派，旧在途结果按键丢弃；
+    ③开局时 ctx 未就绪→未预生成照旧派发不炸，已预生成在途则等待不重复派发；
+    ④选人后 reset/重排→旧 serial/旧 ctx 不覆盖新局；
+    ⑤纯规则模式零 LLM 调用零行为变化；
+    ⑥选人期派发计入本局预算（>0 占名额、<=0 不限）。
+    """
+    print("\n[6d] System2 选人期预派发（ctx 提前案）")
+    from hexa.ai.system2 import ContextCache as _CC
+
+    hero_a, hero_b = "暗裔剑魔", "黑暗之女"
+    key_a = _CC.make_key(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    key_b = _CC.make_key(hero_b, [hero_b, "寒冰射手"], ["牛头酋长"])
+
+    # ---- ① 选人锁定→生成 1 次→开局同键复用（引擎级） ----
+    eng, _c1, c2 = build_ai_engine(script_s2=[_make_ctx_json(hero_a)])
+    results = []
+    eng.bind(lambda k, p, s: results.append((k, p, s)))
+    eng.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    check("①选人锁定即生成 ctx", _wait_ctx(eng, key_a))
+    check("①选人期只发 1 次 System2", len(c2.calls) == 1, f"{len(c2.calls)}")
+    check("①选人期 KIND_CTX 已发", any(k == "ctx" for k, _, _ in results))
+    eng.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    time.sleep(0.3)
+    check("①开局复用零新增调用", len(c2.calls) == 1, f"{len(c2.calls)}")
+    check("①开局方案池立即可用", eng.pool_for("ad") is not None)
+    check("①开局预算窗延续选人期（预生成计入）", eng._calls == 1,
+          str(eng._calls))
+    # 键归一：ally 含我（LCU 口径）与不含我（Live 快照兜底口径）同键
+    eng_n, _c1n, c2n = build_ai_engine(script_s2=[_make_ctx_json(hero_a)])
+    eng_n.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    _wait_ctx(eng_n, key_a)
+    eng_n.start_game(hero_a, ["寒冰射手"], ["牛头酋长"])   # 快照口径不含我
+    time.sleep(0.3)
+    check("①键归一（ally 含我/不含我同键复用）", len(c2n.calls) == 1,
+          f"{len(c2n.calls)}")
+
+    # ---- ② 选人期换人（骰子）→失效重派，旧在途结果按键丢弃 ----
+    eng_d, _c1d, _c2d = build_ai_engine()
+    eng_d.client_s2 = _GatedRoutedClient({hero_a: _make_ctx_json(hero_a),
+                                          hero_b: _make_ctx_json(hero_b)})
+    eng_d.bind(lambda *a: None)
+    eng_d.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    check("②首次选人派发 A", _wait_calls(eng_d.client_s2, 1) == 1, f"{len(eng_d.client_s2.calls)}")
+    eng_d.prepare_game(hero_b, [hero_b, "寒冰射手"], ["牛头酋长"])  # 骰子换人
+    check("②换人即重派 B（A 仍在途）", _wait_calls(eng_d.client_s2, 2) == 2,
+          f"{len(eng_d.client_s2.calls)}")
+    eng_d.client_s2.gate.set()
+    check("②换人后缓存为新英雄", _wait_ctx(eng_d, key_b)
+          and eng_d.cache.get().hero == hero_b)
+    eng_d.start_game(hero_b, [hero_b, "寒冰射手"], ["牛头酋长"])
+    time.sleep(0.3)
+    check("②开局复用 B 零第三次调用", len(eng_d.client_s2.calls) == 2, f"{len(eng_d.client_s2.calls)}")
+
+    # ---- ③ 开局时 ctx 未就绪：未预生成照旧派发；在途则等待不重复派发 ----
+    eng3, _c13, _c23 = build_ai_engine()
+    eng3.client_s2 = _GatedRoutedClient({hero_a: _make_ctx_json(hero_a)})
+    eng3.bind(lambda *a: None)
+    eng3.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])  # 直接开局
+    check("③未预生成开局照旧派发", _wait_calls(eng3.client_s2, 1) == 1,
+          f"{len(eng3.client_s2.calls)}")
+    eng3.client_s2.gate.set()
+    check("③开局派发 ctx 正常落位不炸", _wait_ctx(eng3, key_a))
+    eng4, _c14, _c24 = build_ai_engine()
+    eng4.client_s2 = _GatedRoutedClient({hero_a: _make_ctx_json(hero_a)})
+    eng4.bind(lambda *a: None)
+    eng4.prepare_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    _wait_calls(eng4.client_s2, 1)     # 预生成在途（gate 未放行）
+    eng4.start_game(hero_a, [hero_a, "寒冰射手"], ["牛头酋长"])
+    time.sleep(0.3)
+    check("③开局遇在途预生成不重复派发", len(eng4.client_s2.calls) == 1,
+          f"{len(eng4.client_s2.calls)}")
+    eng4.client_s2.gate.set()
+    check("③在途预生成落位后开局可用", _wait_ctx(eng4, key_a))
+
+    # ---- ④ 选人后 reset/重排→旧 serial/旧 ctx 不覆盖新局（会话级） ----
+    sess = GameSession(kb, rules, mouse_stats_fn=lambda: [])
+    eng5, _c15, _c25 = build_ai_engine()
+    eng5.client_s2 = _GatedRoutedClient({hero_a: _make_ctx_json(hero_a),
+                                         hero_b: _make_ctx_json(hero_b)})
+    sess.replace_engine(eng5)
+    sess.on_champ_select({"ally": [hero_a, "寒冰射手"], "enemy": ["牛头酋长"],
+                          "my_hero": hero_a, "source": "test"})
+    check("④会话选人期预派发接线", _wait_calls(eng5.client_s2, 1) == 1,
+          f"{len(eng5.client_s2.calls)}")
+    sess.reset()        # dodge/秒退：会话重置（引擎不动，按键防串局）
+    sess.on_champ_select({"ally": [hero_b, "寒冰射手"], "enemy": ["牛头酋长"],
+                          "my_hero": hero_b, "source": "test"})
+    check("④重排后重派新阵容", _wait_calls(eng5.client_s2, 2) == 2, f"{len(eng5.client_s2.calls)}")
+    eng5.client_s2.gate.set()
+    check("④旧局在途 ctx 不串入新局",
+          _wait_ctx(eng5, key_b) and eng5.cache.get().hero == hero_b)
+    sess.on_game_start({"ally": [hero_b, "寒冰射手"], "enemy": ["牛头酋长"],
+                        "my_hero": hero_b, "source": "test"})
+    time.sleep(0.3)
+    check("④新局开局复用（零新增调用）", len(eng5.client_s2.calls) == 2,
+          f"{len(eng5.client_s2.calls)}")
+    check("④开局复用 KIND_CTX 留痕（复盘时间线）",
+          any(e[1] == "engine_ctx" for e in sess.timeline))
+    sess.on_end_of_game("EndOfGame")
+
+    # ---- ⑤ 纯规则模式零 LLM 调用零行为变化 ----
+    sess_r = GameSession(kb, rules)
+    check("⑤规则引擎 prepare 为空操作",
+          sess_r.engine.prepare_game(hero_a, [], []) is None)
+    sess_r.on_champ_select({"ally": [hero_a], "enemy": [],
+                            "my_hero": hero_a, "source": "test"})
+    sess_r.on_game_start({"ally": [hero_a], "enemy": ["黑暗之女"],
+                          "my_hero": hero_a, "source": "test"})
+    check("⑤纯规则模式照常开局", sess_r.stage == "game_start")
+    check("⑤纯规则模式零调用零 ctx",
+          sess_r.engine.stats()["calls"] == 0
+          and sess_r.engine.stats()["ctx_source"] == "-",
+          str(sess_r.engine.stats()))
+    sess_r.on_end_of_game("EndOfGame")
+
+    # ---- ⑥ 预算守门：选人期派发计入本局预算 ----
+    threat = ThreatProfile()
+    eng_b1, c1b1, _c2b1 = build_ai_engine(
+        script_s2=[_make_ctx_json(hero_a)], budget=1)
+    eng_b1.bind(lambda *a: None)
+    eng_b1.prepare_game(hero_a, [hero_a], ["牛头酋长"])
+    _wait_ctx(eng_b1, _CC.make_key(hero_a, [hero_a], ["牛头酋长"]))
+    check("⑥预生成占预算 1 名额", eng_b1._calls == 1, str(eng_b1._calls))
+    eng_b1.opening_candidates(kb.top_augments(hero_a, 1)[0], threat, serial=1)
+    time.sleep(0.3)
+    check("⑥budget=1 时预生成后 System1 不派发", len(c1b1.calls) == 0,
+          f"{len(c1b1.calls)}")
+    eng_b0, c1b0, _c2b0 = build_ai_engine(
+        script_s2=[_make_ctx_json(hero_a)], budget=0)
+    eng_b0.bind(lambda *a: None)
+    eng_b0.prepare_game(hero_a, [hero_a], ["牛头酋长"])
+    _wait_ctx(eng_b0, _CC.make_key(hero_a, [hero_a], ["牛头酋长"]))
+    c1b0.script.append('{"picks": [{"name": "红水晶", "reason": "防守"}]}')
+    eng_b0.opening_candidates(kb.top_augments(hero_a, 1)[0], threat, serial=2)
+    time.sleep(0.5)
+    check("⑥budget=0 不限（预生成后 System1 照发）", len(c1b0.calls) == 1,
+          f"{len(c1b0.calls)}")
 
 
 def test_session_ai_serial():
@@ -3707,6 +3912,7 @@ if __name__ == "__main__":
     test_detect_and_layout()
     test_ai_engine()
     test_ai_build_pool()
+    test_ctx_early_dispatch()
     test_ai_inflight()
     test_system2_watchdog()
     test_grab_card_crop_no_deadlock()

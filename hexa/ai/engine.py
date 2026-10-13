@@ -7,8 +7,10 @@
 - JevEngine            结构化评估模型占位（P3+，接口先留）
 
 守门（计划 §4 / v4.2 触发模型）：
-- budget_per_game  System1 每局上限；<=0 = 不限（默认，2026-09-30
-                   用户拍板），正数硬限超限自动纯规则
+- budget_per_game  每局 AI 调用上限；<=0 = 不限（默认，2026-09-30
+                   用户拍板），正数硬限超限自动纯规则。选人期 System2
+                   预生成（prepare_game）计入本局预算（20261013 ctx 提前
+                   派发案）；开局旧路径直派 System2 不计入（与旧行为一致）
 - min_interval     periodic 类精修最小间隔；event 类（死亡/首海克斯/海克斯时刻）不受限
 - 任何异常 → 保留规则建议，绝不阻塞 UI 线程（AI 全部跑后台线程）
 """
@@ -16,6 +18,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 
+from hexa.ai.system2 import ContextCache
 from hexa.core.rules_engine import Candidate, _is_fullstat_item
 
 KIND_CTX = "ctx"                    # System2 上下文就绪（UI 刷新提示）
@@ -38,6 +41,13 @@ class DecisionEngine(ABC):
 
         game_map: "11"=召唤师峡谷 / "12"=极地大乱斗（装备按图可买性过滤）
         """
+
+    def prepare_game(self, hero: str, ally: list, enemy: list):
+        """选人期预生成钩子（阵容锁定即后台派发，开局 start_game 复用）。
+
+        默认无操作：规则引擎无 System2 上下文（纯规则模式行为零变化）。
+        AIDecisionEngine 覆盖：按 (hero, ally, enemy) 键控去重/重派，
+        派发计入本局预算。game_state.on_champ_select 锁外调用。"""
 
     @abstractmethod
     def opening_candidates(self, first_augment, threat, serial: int) -> list:
@@ -141,6 +151,7 @@ class AIDecisionEngine(DecisionEngine):
         self._inflight = 0         # 在途 AI 生成数（浮窗"生成中"标识）
         self._pending_since = 0.0  # System2 生成起点（挂死看门狗计时）
         self._ctx_failed = False   # 看门狗落位后置真（stats 显示"生成失败"）
+        self._prepare_key = None   # 选人期预生成的阵容键（None=无预生成在途/就绪）
 
     # ── 守门 ──────────────────────────────────────────────────────
 
@@ -148,7 +159,9 @@ class AIDecisionEngine(DecisionEngine):
         """原子占位：预算内则计数 +1 并返回 True（检查与计数同锁，防竞态超限）。
 
         budget_per_game <= 0 = 不限次（默认，2026-09-30 用户拍板：分级
-        单价下单局成本可忽略，不设硬上限）；正数仍硬限，超限自动纯规则。"""
+        单价下单局成本可忽略，不设硬上限）；正数仍硬限，超限自动纯规则。
+        消费方：局内 System1 三类精修 + 选人期 System2 预生成（开局复用
+        不重复计入，开局旧路径直派的 System2 不计入）。"""
         budget = int(self.settings.get_float("ai", "budget_per_game", default=0))
         with self._lock:
             if budget > 0 and self._calls >= budget:
@@ -217,6 +230,150 @@ class AIDecisionEngine(DecisionEngine):
             out.append(f"{name}({dmg}" + (f",{role})" if role else ")"))
         return out
 
+    def _spawn_system2(self, hero: str, ally: list, enemy: list,
+                       stale_check, tag: str):
+        """后台生成 ChampionContext → cache.set(键控) → KIND_CTX 回调。
+
+        stale_check 在结果落位前于锁内求值：开局路径按游戏代际（旧局结果
+        整包丢弃）、选人期路径按阵容键（骰子换人/阵容变化即弃）。生成/
+        解析异常在此兜底回调 KIND_CTX(source=error)，防线程静默死亡、
+        pending 永挂（system2.generate 内部已兜 LLM/解析层，此处兜 kb 等
+        意外异常）。"""
+        kb = self.delegate.kb
+        rules = self.delegate.rules
+
+        def gen():
+            with self._lock:
+                self._inflight += 1
+            try:
+                ctx = self.s2.generate(kb, rules, self.client_s2, hero, ally,
+                                       enemy, data_version=kb.builds_patch)
+                with self._lock:
+                    stale = bool(stale_check())
+                if stale:
+                    print(f"[AI] 丢弃{tag} ChampionContext"
+                          f"（{ctx.hero}，代际/阵容已过期）")
+                    return
+                if ctx.hero != hero:
+                    print(f"[AI] Context 英雄不符（{ctx.hero} != {hero}），丢弃")
+                    return
+                self.cache.set(ctx,
+                               ContextCache.make_key(hero, ally, enemy))
+                src = "AI 上下文已生成" if ctx.source == "ai" else "AI 失败，规则版上下文"
+                print(f"[AI] System2 完成（{tag}，{ctx.source}）："
+                      f"亲和{len(ctx.augment_affinity)}"
+                      f" 出门{len(ctx.opening_items)} 方案{len(ctx.builds)} — {src}")
+                if self.on_result:
+                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+            except Exception as e:  # noqa: BLE001 —— generate 内部已兜
+                # LLM/解析异常，此处兜 kb/规则层意外异常：漏掉即线程静默
+                # 死亡、pending 永挂（直到看门狗落位），必须可见
+                print(f"[WARN] System2 生成异常: {type(e).__name__}: {e}")
+                if self.on_result:
+                    self.on_result(KIND_CTX, {"source": "error"}, 0)
+            finally:
+                with self._lock:
+                    self._inflight -= 1
+        t = threading.Thread(target=gen, daemon=True, name="AI-System2")
+        t.start()
+        self._tasks.append(t)
+
+    def prepare_game(self, hero: str, ally: list, enemy: list):
+        """选人期预生成 ChampionContext（20261013 ctx 迟到案）。
+
+        海克斯大乱斗第一个海克斯出现很早，原 GameStart 才派发的 ctx 迟到
+        最伤。阵容锁定（my_hero 就位）即后台派发，开局 start_game 同键
+        命中复用（零新增 LLM 调用、零等待）。
+
+        - 按 (hero, ally, enemy) 键控：同键已就绪/在途 → 幂等跳过（选人
+          期回调每 ~2s 刷新一次，靠这里去重）；键变化（骰子换人/阵容变化）
+          → 旧 ctx 立即失效并重派，旧在途结果按键丢弃。
+        - 预算守门：派发计入本局预算（budget_per_game>0 占 1 个名额，
+          开局复用不重复计入；<=0 不限）。预算窗自选人期起算。
+        - 英雄缺失/槽位未配置 → 静默跳过（开局路径照旧兜底，行为同旧）。
+        """
+        hero = str(hero or "")
+        if not hero:
+            return
+        if not (self.client_s2.configured and self.client_s1.configured):
+            return
+        key = ContextCache.make_key(hero, ally, enemy)
+        with self._lock:
+            if (self._prepare_key == key
+                    and (self.cache.ready_for(key)
+                         or self.cache.pending_for(key))):
+                return   # 同键已就绪/在途：幂等（选人期 2s 轮询去重）
+            self._prepare_key = key
+            self._calls = 0          # 新一局预算窗自选人期起算
+            self._ctx_failed = False
+        # 骰子换人/阵容变化：旧 ctx 立即失效（开局绝不复用错阵容的方案池）
+        self.cache.invalidate()
+        if not self._try_reserve():
+            # 结构上仅在预算窗被并发占满时可达；守门语义保留（占不到名额
+            # 就不派发，开局按旧路径兜底）
+            print("[AI] 预算不足，跳过选人期 System2 预生成（开局照旧兜底）")
+            return
+        self.cache.start_pending(key)
+        self._pending_since = time.time()
+        self._spawn_system2(
+            hero, list(ally or []), list(enemy or []),
+            stale_check=lambda: self._prepare_key != key, tag="选人期")
+
+    def start_game(self, hero, ally, enemy, game_map=""):
+        self._hero = hero
+        self._enemy = [str(x) for x in (enemy or [])]
+        self.game_map = game_map or ""
+        self.delegate._hero = hero
+        self.delegate.game_map = self.game_map
+        self._last_refine = {"opening": 0.0, "next_items": 0.0,
+                             "augment_ranks": 0.0}
+        key = ContextCache.make_key(hero, ally, enemy)
+        with self._lock:
+            self._epoch += 1
+            epoch = self._epoch
+            reuse_ready = self.cache.ready_for(key)      # 选人期已生成同键 ctx
+            reuse_pending = (not reuse_ready
+                             and self.cache.pending_for(key))  # 同键生成在途
+            if not reuse_ready and not reuse_pending:
+                # 全新派发（未预生成/键失配）：旧语义整窗重置，费用窗口
+                # 自开局起算（本路径 System2 派发不入预算，与旧行为一致）
+                self._calls = 0
+                self._prepare_key = None
+                for _c in (self.client_s1, self.client_s2):
+                    _u = getattr(_c, "usage", None)
+                    if _u:
+                        _u.new_game()
+        if reuse_ready or reuse_pending:
+            # 复用/等待选人期结果：开局零新增 LLM 调用。预算窗延续选人期
+            # （预生成已计入）；费用窗口延续（预生成花费属本局）。就绪分支
+            # 补发 KIND_CTX（复盘时间线留"开局复用"痕；session 此刻必为
+            # 刚 reset 的空会话，回调只落日志无刷新副作用）；在途分支由
+            # gen 线程落位时自会发，此处不重复。
+            print(f"[AI] System2 开局"
+                  f"{'复用选人期上下文' if reuse_ready else '等待选人期在途生成'}"
+                  f"（零新增调用）")
+            if reuse_ready and self.on_result:
+                ctx = self.cache.get(key)
+                if ctx is not None:
+                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
+            return
+        # 新局开始必须无条件使上一局上下文失效（清缓存 + 置 pending），
+        # 早退路径（hero 缺失 / 槽位未配置）也不例外：否则 LCU 迟到时
+        # 缓存仍是上一局 ChampionContext，本局沿用上一局英雄的出门/路线/
+        # 加点生成 prompt，直到 late_start 补开局才自愈
+        self.cache.start_pending()
+        self._pending_since = time.time()
+        self._ctx_failed = False
+        if not hero:
+            print("[AI] 英雄未知，跳过 System2 上下文生成（可手动设英雄后重开局）")
+            return
+        if not (self.client_s2.configured and self.client_s1.configured):
+            print("[AI] 槽位未配置完整，本局纯规则模式")
+            return
+        self._spawn_system2(hero, list(ally or []), list(enemy or []),
+                            stale_check=lambda: epoch != self._epoch,
+                            tag="开局")
+
     # ── AI 适配出装池（System2 产物 → 规则底线/System1 白名单） ────
 
     def pool_for(self, current_path: str):
@@ -248,73 +405,6 @@ class AIDecisionEngine(DecisionEngine):
                     and not _is_fullstat_item(kb, n)):
                 out.append(n)
         return out
-
-    def start_game(self, hero, ally, enemy, game_map=""):
-        self._hero = hero
-        self._enemy = [str(x) for x in (enemy or [])]
-        self.game_map = game_map or ""
-        with self._lock:
-            self._epoch += 1
-            epoch = self._epoch
-            self._calls = 0
-        self._last_refine = {"opening": 0.0, "next_items": 0.0,
-                             "augment_ranks": 0.0}
-        # 两槽位用量各自独立计量：System1/2 单价不同，若共享实例，
-        # stats() 会把同一份 tokens 按两套单价各算一遍（费用虚高近一倍）
-        for _c in (self.client_s1, self.client_s2):
-            _u = getattr(_c, "usage", None)
-            if _u:
-                _u.new_game()
-        self.delegate._hero = hero
-        self.delegate.game_map = self.game_map
-        # 新局开始必须无条件使上一局上下文失效（清缓存 + 置 pending），
-        # 早退路径（hero 缺失 / 槽位未配置）也不例外：否则 LCU 迟到时
-        # 缓存仍是上一局 ChampionContext，本局沿用上一局英雄的出门/路线/
-        # 加点生成 prompt，直到 late_start 补开局才自愈
-        self.cache.start_pending()
-        self._pending_since = time.time()
-        self._ctx_failed = False
-        if not hero:
-            print("[AI] 英雄未知，跳过 System2 上下文生成（可手动设英雄后重开局）")
-            return
-        if not (self.client_s2.configured and self.client_s1.configured):
-            print("[AI] 槽位未配置完整，本局纯规则模式")
-            return
-        kb = self.delegate.kb
-        rules = self.delegate.rules
-
-        def gen():
-            with self._lock:
-                self._inflight += 1
-            try:
-                ctx = self.s2.generate(kb, rules, self.client_s2, hero, ally,
-                                       enemy, data_version=kb.builds_patch)
-                with self._lock:
-                    stale = epoch != self._epoch
-                if stale:
-                    print(f"[AI] 丢弃旧局 ChampionContext（{ctx.hero}，代际过期）")
-                    return
-                if ctx.hero != hero:
-                    print(f"[AI] Context 英雄不符（{ctx.hero} != {hero}），丢弃")
-                    return
-                self.cache.set(ctx)
-                src = "AI 上下文已生成" if ctx.source == "ai" else "AI 失败，规则版上下文"
-                print(f"[AI] System2 完成（{ctx.source}）：亲和{len(ctx.augment_affinity)}"
-                      f" 出门{len(ctx.opening_items)} 方案{len(ctx.builds)} — {src}")
-                if self.on_result:
-                    self.on_result(KIND_CTX, {"source": ctx.source}, 0)
-            except Exception as e:  # noqa: BLE001 —— generate 内部已兜
-                # LLM/解析异常，此处兜 kb/规则层意外异常：漏掉即线程静默
-                # 死亡、pending 永挂（直到看门狗落位），必须可见
-                print(f"[WARN] System2 生成异常: {type(e).__name__}: {e}")
-                if self.on_result:
-                    self.on_result(KIND_CTX, {"source": "error"}, 0)
-            finally:
-                with self._lock:
-                    self._inflight -= 1
-        t = threading.Thread(target=gen, daemon=True, name="AI-System2")
-        t.start()
-        self._tasks.append(t)
 
     # ── 三类建议（同步规则底线 + 异步 AI 精修） ────────────────────
 
