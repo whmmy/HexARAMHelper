@@ -99,7 +99,8 @@ class LCUConnector:
             lockfile = os.path.join(base, 'lockfile')
             if os.path.exists(lockfile):
                 try:
-                    parts = open(lockfile).read().strip().split(':')
+                    with open(lockfile) as f:
+                        parts = f.read().strip().split(':')
                     if len(parts) >= 5:
                         self.port, self.auth_token = parts[2], parts[3]
                         self.base_url = f"https://127.0.0.1:{self.port}"

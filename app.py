@@ -45,6 +45,7 @@ def main():
     from hexa.core.mouse_ledger import CardLedger, MouseLedger
     from hexa.core.ocr_engine import OcrEngine
     from hexa.core.rules_engine import RulesEngine
+    from hexa.core.runes_probe import RunesProbe
     from hexa.core.screen_detect import ScreenDetector, load_layout, point_in_rect
     from hexa.knowledge.kb import KnowledgeBase
     from hexa.ui.main_window import MainWindow
@@ -138,9 +139,19 @@ def main():
     # ── 决策引擎（规则 / AI 双槽位） ──────────────────────────────
     engine = engine_mod.build_engine(kb, rules, settings)
     lcu = LCUConnector(kb)
+    # ── 海克斯落库探针（20261013，诊断专用）────────────────────────
+    # 竞品实证 allgamedata.allPlayers[].runes.generalRunes[] 中 id>100000
+    # 疑似已选海克斯，逐局落盘 log/runes_probe/runes_probe.jsonl 供
+    # experiments/summarize_runes_probe.py 复核 §6 旧结论；探针炸不进主链
+    # （live_api/game_state 侧 try/except 隔离），settings
+    # fixtures.runes_probe=false 可关。
+    runes_probe = (RunesProbe()
+                   if bool(settings.get("fixtures", "runes_probe",
+                                        default=True)) else None)
     # 国服 activeplayer 缺英雄名/装备：注入召唤师名给 LivePoller 做玩家锚定
     live = LivePoller(kb, fixture_dumper=dumper,
-                      summoner_name_fn=lcu.summoner_name)
+                      summoner_name_fn=lcu.summoner_name,
+                      runes_probe=runes_probe)
     session = GameSession(kb, rules, settings=settings,
                           fixture_dumper=dumper, live_poller=live,
                           engine=engine,
@@ -515,9 +526,56 @@ def main():
         ui(lambda: print("[CALIB] 标定中…（10 秒内把海克斯三选一界面切到前台）"))
         threading.Thread(target=run, daemon=True, name="Calibrate").start()
 
+    def _start_data_refresh(on_done):
+        """一键数据刷新：后台线程顺序跑 OP.GG 重抓 + 知识派生重生成，
+        输出逐行 print 进日志面板。脚本产物落 data/，知识库启动时一次性
+        加载——完成后提示重启生效（不做运行时热替换 kb，防锁内状态半新
+        半旧）。打包版无 scripts/ 目录，直接提示不支持。"""
+        scripts_dir = BASE_DIR / "scripts"
+        jobs = [["fetch_opgg_builds.py", "--all"],
+                ["gen_champ_profile.py"]]
+        if not scripts_dir.exists():
+            ui(lambda: print("[DATA] 打包版无 scripts/ 目录，请在源码目录运行刷新"))
+            ui(on_done)   # 恢复按钮的回调必须回 UI 线程（Tk 跨线程唯一通道）
+            return
+
+        def run():
+            import subprocess
+            ok = True
+            for job in jobs:
+                script = scripts_dir / job[0]
+                if not script.exists():
+                    print(f"[DATA] 缺少 {job[0]}，跳过")
+                    continue
+                print(f"[DATA] 运行 {job[0]} {' '.join(job[1:])} …")
+                try:
+                    proc = subprocess.Popen(
+                        [sys.executable, str(script), *job[1:]],
+                        cwd=str(BASE_DIR), stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT, text=True,
+                        encoding="utf-8", errors="replace")
+                    for line in proc.stdout or []:
+                        print(f"[DATA] {line.rstrip()}")
+                    code = proc.wait()
+                    if code != 0:
+                        ok = False
+                        print(f"[WARN] {job[0]} 退出码 {code}")
+                except Exception as e:  # noqa: BLE001 —— 单脚本失败不断链
+                    ok = False
+                    print(f"[WARN] {job[0]} 运行异常: {e}")
+            ui(lambda: print(
+                "[OK] 数据已刷新，重启应用后生效（知识库启动时加载）"
+                if ok else
+                "[WARN] 数据刷新部分失败，详见上方 [DATA] 输出"))
+            ui(on_done)   # DataRefresh 线程内直调会跨线程摸 Tk 控件（Tkinter 非线程安全）
+
+        ui(lambda: print("[DATA] 开始刷新（OP.GG 全量抓取需几分钟，可继续游戏）"))
+        threading.Thread(target=run, daemon=True, name="DataRefresh").start()
+
     main_win = MainWindow(root, session, ui_queue, log_queue,
                           on_open_settings=_open_settings,
-                          on_calibrate=_start_calibrate)
+                          on_calibrate=_start_calibrate,
+                          on_refresh_data=_start_data_refresh)
     overlay = Overlay(root, session, ui_queue,
                       visible=bool(settings.get("ui", "overlay_visible", default=True)))
 

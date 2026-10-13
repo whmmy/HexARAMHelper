@@ -56,6 +56,10 @@ def _fmt_augments(kb, hero: str, n: int = 20) -> str:
 
     海克斯大乱斗是新模式，基座模型对很多海克斯名零先验——只给"名(档位)"
     等于考幻觉；augments.json 的翻译事实喂进来，亲和评级才有依据。
+    20261013 描述自举贯通：augment_descs 的卡面 OCR 原文一并直出——
+    标签是离线压缩结论（可能过时/误标，实锤 大法师 被标 ap/法穿/爆发
+    而原文是技能花费返还），带原文的条目以原文为准，与 System1 评级
+    prompt 同口径。截 60 字防 prompt 膨胀（top20 × 60 ≈ 1.2k 上限）。
     """
     top = kb.top_augments(hero, n)
     if not top:
@@ -72,6 +76,9 @@ def _fmt_augments(kb, hero: str, n: int = 20) -> str:
             bits.append("tags:" + "/".join(tags))
         if tag.get("is_upgrade"):
             bits.append("升级型")
+        desc = (kb.augment_desc(name) or "").strip()
+        if desc:
+            bits.append("原文:" + desc[:60])
         parts.append(f"{name}（{'，'.join(bits)}）")
     return "；".join(parts) or "（无）"
 
@@ -332,7 +339,8 @@ def generate(kb, rules, client, hero: str, ally: list, enemy: list,
                 head,
                 f"《OP.GG 数据》\n{_fmt_builds(kb, hero)}",
                 "《海克斯候选名单》（该英雄先验 top20；含档位与语义标签："
-                "bias=路线倾向，tags=玩法标签，升级型=升级已购装备）\n"
+                "bias=路线倾向，tags=玩法标签，升级型=升级已购装备；"
+                "带「原文」的是卡面 OCR 直出事实，与标签冲突时以原文为准）\n"
                 f"{_fmt_augments(kb, hero)}",
                 f"数据版本：{data_version or kb.dd_version}",
                 "请输出 ChampionContext JSON。",

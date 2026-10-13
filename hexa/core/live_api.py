@@ -80,11 +80,15 @@ class LivePoller(threading.Thread):
     POLL_INTERVAL = 5.0
 
     def __init__(self, kb, on_snapshot=None, fixture_dumper=None,
-                 summoner_name_fn=None):
+                 summoner_name_fn=None, runes_probe=None):
         super().__init__(daemon=True, name="LivePoller")
         self.kb = kb
         self.on_snapshot = on_snapshot
         self.dumper = fixture_dumper
+        # 海克斯落库探针（诊断专用，20261013）：真机复核 §6"海克斯 API
+        # 读不到"旧结论用，None = 未接探针（零开销零额外请求）
+        self.runes_probe = runes_probe
+        self._agd_tick = 0            # allgamedata 低频采集周期计数
         # 本地玩家定位（国服 activeplayer 缺 championName/items 时的兜底）
         self.summoner_name_fn = summoner_name_fn
         self._my_summoner = ""        # LCU 召唤师名缓存（非空后不再请求）
@@ -114,6 +118,7 @@ class LivePoller(threading.Thread):
         self._kill_counts = {}
         self._name_to_champ = {}
         self._my_event_names = set()
+        self._agd_tick = 0   # allgamedata 低频节奏随局重置
 
     def stop(self):
         self._running = False
@@ -126,7 +131,16 @@ class LivePoller(threading.Thread):
                 continue
             if not self._running:
                 break
-            snap = self._poll_once()
+            # 顶层兜底（20261013）：_poll_once 里的 int()/float() 强转遇到
+            # 异常字段会抛——异常冒出即杀死本线程，快照断流 300s 后被
+            # GameSession 数据停摆兜底误判"局已结束"。单帧失败只跳过，
+            # 下帧照常轮询（脏数据是暂时的，线程死了整局观察全瞎）。
+            try:
+                snap = self._poll_once()
+            except Exception as e:  # noqa: BLE001
+                print(f"[WARN] Live 快照单帧异常（下帧重试）: "
+                      f"{type(e).__name__}: {e}")
+                snap = None
             if snap is not None:
                 self.last_snapshot = snap
                 if self.on_snapshot:
@@ -247,6 +261,29 @@ class LivePoller(threading.Thread):
         snap.ok = True
         snap.raw_active = active or {}
         snap.raw_playerlist = playerlist or []
+        # 海克斯落库探针（20261013，docs/真机验证清单.md §6 复核）：竞品
+        # 实证 allgamedata.allPlayers[].runes.generalRunes[] 里 id>100000
+        # 疑似已选海克斯；playerlist 是否同带该字段未验证——两条路都落库
+        # 对照。探针炸只 print 不外抛：单帧失败跳过即可，绝不能拖垮快照
+        # 主链（同 run() 顶层兜底同理）。未接探针（None）零开销零请求。
+        if self.runes_probe is not None:
+            if playerlist:
+                try:
+                    self.runes_probe.on_playerlist(playerlist, snap.ts)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[WARN] runes 探针 playerlist 落库异常: {e}")
+            # 低频 allgamedata 采集：每 6 个轮询周期（约 30s）请求一次，
+            # 且仅在探针在位时才发——不给未开探针的用户加流量
+            self._agd_tick += 1
+            if self._agd_tick >= 6:
+                self._agd_tick = 0
+                try:
+                    agd = self._get_json("/liveclientdata/allgamedata")
+                    allp = (agd or {}).get("allPlayers")
+                    if allp is not None:
+                        self.runes_probe.on_allgamedata(allp, snap.ts)
+                except Exception as e:  # noqa: BLE001
+                    print(f"[WARN] runes 探针 allgamedata 采集异常: {e}")
         # 死亡来源（游戏内才可用；未在对局/旧版本客户端返回 None → 空表跳过）
         events = self._get_json("/eventdata")
 

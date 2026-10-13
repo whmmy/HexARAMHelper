@@ -6,17 +6,24 @@
 RapidOCR 懒加载（首次识别 ~2s 模型初始化，之后单帧几十 ms）。
 """
 import threading
+import time
 
 from thefuzz import process as fuzz_process
 
 
 class OcrEngine:
+    # 初始化失败后的重试退避：期间 recognize 直接返回 []（不刷屏重试），
+    # 超时隔再给一次机会——首次失败可能是暂态（磁盘 IO/内存紧张），
+    # 永久置 False 会让整局白瞎（20261013：原实现 available=False 永不恢复）
+    INIT_RETRY_INTERVAL = 300.0
+
     def __init__(self, kb):
         self.kb = kb
         self._ocr = None
         self._augment_names = None  # 首次匹配时从 kb 固化（见 match_augment）
         self._lock = threading.Lock()
         self.available = True   # import 失败时置 False（上层走模板兜底/提示）
+        self._init_fail_ts = 0.0
 
     def _get_ocr(self):
         if self._ocr is None:
@@ -34,6 +41,7 @@ class OcrEngine:
                                          det_limit_side_len=960,
                                          det_limit_type='max',
                                          intra_op_num_threads=2)
+                    self._init_fail_ts = 0.0
         return self._ocr
 
     # ── 识别 ──────────────────────────────────────────────────────
@@ -42,11 +50,17 @@ class OcrEngine:
         """BGR ndarray → [(text, [x,y,w,h]框, score)]；不可用/失败返回 []"""
         if not self.available or image is None:
             return []
+        if self._ocr is None and self._init_fail_ts:
+            # 上次初始化失败：退避期内直接降级，超时隔重试一次
+            if time.monotonic() - self._init_fail_ts < self.INIT_RETRY_INTERVAL:
+                return []
+            self._init_fail_ts = 0.0
         try:
             ocr = self._get_ocr()
         except Exception as e:  # noqa: BLE001 —— OCR 环境损坏不致命
-            print(f"[WARN] RapidOCR 初始化失败，画面检测降级模板兜底: {e}")
-            self.available = False
+            self._init_fail_ts = time.monotonic()
+            print(f"[WARN] RapidOCR 初始化失败（{int(self.INIT_RETRY_INTERVAL)}s 后"
+                  f"自动重试，期间画面检测降级模板兜底）: {e}")
             return []
         try:
             # 推理串行化：点击补扫（记账线程）与检测线程可能并发调用——

@@ -39,13 +39,15 @@ MIN_H = 1150
 class MainWindow:
     def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue,
                  log_queue: queue.Queue, on_open_settings=None,
-                 on_calibrate=None):
+                 on_calibrate=None, on_refresh_data=None):
         self.root = root
         self.session = session
         self.ui_queue = ui_queue
         self.log_queue = log_queue
         self.on_open_settings = on_open_settings
         self.on_calibrate = on_calibrate
+        self.on_refresh_data = on_refresh_data
+        self._refresh_busy = False     # 数据刷新按钮在途标记
         self._ledger_cache = None      # 台账按钮去重重建
         self._bp_cache = None          # 成型度面板去重重建（同台账惯例）
         self._last_poll_err = None     # 轮询异常签名（限频去重，防 500ms 刷屏）
@@ -177,6 +179,10 @@ class MainWindow:
                                    fg=P["text_mute"], justify=tk.RIGHT,
                                    anchor=tk.E, font=(Theme.FAMILY, Type["small"]))
         self.lbl_engine.pack(side=tk.RIGHT)
+        if self.on_refresh_data:
+            self._refresh_btn = ttk.Button(fresh, text="刷新数据", width=8,
+                                           command=self._on_refresh_data)
+            self._refresh_btn.pack(side=tk.RIGHT, padx=(0, 8))
         self._wraps.append((self.lbl_fresh, 0.5))
         self._wraps.append((self.lbl_engine, 0.5))
 
@@ -248,6 +254,22 @@ class MainWindow:
             self.ent_hero.delete(0, tk.END)
         else:
             self.lbl_manual_hint.config(text="未匹配到英雄", fg=Palette["error"])
+
+    def _on_refresh_data(self):
+        """数据刷新按钮：在途防重入，完成回调恢复按钮（回调由 app 侧经
+        ui() 调度回 UI 线程）。刷新脚本在后台线程跑，输出经 print 进日志面板。"""
+        if self._refresh_busy:
+            return
+        self._refresh_busy = True
+        self._refresh_btn.config(state=tk.DISABLED, text="刷新中…")
+
+        def done():
+            self._refresh_busy = False
+            try:
+                self._refresh_btn.config(state=tk.NORMAL, text="刷新数据")
+            except tk.TclError:
+                pass
+        self.on_refresh_data(done)
 
     # ── 轮询渲染 ──────────────────────────────────────────────────
 

@@ -50,6 +50,8 @@ DEFAULTS = {
         "budget_per_game": 0,         # 每局 System1 调用上限（<=0 = 不限，
                                       # 2026-09-30 用户拍板：分级单价下成本可忽略；
                                       # 要限就填正数，超限自动纯规则）
+        "min_interval": 20,           # periodic 类精修最小间隔秒（AGENTS 成本
+                                      # 守门条款：20s 不可松）；event 类不受限
     },
     # System 2：ChampionContext 生成（每局 1 次）
     "system2": {
@@ -61,6 +63,7 @@ DEFAULTS = {
         "max_tokens": 1500,
         "thinking": "off",            # off/low/medium/high/auto（auto=跟随服务商默认）
         "timeout": 60,
+        "fallback_model": "",         # 超时降级模型（空=不降级，同模型重试）
         "price_in": 2.4,              # ¥/百万 token（费用仪表）
         "price_out": 9.6,
     },
@@ -74,6 +77,7 @@ DEFAULTS = {
         "max_tokens": 800,
         "thinking": "off",            # deepseek 系默认深度思考，显式关掉才快（也不烧穿配额）
         "timeout": 30,
+        "fallback_model": "",
         "price_in": 0.8,
         "price_out": 2.7,
     },
@@ -88,6 +92,13 @@ DEFAULTS = {
     # 真机调测 dump（P0 字段实测用）
     "fixtures": {
         "dump": False,
+        "runes_probe": True,   # 海克斯字段落库探针（log/runes_probe/ 下
+                               # JSONL，§6 复核用；纯落库不进推荐链）
+    },
+    # 诊断开关（app.py 消费；补进默认值防"settings 全删重建后配置面漂移"）
+    "diagnostics": {
+        "elevate_auto": True,         # 未提权时自动弹 UAC 重启（游戏内点击记账前提）
+        "click_capture": True,        # 点击定格截图落 log/captures/（排障用）
     },
     "ui": {
         "overlay_visible": True,
@@ -109,7 +120,15 @@ class Settings:
                 user = json.loads(self.path.read_text(encoding="utf-8"))
                 self._merge(self._data, user)
             except Exception as e:
-                print(f"[WARN] settings.json 读取失败，使用默认值: {e}")
+                # 损坏文件先备份再回退默认：api_key/预算等全在里面，
+                # 静默覆盖等于配置蒸发，留着 .bak 人工可救
+                bak = self.path.with_suffix(".json.bak")
+                try:
+                    os.replace(self.path, bak)
+                    print(f"[WARN] settings.json 读取失败（已备份到 "
+                          f"{bak.name}），使用默认值: {e}")
+                except OSError:
+                    print(f"[WARN] settings.json 读取失败，使用默认值: {e}")
 
     @staticmethod
     def _merge(base: dict, override: dict):
@@ -120,12 +139,20 @@ class Settings:
                 base[k] = v
 
     def save(self):
+        # 原子写（tmp→replace）：直写中途崩溃/断电会截断 JSON，下次启动
+        # 读取失败静默回退全默认——api_key/预算全部丢失且仅一条 WARN
+        tmp = self.path.with_suffix(".json.tmp")
         try:
-            self.path.write_text(
+            tmp.write_text(
                 json.dumps(self._data, ensure_ascii=False, indent=2),
                 encoding="utf-8")
+            os.replace(tmp, self.path)
         except Exception as e:
             print(f"[WARN] settings.json 写入失败: {e}")
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
 
     # dict 风格访问: settings["ai"]["enabled"]
     def __getitem__(self, key):

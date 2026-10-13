@@ -23,6 +23,13 @@
     （20261012 赏金猎人案：选卡后窗口期幻影记账）
 13. 描述自举：卡面原文描述 OCR 写回知识库（持久化/覆写取新）+ 进评级
     prompt 且声明冲突时以描述为准（20261013 大法师误标案）
+14. 稳定性批修：is_elevated 恒 False（wt NameError）/Live 轮询单帧异常
+    不杀线程/overlay 刷新链防断/settings 原子写+损坏备份/DEFAULTS 漂移键/
+    kb 损坏 JSON 不崩启动/OCR 失败可重试/钩子回调零 print/C1 描述贯通
+    System2/C2 刷新数据按钮（20261013 盘点案）
+15. runes 落库探针（§6 复核）：extract_players 有/无 runes 字段与
+    id>100000 启发式/JSONL 落盘字段齐+局号递增/探针炸不影响 _poll_once
+    快照主链/summarize 脚本对样例 exit 0
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -910,6 +917,124 @@ def test_live_me_match():
          "KillerName": "nautsum", "VictimName": "我我我"}]}, my_disp="x")
     check("新局 EventID 回退清零重计",
           poller._kill_counts == {"深海泰坦": 1}, str(poller._kill_counts))
+
+
+def test_runes_probe():
+    print("\n[4.6] runes 落库探针（§6 复核：runes 字段存不存在、长什么样）")
+    import json as _json
+    import os as _os
+    import subprocess as _sp
+
+    from hexa.core.runes_probe import RunesProbe, extract_players
+
+    # extract_players：有/无 runes 字段、id>100000 启发式、字段缺失容错
+    rows = extract_players([
+        {"championName": "曙光女神", "team": "ORDER",
+         "runes": {"generalRunes": [
+             {"id": 8100}, {"id": 1000100}, {"id": 1000200}]}},
+        {"rawChampionName": "game_character_displayname_Annie",
+         "team": "CHAOS"},                                    # 无 runes 键
+        {"championName": None, "team": "CHAOS",
+         "runes": {"generalRunes": []}},                      # 空条目表
+        "not-a-dict",                                         # 非 dict 跳过
+        None,
+    ])
+    check("extract 有 runes 字段解析 augs（id>100000 过滤）",
+          rows[0]["runes_field"] == "present" and rows[0]["total"] == 3
+          and rows[0]["augs"] == [1000100, 1000200]
+          and rows[0]["champion"] == "曙光女神" and rows[0]["team"] == "ORDER",
+          str(rows[0]))
+    check("extract 无 runes 字段 absent + raw 尾段兜底",
+          rows[1]["runes_field"] == "absent" and rows[1]["total"] == 0
+          and rows[1]["augs"] == [] and rows[1]["champion"] == "Annie",
+          str(rows[1]))
+    check("extract 空 generalRunes= present/0 条/无英雄名",
+          rows[2]["runes_field"] == "present" and rows[2]["total"] == 0
+          and rows[2]["champion"] == "", str(rows[2]))
+    check("extract 非 dict 元素跳过", len(rows) == 3, str(len(rows)))
+
+    # RunesProbe 落盘：JSONL 行可解析且字段齐；new_game 局号 +1；
+    # on_allgamedata 整包（allPlayers 键）/裸列表均可
+    probe_dir = Path(tempfile.mkdtemp(prefix="hexa_runes_probe_"))
+    probe = RunesProbe(log_dir=probe_dir)
+    probe.on_playerlist(
+        [{"championName": "曙光女神", "team": "ORDER"}], 111.0)
+    probe.new_game()
+    probe.on_allgamedata(
+        {"allPlayers": [{"championName": "Annie", "team": "CHAOS",
+                         "runes": {"generalRunes": [{"id": 1000100}]}}]},
+        222.0)
+    lines = (probe_dir / "runes_probe.jsonl").read_text(
+        encoding="utf-8").splitlines()
+    ok = len(lines) == 2
+    r1 = _json.loads(lines[0]) if ok else {}
+    r2 = _json.loads(lines[1]) if ok and len(lines) > 1 else {}
+    check("JSONL 追加两行且 utf-8 可解析", ok, str(lines))
+    check("行字段齐（ts/session/src/players）且局号 +1",
+          r1.get("ts") == 111.0 and r1.get("session") == 0
+          and r1.get("src") == "playerlist"
+          and isinstance(r1.get("players"), list) and r1["players"]
+          and r1["players"][0].get("runes_field") == "absent"
+          and r2.get("session") == 1 and r2.get("src") == "allgamedata"
+          and r2["players"][0].get("augs") == [1000100],
+          f"{r1} | {r2}")
+    probe.on_allgamedata(
+        [{"championName": "X", "team": "ORDER"}], 333.0)   # 裸列表形态
+    r3 = _json.loads((probe_dir / "runes_probe.jsonl").read_text(
+        encoding="utf-8").splitlines()[2])
+    check("on_allgamedata 兼容裸玩家列表",
+          r3.get("src") == "allgamedata"
+          and r3["players"][0]["champion"] == "X", str(r3))
+
+    # 功能性断言：探针抛异常时 _poll_once 仍正常返回快照（两路喂点都被
+    # 炸过且都被吞掉——证明隔离靠 try/except，不是探针没被调）
+    class _BoomProbe:
+        def __init__(self):
+            self.calls = []
+
+        def on_playerlist(self, players, ts):
+            self.calls.append("playerlist")
+            raise RuntimeError("boom")
+
+        def on_allgamedata(self, players, ts):
+            self.calls.append("allgamedata")
+            raise RuntimeError("boom")
+
+    boom = _BoomProbe()
+    poller = LivePoller(kb, runes_probe=boom)
+    fake = {
+        "/activeplayer": {"championName": "Annie", "currentGold": 100.0,
+                          "level": 6},
+        "/playerlist": [
+            {"championName": "曙光女神", "team": "ORDER"},
+            {"championName": "Annie", "team": "CHAOS"}],
+        "/eventdata": {"events": []},
+        "/liveclientdata/allgamedata": {"allPlayers": [
+            {"championName": "Annie", "team": "CHAOS"}]},
+    }
+    poller._get_json = lambda endpoint: fake.get(endpoint)  # monkeypatch 断网
+    poller._agd_tick = 5        # 本帧即触发低频 allgamedata 路径（第 6 周期）
+    snap = poller._poll_once()
+    check("探针两路喂点均被调用且异常被吞", boom.calls == ["playerlist",
+          "allgamedata"], str(boom.calls))
+    check("探针炸不影响快照主链", snap is not None and snap.ok
+          and len(snap.players) == 2 and snap.my_champion == "黑暗之女",
+          f"snap={snap and (snap.ok, len(snap.players), snap.my_champion)}")
+    check("allgamedata 低频计数归零重计", poller._agd_tick == 0,
+          str(poller._agd_tick))
+
+    # summarize 脚本对样例 JSONL exit 0（纯 stdlib，无网络）
+    script = (Path(__file__).resolve().parent.parent / "experiments"
+              / "summarize_runes_probe.py")
+    proc = _sp.run(
+        [sys.executable, str(script), str(probe_dir / "runes_probe.jsonl")],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        env={**_os.environ, "PYTHONIOENCODING": "utf-8"})
+    check("summarize 对样例 JSONL exit 0",
+          proc.returncode == 0 and "playerlist" in (proc.stdout or "")
+          and "allgamedata" in (proc.stdout or ""),
+          f"rc={proc.returncode} out={(proc.stdout or '')[:200]} "
+          f"err={(proc.stderr or '')[:200]}")
 
 
 # ── 5. 画面检测状态机 / 坐标 / 记账映射（纯逻辑，离线） ──────────
@@ -2696,27 +2821,44 @@ def test_mouse_ledger_hook():
     选卡点击整次漏掉（两局 7 轮选卡零记账、所有捕获点击均在 OCR 空闲期
     的定向证据）。改 WH_MOUSE_LL 低级钩子：系统投递事件，回调只做
     非阻塞投队列（慢回调会拖慢全系统鼠标，游戏内不可接受），处理线程
-    消费路由。断言：钩子安装成功、队列→路由端到端、stop 干净退出。"""
+    消费路由。断言：钩子安装成功、队列→路由端到端、stop 干净退出。
+
+    2026-10-13 加固（门禁误报案，clicks_20261013_151845.txt 实证）：
+    LL 钩子与捕获子进程都是全机的，本测试窗口期内屏幕上任何真实左键
+    点击（用户/其他程序，含 GetAsyncKeyState LSB 启动沿收编的近端按压
+    ——ready+21ms 落一条点击行）都会经钩子入队并被正确路由进 got。
+    真实点击被记账 = 记账链工作正常，不是缺陷；原断言 len(got)==2 把
+    "窗口期全机无左键点击"这个测试管不住的环境条件也当成了失败条件。
+    改为按 (事件, x, y, ts) 精确配对注入事件 + 保序——顺带把 ts 透传
+    也纳入断言（原版未验）。"""
     print("\n[11d] 点击捕获 v2（LL 钩子）")
     got = []
     ml = MouseLedger(
-        on_click=lambda x, y, ts=None: got.append(("click", x, y)),
-        on_reroll=lambda x, y, ts=None: got.append(("reroll", x, y)),
+        on_click=lambda x, y, ts=None: got.append(("click", x, y, ts)),
+        on_reroll=lambda x, y, ts=None: got.append(("reroll", x, y, ts)),
         reroll_rect_provider=lambda: [[900, 600, 100, 80]])
     ml.start()
     try:
         time.sleep(0.5)
         check("LL 钩子安装成功", ml.mode == "hook" and ml.is_alive(),
               f"mode={ml.mode}")
-        # 模拟钩子投递 → 处理线程路由端到端（v3 队列带来源标记）
-        ml._queue.put(("hook", 940, 640, time.time()))    # reroll 矩形
-        ml._queue.put(("hook", 100, 100, time.time()))    # 矩形外
+        # 模拟钩子投递 → 处理线程路由端到端（v3 队列带来源标记）。
+        # 注入事件带精确 ts：回调原样透传（_route 不改值），据此配对，
+        # 窗口期混入的真实点击条目不参与判定
+        ts_reroll = time.time()
+        ml._queue.put(("hook", 940, 640, ts_reroll))      # reroll 矩形
+        ts_click = time.time()
+        ml._queue.put(("hook", 100, 100, ts_click))       # 矩形外
+        want = (("reroll", 940, 640, ts_reroll),
+                ("click", 100, 100, ts_click))
         deadline = time.time() + 3
-        while len(got) < 2 and time.time() < deadline:
+        while not all(w in got for w in want) and time.time() < deadline:
             time.sleep(0.01)
-        check("队列→路由端到端（reroll 命中/on_click 透传）",
-              len(got) == 2 and got[0][0] == "reroll" and got[1][0] == "click",
-              str(got))
+        # 单处理线程 FIFO：注入的两条必须按入队顺序到达回调（reroll 先
+        # 于 click）；真实点击的条目夹在中间不影响结论
+        ok = all(w in got for w in want) \
+            and got.index(want[0]) < got.index(want[1])
+        check("队列→路由端到端（reroll 命中/on_click 透传）", ok, str(got))
     finally:
         ml.stop()
         ml.join(timeout=3)
@@ -2971,16 +3113,27 @@ def test_input_instrument_kit():
         ret = ml._hook_proc(HC_ACTION, WM_MOUSEMOVE, 0)
         check("移动事件计入全事件数（不入队不路由）",
               isinstance(ret, int) and ml._event_count == 1 and not got)
-        # ② 右键/中键/侧键：限频留痕、不入队（排除非左键选卡解释）
+        # ② 右键/中键/侧键：限频留痕投队列、不入账（排除非左键选卡解释）。
+        #    20261013 改：回调在系统鼠标路径上，print 的控制台锁阻塞会拖慢
+        #    全系统鼠标——留痕改投 ("log", 文案) 由处理线程打
         ev = _MSLLHOOKSTRUCT()
         ev.pt.x, ev.pt.y, ev.flags = 941, 395, LLMHF_INJECTED
         ml._hook_proc(HC_ACTION, WM_RBUTTONDOWN, _ct.addressof(ev))
         ml._btn_log_ts = 0.0   # 限频重置：下一条不受 2s 窗抑制
         ml._hook_proc(HC_ACTION, WM_MBUTTONDOWN, _ct.addressof(ev))
-        check("非左键按键留痕（含注入标记、不入队）",
-              "按键 RB (941,395) 注入" in buf.getvalue()
-              and "按键 MB" in buf.getvalue() and not got
-              and ml._event_count == 3)
+        import queue as _q
+        notes = []
+        try:
+            while True:
+                item = ml._queue.get_nowait()
+                if item[0] == "log":
+                    notes.append(item[1])
+        except _q.Empty:
+            pass
+        check("非左键按键留痕（含注入标记、投队列由处理线程打）",
+              any("按键 RB (941,395) 注入" in n for n in notes)
+              and any("按键 MB" in n for n in notes) and not got
+              and ml._event_count == 3, str(notes))
         # ③ 统计窗：事件数进汇总行与历史记录
         ml._stat_ts -= 61.0
         buf2 = io.StringIO()
@@ -3382,6 +3535,165 @@ def test_ui_design_system():
           titles[:60])
 
 
+def test_stability_batch():
+    """稳定性批修回归（20261013 全项目盘点案）。样板是 is_elevated 的
+    wt NameError：探针函数引用未定义名，NameError 被外层 except 吞成
+    恒 False——旧断言 isinstance(bool) 测不出。本批对"恒返回默认值"类
+    bug 一律补调用链/源级断言；同批含 C1 描述贯通 System2 与 C2 刷新
+    数据按钮接线。"""
+    print("\n[16] 稳定性批修（盘点 20261013）")
+    import inspect
+    import json as _json
+    import threading as _threading
+
+    root = Path(__file__).resolve().parent.parent
+
+    def src_of(rel):
+        return (root / rel).read_text(encoding="utf-8")
+
+    # 1) is_elevated 未定义名（恒 False 回归：提权重启成功也报 WARN）
+    from hexa.core import mouse_ledger
+    fn_src = inspect.getsource(mouse_ledger.is_elevated)
+    check("is_elevated 无未定义 wt 引用（恒 False 回归）",
+          "wt." not in fn_src and "ctypes.wintypes." in fn_src)
+    check("is_elevated 探针可用（返回布尔）",
+          isinstance(mouse_ledger.is_elevated(), bool))
+
+    # 2) LivePoller 单帧异常不杀轮询线程（脏数据 → 300s 误判终局回归）
+    poller = LivePoller(kb, summoner_name_fn=lambda: "")
+    poller.POLL_INTERVAL = 0.01
+    hits = []
+
+    def _boom_poll():
+        hits.append(1)
+        if len(hits) >= 3:
+            poller._running = False
+        raise RuntimeError("脏字段")
+
+    poller._poll_once = _boom_poll
+    poller._in_game.set()
+    t = _threading.Thread(target=poller.run, daemon=True)
+    t.start()
+    t.join(timeout=10)
+    check("Live 轮询单帧异常不杀线程（3 连炸后仍按需退出）",
+          not t.is_alive() and len(hits) >= 3, f"hits={len(hits)}")
+
+    # 3) overlay 刷新链防断（try/finally 续约，同主窗口 _poll_ui 口径）
+    ov_src = src_of("hexa/ui/overlay.py")
+    check("overlay _refresh 异常不冒出且 finally 续约",
+          "def _refresh_once" in ov_src
+          and "finally:\n            self.win.after(500, self._refresh)" in ov_src)
+
+    # 4) settings 原子写 + 损坏备份（截断 → 配置蒸发回归）
+    from hexa.config import DEFAULTS, Settings
+    sdir = _SMOKE_BASE / "cfg_stability"
+    sdir.mkdir(parents=True, exist_ok=True)
+    sp = sdir / "settings.json"
+    st = Settings(sp)
+    st.set("ai", "enabled", True)
+    check("settings 原子写（无 .tmp 残留）",
+          sp.exists() and not sp.with_suffix(".json.tmp").exists())
+    check("settings 写读一致",
+          _json.loads(sp.read_text(encoding="utf-8"))["ai"]["enabled"] is True)
+    sp.write_text("{broken", encoding="utf-8")
+    st2 = Settings(sp)
+    check("损坏 settings 备份为 .bak（配置可救）",
+          sp.with_suffix(".json.bak").exists())
+    check("损坏 settings 回退默认不崩",
+          st2.get("ai", "enabled", default=False) is False)
+
+    # 5) DEFAULTS 漂移键补齐（settings 全删重建后配置面不散落硬编码）
+    check("DEFAULTS 补齐 ai.min_interval（成本守门 20s）",
+          DEFAULTS["ai"].get("min_interval") == 20)
+    check("DEFAULTS 补齐 fallback_model 两槽位",
+          DEFAULTS["system1"].get("fallback_model") == ""
+          and DEFAULTS["system2"].get("fallback_model") == "")
+    check("DEFAULTS 补齐 diagnostics 开关",
+          DEFAULTS["diagnostics"].get("elevate_auto") is True
+          and DEFAULTS["diagnostics"].get("click_capture") is True)
+
+    # 6) kb 损坏 JSON 不崩启动（champions/pinyin 降级为空）
+    kdd = _SMOKE_BASE / "kb_corrupt_d"
+    kdd.mkdir(parents=True, exist_ok=True)
+    (kdd / "champions.json").write_text("{bad", encoding="utf-8")
+    (kdd / "pinyin_map.json").write_text("[bad", encoding="utf-8")
+    kb3 = KnowledgeBase(data_dir=kdd,
+                        know_dir=_SMOKE_BASE / "kb_corrupt_k")
+    check("kb 损坏 champions/pinyin 降级不崩启动",
+          kb3.cn_to_en == {} and kb3.en_to_cn == {})
+
+    # 7) OCR 初始化失败可重试（原 available=False 永不恢复回归）
+    from hexa.core.ocr_engine import OcrEngine
+    oe = OcrEngine(kb)
+    boom_n = []
+
+    def _boom_ocr():
+        boom_n.append(1)
+        raise RuntimeError("init fake fail")
+
+    oe._get_ocr = _boom_ocr
+    probe = object()
+    check("OCR 初始化失败首帧降级且不改 available",
+          oe.recognize(probe) == [] and oe.available and oe._init_fail_ts > 0)
+    oe.recognize(probe)
+    check("OCR 退避期内不重复初始化", len(boom_n) == 1)
+    oe._init_fail_ts -= OcrEngine.INIT_RETRY_INTERVAL + 1
+
+    def _fake_ocr(img):
+        result = [([[0, 0], [5, 0], [5, 5], [0, 5]], "测试文本", 0.9)]
+        return result, None
+
+    oe._get_ocr = lambda: _fake_ocr
+    out = oe.recognize(probe)
+    check("OCR 退避期满自动重试恢复", len(out) == 1 and out[0][0] == "测试文本"
+          and len(boom_n) == 1)
+
+    # 8) 钩子回调零 print（系统鼠标路径不碰控制台锁）
+    ml_src = src_of("hexa/core/mouse_ledger.py")
+    hp = ml_src[ml_src.index("def _hook_proc"):ml_src.index("def _run_hook")]
+    check("钩子回调不再 print（留痕投队列由处理线程打）",
+          "print(" not in hp and '("log",' in hp)
+    check("处理线程识别 log 投递",
+          'item[0] == "log"' in ml_src)
+
+    # 9) lcu lockfile 句柄 with 关闭
+    check("lcu lockfile 句柄 with 关闭",
+          "with open(lockfile)" in src_of("hexa/core/lcu.py"))
+
+    # 10) C1 卡面描述贯通 System2 候选名单（隔离目录防污染真实知识库）
+    from hexa.ai import system2 as _s2
+    kd2 = _SMOKE_BASE / "s2desc_d"
+    kk2 = _SMOKE_BASE / "s2desc_k"
+    kd2.mkdir(parents=True, exist_ok=True)
+    kk2.mkdir(parents=True, exist_ok=True)
+    shutil.copy(kb.data_dir / "hero_augments.csv", kd2 / "hero_augments.csv")
+    kb2 = KnowledgeBase(data_dir=kd2, know_dir=kk2)
+    hero_cn = next((h for h, m in kb2.hero_augments.items() if m), "")
+    check("C1 前置：先验英雄可用", bool(hero_cn), hero_cn)
+    a0 = kb2.top_augments(hero_cn, 1)[0]
+    kb2.record_augment_desc(a0, "测试描述原文：技能花费返还加强效果")
+    out_line = _s2._fmt_augments(kb2, hero_cn)
+    check("C1 卡面描述进 System2 候选名单（原文: 前缀）",
+          "原文:测试描述原文" in out_line, out_line[:80])
+    # 同一海克斯可出现在多英雄先验里，按"条目段"断言：只有已录描述的
+    # a0 条目带原文段，其余条目不带
+    segs = out_line.split("；")
+    check("C1 仅已录描述条目带原文段",
+          all("原文:" in s for s in segs if s.startswith(a0 + "（"))
+          and all("原文:" not in s for s in segs if not s.startswith(a0 + "（")),
+          out_line[:100])
+
+    # 11) C2 刷新数据按钮接线（主窗口按钮 + app 后台脚本链）
+    mw_src = src_of("hexa/ui/main_window.py")
+    app_src = src_of("app.py")
+    check("C2 刷新数据按钮接线",
+          "on_refresh_data" in mw_src and "刷新数据" in mw_src
+          and "_on_refresh_data" in mw_src
+          and "_start_data_refresh" in app_src
+          and "fetch_opgg_builds" in app_src
+          and "gen_champ_profile" in app_src)
+
+
 # ── main ─────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -3391,6 +3703,7 @@ if __name__ == "__main__":
     test_engine_late_start_net()
     test_phase_machine()
     test_live_me_match()
+    test_runes_probe()
     test_detect_and_layout()
     test_ai_engine()
     test_ai_build_pool()
@@ -3411,6 +3724,7 @@ if __name__ == "__main__":
     test_thinking_params()
     test_click_diag_and_tee()
     test_click_blackbox()
+    test_stability_batch()
     test_ui_design_system()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:

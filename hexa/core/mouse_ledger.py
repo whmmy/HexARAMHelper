@@ -168,12 +168,12 @@ def is_elevated() -> bool:
         if not h:
             return False
         try:
-            tok = wt.HANDLE()
+            tok = ctypes.wintypes.HANDLE()
             if not _a32.OpenProcessToken(h, _TOKEN_QUERY, ctypes.byref(tok)):
                 return False
             try:
-                elev = wt.DWORD(0)
-                ret_len = wt.DWORD(0)
+                elev = ctypes.wintypes.DWORD(0)
+                ret_len = ctypes.wintypes.DWORD(0)
                 if not _a32.GetTokenInformation(
                         tok, _TOKEN_ELEVATION, ctypes.byref(elev),
                         ctypes.sizeof(elev), ctypes.byref(ret_len)):
@@ -451,17 +451,21 @@ class MouseLedger(threading.Thread):
                 # 键消失"。移动事件游戏内恒流，本计数归零即钩子没跑。
                 self._event_count += 1
                 btn = _BUTTON_NAMES.get(w_param)
-                if btn is not None:
-                    # 所有按键按下沿（含右/中/侧键）限频留痕：排除"用户
-                    # 用非左键选卡/驱动重映射"这类最后的平凡解释
+                if btn is not None and w_param != WM_LBUTTONDOWN:
+                    # 非左键按下沿限频留痕（排除"用户用非左键选卡/驱动
+                    # 重映射"这类最后的平凡解释）；左键沿由 60s 边沿汇总
+                    # 统计承担，不逐条入队。留痕文案投队列由处理线程打：
+                    # 回调在系统鼠标路径上，print 的控制台锁阻塞会拖慢
+                    # 全系统鼠标
                     pt = ctypes.cast(
                         l_param, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents
                     now = time.monotonic()
                     if now - self._btn_log_ts >= 2.0:
                         self._btn_log_ts = now
                         inj = " 注入" if pt.flags & LLMHF_INJECTED else ""
-                        print(f"[MOUSE] 按键 {btn} ({pt.pt.x},{pt.pt.y})"
-                              f"{inj}")
+                        self._queue.put_nowait(
+                            ("log", f"[MOUSE] 按键 {btn} ({pt.pt.x},{pt.pt.y})"
+                                    f"{inj}"))
                 if w_param == WM_LBUTTONDOWN:
                     p = ctypes.cast(
                         l_param, ctypes.POINTER(_MSLLHOOKSTRUCT)).contents.pt
@@ -645,11 +649,18 @@ class MouseLedger(threading.Thread):
     def _process_loop(self):
         while self._running:
             try:
-                src, x, y, ts = self._queue.get(timeout=0.5)
+                item = self._queue.get(timeout=0.5)
             except queue.Empty:
                 self._maybe_report_edges(time.monotonic())
                 continue
-            self._feed(src, x, y, ts)
+            if item[0] == "log":
+                # 钩子回调投回的留痕文案：由处理线程打——回调在系统鼠标
+                # 路径上执行，print 遇控制台阻塞会拖慢全系统鼠标（与
+                # "回调只允许非阻塞 O(1) 投递"的自述一致化）
+                print(item[1])
+                continue
+            _, x, y, ts = item
+            self._feed(item[0], x, y, ts)
 
     # ── 回退轮询（钩子安装失败时） ────────────────────────────────
 

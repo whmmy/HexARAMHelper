@@ -90,6 +90,8 @@ class Overlay:
         self._coach_shown = False
         self._ai_shown = False
         self._forecast_shown = False
+        self._last_err = None         # 刷新异常签名（60s 限频去重）
+        self._last_err_ts = 0.0
         self.win = tk.Toplevel(root)
         self.win.withdraw()
         self._setup_window()
@@ -294,6 +296,23 @@ class Overlay:
     # ── 刷新（UI 线程 after 轮询 session 快照） ────────────────────
 
     def _refresh(self):
+        # 异常不冒出（同主窗口 _poll_ui 的教训）：异常逃出会让本 after 链
+        # 不再续约，浮窗内容永久冻结（F10 显隐走 ui_queue 仍活着，形成
+        # "能开关但内容不更新"的隐性坏死）。持续异常按 60s 限频记日志。
+        try:
+            self._refresh_once()
+        except Exception as e:
+            sig = repr(e)
+            now = time.monotonic()
+            if sig != self._last_err or now - self._last_err_ts >= 60:
+                self._last_err = sig
+                self._last_err_ts = now
+                print(f"[ERR] overlay 刷新异常（下一帧自动恢复）: "
+                      f"{type(e).__name__}: {e}")
+        finally:
+            self.win.after(500, self._refresh)
+
+    def _refresh_once(self):
         P = Palette
         state = self.session.ui_state()
         stage = state["stage"]
@@ -319,7 +338,6 @@ class Overlay:
         self._render_ai_busy(state.get("engine") or {})
         self._render_moment(state)
         self._fit_height()
-        self.win.after(500, self._refresh)
 
     def _snap_to_content(self):
         """首帧贴内容：build 完直接量所需高度，避免先撑 560 再收缩的跳变。"""

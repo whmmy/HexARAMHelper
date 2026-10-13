@@ -233,6 +233,15 @@ class GameSession:
             self._log("in_progress")
             if self.live:
                 self.live.enter_game()
+                # 海克斯落库探针与 enter_game 同点开新局（局号 +1）：
+                # 20261013 §6 复核接线——探针属诊断件，new_game 炸了也
+                # 不能影响 enter_game 主链，这里只防调用本身
+                probe = getattr(self.live, "runes_probe", None)
+                if probe is not None:
+                    try:
+                        probe.new_game()
+                    except Exception as e:  # noqa: BLE001
+                        print(f"[WARN] runes 探针 new_game 异常: {e}")
 
     def on_end_of_game(self, reason):
         with self._lock:

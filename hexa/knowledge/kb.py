@@ -201,18 +201,24 @@ class KnowledgeBase:
     def _load_champions(self):
         path = self.data_dir / "champions.json"
         if path.exists():
-            self.cn_to_en = json.loads(path.read_text(encoding="utf-8"))
-            self.en_to_cn = {en.lower(): cn for cn, en in self.cn_to_en.items()}
+            try:
+                self.cn_to_en = json.loads(path.read_text(encoding="utf-8"))
+                self.en_to_cn = {en.lower(): cn for cn, en in self.cn_to_en.items()}
+            except Exception as e:  # noqa: BLE001 —— 文件损坏不崩启动
+                print(f"[WARN] champions.json 读取失败（中英映射降级）: {e}")
 
     def _load_pinyin(self):
         path = self.data_dir / "pinyin_map.json"
         if path.exists():
-            data = json.loads(path.read_text(encoding="utf-8"))
-            for cn, py in data.items():
-                if cn not in self.pinyin_map[py]:
-                    self.pinyin_map[py].append(cn)
-                if cn not in self.pinyin_map[cn]:
-                    self.pinyin_map[cn].append(cn)
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                for cn, py in data.items():
+                    if cn not in self.pinyin_map[py]:
+                        self.pinyin_map[py].append(cn)
+                    if cn not in self.pinyin_map[cn]:
+                        self.pinyin_map[cn].append(cn)
+            except Exception as e:  # noqa: BLE001 —— 文件损坏不崩启动
+                print(f"[WARN] pinyin_map.json 读取失败（拼音兜底降级）: {e}")
 
     def _load_knowledge(self):
         path = self.know_dir / "champ_damage_profile.json"
