@@ -1,8 +1,8 @@
 {
  "slug": "kassadin",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kassadin/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "爆裂魔杖",
@@ -42,15 +42,15 @@
    "巫妖之祸"
   ],
   [
-   "女神之泪",
-   "时光之杖",
-   "炽天使之拥",
-   "中娅沙漏"
-  ],
-  [
    "时光之杖",
    "炽天使之拥",
    "残疫"
+  ],
+  [
+   "女神之泪",
+   "残疫",
+   "炽天使之拥",
+   "影焰"
   ]
  ],
  "skill_orders": [

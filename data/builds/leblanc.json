@@ -1,8 +1,8 @@
 {
  "slug": "leblanc",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/leblanc/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "复用型药水",
@@ -17,7 +17,7 @@
    "法师之靴"
   ],
   [
-   "明朗之靴"
+   "水银之靴"
   ]
  ],
  "core_builds": [
@@ -84,15 +84,15 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "W",
    "W",
    "R",
    "W",
    "Q",
-   "W",
    "Q",
+   "W",
    "R",
    "Q",
    "Q",

@@ -1,8 +1,8 @@
 {
  "slug": "zyra",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/zyra/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "复用型药水",
@@ -67,19 +67,19 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ],
   [
@@ -92,9 +92,9 @@
    "Q",
    "E",
    "Q",
-   "W",
-   "R",
    "E",
+   "R",
+   "W",
    "E",
    "E",
    "W"

@@ -1,8 +1,8 @@
 {
  "slug": "blitzcrank",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/blitzcrank/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "巨人腰带",
@@ -35,15 +35,14 @@
    "狂徒铠甲"
   ],
   [
-   "女神之泪",
-   "心之钢",
    "末日寒冬",
+   "败魔",
    "荆棘之甲"
   ],
   [
-   "残疫",
-   "风暴狂涌",
-   "灭世者的死亡之帽"
+   "末日寒冬",
+   "狂徒铠甲",
+   "败魔"
   ],
   [
    "女神之泪",

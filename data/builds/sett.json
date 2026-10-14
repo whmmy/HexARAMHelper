@@ -1,8 +1,8 @@
 {
  "slug": "sett",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/sett/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "巨人腰带",
@@ -44,9 +44,9 @@
    "霸王血铠"
   ],
   [
+   "心之钢",
    "挺进破坏者",
-   "霸王血铠",
-   "狂徒铠甲"
+   "霸王血铠"
   ]
  ],
  "skill_orders": [
@@ -86,15 +86,15 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "W",
    "W",
    "R",
    "W",
    "Q",
-   "Q",
    "W",
+   "Q",
    "R",
    "Q",
    "Q",

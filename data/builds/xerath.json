@@ -1,8 +1,8 @@
 {
  "slug": "xerath",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/xerath/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "复用型药水",
@@ -67,8 +67,8 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
@@ -78,8 +78,8 @@
    "W",
    "R",
    "W",
-   "W",
    "E",
+   "W",
    "E"
   ],
   [
@@ -90,11 +90,11 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "W",
    "R",
-   "W",
+   "E",
    "W",
    "W",
    "E"

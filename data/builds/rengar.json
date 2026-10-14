@@ -1,8 +1,8 @@
 {
  "slug": "rengar",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/rengar/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "长剑",
@@ -42,9 +42,10 @@
    "亵渎九头蛇"
   ],
   [
-   "收集者",
+   "锯齿短匕",
    "狂妄",
-   "电震涡流剑"
+   "收集者",
+   "多米尼克领主的致意"
   ],
   [
    "锯齿短匕",
@@ -98,10 +99,10 @@
    "Q",
    "W",
    "Q",
-   "W",
+   "E",
    "R",
    "W",
-   "E",
+   "W",
    "W",
    "E"
   ]

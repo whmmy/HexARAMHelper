@@ -1,8 +1,8 @@
 {
  "slug": "samira",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/samira/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "鞋子",
@@ -25,13 +25,13 @@
  "core_builds": [
   [
    "收集者",
-   "不朽盾弓",
-   "无尽之刃"
+   "无尽之刃",
+   "多米尼克领主的致意"
   ],
   [
    "收集者",
-   "无尽之刃",
-   "多米尼克领主的致意"
+   "不朽盾弓",
+   "无尽之刃"
   ],
   [
    "收集者",
@@ -95,10 +95,10 @@
    "Q",
    "E",
    "Q",
-   "E",
+   "W",
    "R",
    "E",
-   "W",
+   "E",
    "E",
    "W"
   ]

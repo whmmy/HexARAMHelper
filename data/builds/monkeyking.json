@@ -1,8 +1,8 @@
 {
  "slug": "monkeyking",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/monkeyking/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "掘道钻头",
@@ -34,18 +34,18 @@
   ],
   [
    "三相之力",
-   "焚天",
-   "黑色切割者"
-  ],
-  [
-   "焚天",
    "黑色切割者",
    "死亡之舞"
   ],
   [
-   "星蚀",
    "焚天",
-   "死亡之舞"
+   "死亡之舞",
+   "黑色切割者"
+  ],
+  [
+   "焚天",
+   "三相之力",
+   "玛莫提乌斯之噬"
   ]
  ],
  "skill_orders": [

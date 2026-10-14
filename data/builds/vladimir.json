@@ -1,8 +1,8 @@
 {
  "slug": "vladimir",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/vladimir/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "生命药水",
@@ -38,14 +38,14 @@
    "灭世者的死亡之帽"
   ],
   [
-   "海克斯科技火箭腰带",
+   "星界驱驰",
    "裂隙制造者",
-   "星界驱驰"
+   "灭世者的死亡之帽"
   ],
   [
-   "海克斯科技火箭腰带",
-   "影焰",
-   "灭世者的死亡之帽"
+   "裂隙制造者",
+   "星界驱驰",
+   "兰德里的折磨"
   ]
  ],
  "skill_orders": [

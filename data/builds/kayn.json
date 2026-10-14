@@ -1,8 +1,8 @@
 {
  "slug": "kayn",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kayn/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "长剑",
@@ -43,12 +43,12 @@
    "锯齿短匕",
    "狂妄",
    "星蚀",
-   "魔切"
+   "收集者"
   ],
   [
-   "星蚀",
+   "焚天",
    "黑色切割者",
-   "振奋盔甲"
+   "死亡之舞"
   ]
  ],
  "skill_orders": [
@@ -81,8 +81,8 @@
    "Q",
    "W",
    "R",
-   "E",
    "W",
+   "E",
    "W",
    "E"
   ],
@@ -96,10 +96,10 @@
    "Q",
    "W",
    "Q",
-   "W",
+   "E",
    "R",
    "W",
-   "E",
+   "W",
    "W",
    "E"
   ]

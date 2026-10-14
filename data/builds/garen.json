@@ -1,8 +1,8 @@
 {
  "slug": "garen",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/garen/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "鞋子",
@@ -39,13 +39,13 @@
   ],
   [
    "挺进破坏者",
-   "黑色切割者",
-   "亡者的板甲"
+   "幻影之舞",
+   "黑色切割者"
   ],
   [
    "挺进破坏者",
-   "幻影之舞",
-   "黑色切割者"
+   "黑色切割者",
+   "亡者的板甲"
   ]
  ],
  "skill_orders": [

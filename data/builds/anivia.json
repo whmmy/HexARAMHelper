@@ -1,8 +1,8 @@
 {
  "slug": "anivia",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/anivia/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "爆裂魔杖",
@@ -48,9 +48,9 @@
   ],
   [
    "女神之泪",
-   "残疫",
+   "时光之杖",
    "炽天使之拥",
-   "兰德里的折磨"
+   "灭世者的死亡之帽"
   ]
  ],
  "skill_orders": [

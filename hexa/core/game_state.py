@@ -212,9 +212,23 @@ class GameSession:
         with self._lock:
             # 上一局终局事件丢失（直接开局/秒退跳过 EndOfGame）时补写复盘
             self.flush_pending_review()
+            # 选人期锚（localPlayerCellId，reset 前抢救）；仅选人阶段可信，
+            # 终局被跳过的换局（InProgress 直落 GameStart）此刻还挂着上一局
+            # 的英雄，不能当本局选人锚
+            cs_hero = self.my_hero if self.stage == "champ_select" else None
             self.reset()
             self.stage = "game_start"
-            self.my_hero = self.kb.validate_hero(teams.get("my_hero") or "") or self.my_hero
+            gf_hero = self.kb.validate_hero(teams.get("my_hero") or "")
+            if cs_hero and gf_hero and gf_hero != cs_hero:
+                # 20261013 艾希案：国服 gameflow 的 summonerId 匹配把队友认成
+                # 自己（me=虚空恐惧），覆盖了选人期已锁定的寒冰射手。选人期锚
+                # 来自 localPlayerCellId——身份直指本地玩家，冲突时以它为准，
+                # gameflow 仅作缺失兜底（中途启动没有选人期时仍走它）。
+                self._log("hero_anchor_conflict",
+                          f"gameflow={gf_hero} champ_select={cs_hero}"
+                          f" → keep {cs_hero}")
+                gf_hero = cs_hero
+            self.my_hero = gf_hero or cs_hero
             self.ally = [c for c in teams.get("ally", []) if self.kb.validate_hero(c)]
             self.enemy = [c for c in teams.get("enemy", []) if self.kb.validate_hero(c)]
             self.game_map = str(teams.get("map_id") or self.game_map)
@@ -286,20 +300,34 @@ class GameSession:
             if self.stage not in ("in_game", "game_start"):
                 return
             self._last_data_ts = time.time()   # 快照到位 = 数据流活着
-            # 我的英雄兜底（LCU 断连时 live 仍可跟随）
-            if not self.my_hero and snap.my_champion:
+            # 我的英雄跟随 live（正运行对局的真值）：未定时补齐（中途启动/
+            # 断连恢复）；与 live 正面冲突时改锚（LCU 侧锚错英雄的自愈通道）
+            if snap.my_champion:
                 validated = self.kb.validate_hero(snap.my_champion)
-                if validated:
-                    self.my_hero = validated
-                    # 中途启动（重启/断连恢复）未经历 game_start：
-                    # 快照补齐阵容并补 start_game，否则引擎空转建议为空
-                    self.ally = [p.champion for p in snap.allies()
-                                 if p.champion and p.champion != validated]
-                    self.enemy = [p.champion for p in snap.enemies()
-                                  if p.champion]
-                    self._log("hero_late_detected",
-                              f"me={validated} ally={len(self.ally)} "
-                              f"enemy={len(self.enemy)}")
+                if validated and validated != self.my_hero:
+                    if self.my_hero:
+                        # 20261013 艾希案：game_start 锚成虚空恐惧后整局不
+                        # 修正——live API 按召唤师名定位是身份级事实，冲突
+                        # 即改锚（台账/装备本就按 live 匹配者记账，只差英雄
+                        # 指针）；阵容名单本身没错，不重建，只换锚。
+                        self._log("hero_reanchored",
+                                  f"{self.my_hero} -> {validated}")
+                        self.my_hero = validated
+                        # 旧英雄的军师上下文作废；建议签名清空迫使下一帧
+                        # 例行重算（sig 不含英雄，不清会挂着错误出装不放）
+                        self._set_coach_context(clear=True)
+                        self._last_sig = None
+                    else:
+                        # 中途启动（重启/断连恢复）未经历 game_start：
+                        # 快照补齐阵容并补 start_game，否则引擎空转建议为空
+                        self.my_hero = validated
+                        self.ally = [p.champion for p in snap.allies()
+                                     if p.champion and p.champion != validated]
+                        self.enemy = [p.champion for p in snap.enemies()
+                                      if p.champion]
+                        self._log("hero_late_detected",
+                                  f"me={validated} ally={len(self.ally)} "
+                                  f"enemy={len(self.enemy)}")
                     late_start = (self.engine, validated,
                                   list(self.ally), list(self.enemy),
                                   self.game_map)

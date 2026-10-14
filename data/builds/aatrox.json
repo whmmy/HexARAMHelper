@@ -1,8 +1,8 @@
 {
  "slug": "aatrox",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/aatrox/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "鞋子",
@@ -33,6 +33,11 @@
    "死亡之舞"
   ],
   [
+   "焚天",
+   "死亡之舞",
+   "振奋盔甲"
+  ],
+  [
    "锯齿短匕",
    "狂妄",
    "焚天",
@@ -42,11 +47,6 @@
    "焚天",
    "朔极之矛",
    "死亡之舞"
-  ],
-  [
-   "星蚀",
-   "焚天",
-   "振奋盔甲"
   ]
  ],
  "skill_orders": [

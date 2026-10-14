@@ -1,8 +1,8 @@
 {
  "slug": "jax",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/jax/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "鞋子",
@@ -45,8 +45,8 @@
   ],
   [
    "三相之力",
-   "焚天",
-   "朔极之矛"
+   "破败王者之刃",
+   "死亡之舞"
   ]
  ],
  "skill_orders": [
@@ -75,12 +75,12 @@
    "W",
    "R",
    "W",
-   "E",
+   "Q",
    "W",
    "Q",
    "R",
    "Q",
-   "Q",
+   "E",
    "Q",
    "E"
   ],
@@ -96,8 +96,8 @@
    "W",
    "Q",
    "R",
-   "Q",
    "E",
+   "Q",
    "Q",
    "E"
   ]

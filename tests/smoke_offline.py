@@ -740,6 +740,67 @@ def test_engine_late_start_net():
 
 
 
+# ── 3.6 英雄锚定冲突自愈（20261013 艾希案） ───────────────────────
+
+def test_hero_anchor_conflict():
+    """2026-10-13 艾希案：国服 gameflow 的 summonerId 匹配把队友认成自己，
+    game_start 锚成虚空恐惧并覆盖选人期已锁定的寒冰射手，整局不修正——
+    System2 生成坦克方案、复盘 hero=虚空恐惧；14s 后 Live API 已按召唤师名
+    定位出寒冰射手却因 my_hero 非空被忽略。双保险回归：
+    ①开局锚冲突保留选人期锚（localPlayerCellId 身份直指本地玩家）；
+    ②局内 Live API 正面识别与 my_hero 冲突时改锚并重启引擎（幂等）。"""
+    print("\n[3.6] 英雄锚定冲突自愈（艾希案）")
+
+    def recording(session):
+        calls = []
+
+        class RecordingEngine:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def start_game(self, hero, ally, enemy, game_map=""):
+                calls.append((hero, tuple(ally), tuple(enemy), game_map))
+                self._inner.start_game(hero, ally, enemy, game_map=game_map)
+
+            def __getattr__(self, name):
+                return getattr(self._inner, name)
+
+        session.engine = RecordingEngine(session.engine)
+        return calls
+
+    def events(session, name):
+        return [d for t, e, d in session.timeline if e == name]
+
+    # ①开局冲突：选人期锁寒冰射手，gameflow 报虚空恐惧 → 保留寒冰射手
+    s = GameSession(kb, rules)
+    calls = recording(s)
+    s.on_champ_select({"ally": ["寒冰射手"], "enemy": [],
+                       "my_hero": "寒冰射手", "source": "test"})
+    s.on_game_start({"ally": ["寒冰射手", "虚空恐惧"], "enemy": [],
+                     "my_hero": "虚空恐惧", "source": "test"})
+    check("开局锚冲突保留选人期英雄", s.my_hero == "寒冰射手", s.my_hero)
+    check("锚冲突留痕 timeline", bool(events(s, "hero_anchor_conflict")))
+    check("冲突局引擎按正确英雄开局",
+          bool(calls) and calls[0][0] == "寒冰射手", str(calls))
+
+    # ②局内改锚：选人期锚缺失（国服 cellId 也没拿到），gameflow 锚错英雄
+    s2 = GameSession(kb, rules)
+    calls2 = recording(s2)
+    s2.on_champ_select({"ally": [], "enemy": [], "my_hero": None,
+                        "source": "test"})
+    s2.on_game_start({"ally": ["寒冰射手", "虚空恐惧"], "enemy": [],
+                      "my_hero": "虚空恐惧", "source": "test"})
+    check("无选人锚时跟随 gameflow", s2.my_hero == "虚空恐惧", s2.my_hero)
+    s2.on_in_progress()
+    s2.on_snapshot(make_snap(my_hero_en="Ashe", my_items=[]))
+    check("live 冲突改锚", s2.my_hero == "寒冰射手", s2.my_hero)
+    check("改锚留痕 timeline", bool(events(s2, "hero_reanchored")))
+    check("改锚重启引擎", len(calls2) == 2 and calls2[1][0] == "寒冰射手",
+          str(calls2))
+    s2.on_snapshot(make_snap(my_hero_en="Ashe", my_items=[]))
+    check("改锚幂等不重开局", len(calls2) == 2, str(calls2))
+
+
 # ── 4. PhaseMachine ──────────────────────────────────────────────
 
 class FakeLCU:
@@ -4794,6 +4855,7 @@ if __name__ == "__main__":
     test_rules()
     test_session()
     test_engine_late_start_net()
+    test_hero_anchor_conflict()
     test_phase_machine()
     test_live_me_match()
     test_runes_probe()

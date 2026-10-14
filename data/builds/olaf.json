@@ -1,8 +1,8 @@
 {
  "slug": "olaf",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/olaf/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "复用型药水",
@@ -15,10 +15,10 @@
  ],
  "boots": [
   [
-   "铁板靴"
+   "水银之靴"
   ],
   [
-   "水银之靴"
+   "铁板靴"
   ]
  ],
  "core_builds": [
@@ -44,8 +44,8 @@
   ],
   [
    "挺进破坏者",
-   "海克斯注力刚壁",
-   "焚天"
+   "死亡之舞",
+   "振奋盔甲"
   ]
  ],
  "skill_orders": [
@@ -85,19 +85,19 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "Q",
    "Q",
    "R",
    "Q",
    "E",
    "Q",
-   "W",
+   "E",
    "R",
    "E",
    "E",
-   "E",
+   "W",
    "W"
   ]
  ],

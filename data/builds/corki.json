@@ -1,8 +1,8 @@
 {
  "slug": "corki",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/corki/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "生命药水",
@@ -48,8 +48,8 @@
   ],
   [
    "收集者",
-   "无尽之刃",
-   "多米尼克领主的致意"
+   "魔切",
+   "无尽之刃"
   ]
  ],
  "skill_orders": [

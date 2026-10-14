@@ -1,8 +1,8 @@
 {
  "slug": "kayle",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kayle/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "短剑",
@@ -46,7 +46,7 @@
   [
    "纳什之牙",
    "鬼索的狂暴之刃",
-   "智慧末刃"
+   "黄昏与黎明"
   ]
  ],
  "skill_orders": [
@@ -69,13 +69,13 @@
   ],
   [
    "Q",
-   "E",
    "W",
    "E",
+   "Q",
    "E",
    "R",
    "E",
-   "Q",
+   "E",
    "E",
    "Q",
    "R",
@@ -86,8 +86,8 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "E",
    "E",
    "R",
@@ -96,9 +96,9 @@
    "E",
    "Q",
    "R",
+   "Q",
+   "Q",
    "W",
-   "Q",
-   "Q",
    "W"
   ]
  ],

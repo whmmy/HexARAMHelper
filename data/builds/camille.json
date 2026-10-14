@@ -1,8 +1,8 @@
 {
  "slug": "camille",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/camille/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "长剑",
@@ -69,36 +69,36 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "Q",
    "Q",
    "R",
    "Q",
    "E",
    "Q",
-   "W",
+   "E",
    "R",
    "E",
    "E",
-   "E",
+   "W",
    "W"
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ]
  ],

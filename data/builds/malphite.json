@@ -1,8 +1,8 @@
 {
  "slug": "malphite",
- "fetched_at": "2026-09-29",
+ "fetched_at": "2026-10-13",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/malphite/build",
- "patch": "16.19",
+ "patch": "16.20",
  "starter_items": [
   [
    "复用型药水",
@@ -43,8 +43,8 @@
   ],
   [
    "卢登的回声",
-   "残疫",
-   "风暴狂涌"
+   "风暴狂涌",
+   "影焰"
   ]
  ],
  "skill_orders": [
@@ -84,19 +84,19 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ]
  ],
