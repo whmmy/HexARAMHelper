@@ -1,6 +1,6 @@
 {
  "slug": "olaf",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/olaf/build",
  "patch": "16.20",
  "starter_items": [
@@ -85,19 +85,19 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
    "Q",
    "E",
    "Q",
-   "E",
+   "W",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ]
  ],

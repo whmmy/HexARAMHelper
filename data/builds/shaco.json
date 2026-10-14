@@ -1,6 +1,6 @@
 {
  "slug": "shaco",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/shaco/build",
  "patch": "16.20",
  "starter_items": [
@@ -69,17 +69,17 @@
    "Q",
    "W",
    "E",
-   "W",
+   "E",
    "E",
    "R",
    "E",
-   "E",
-   "E",
-   "W",
-   "R",
-   "W",
-   "W",
    "Q",
+   "E",
+   "W",
+   "R",
+   "W",
+   "W",
+   "W",
    "Q"
   ],
   [

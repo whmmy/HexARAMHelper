@@ -1,6 +1,6 @@
 {
  "slug": "sylas",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/sylas/build",
  "patch": "16.20",
  "starter_items": [
@@ -39,13 +39,13 @@
   ],
   [
    "海克斯科技火箭腰带",
-   "影焰",
-   "中娅沙漏"
+   "裂隙制造者",
+   "影焰"
   ],
   [
    "海克斯科技火箭腰带",
-   "裂隙制造者",
-   "影焰"
+   "影焰",
+   "中娅沙漏"
   ]
  ],
  "skill_orders": [

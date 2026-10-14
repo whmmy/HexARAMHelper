@@ -1,6 +1,6 @@
 {
  "slug": "galio",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/galio/build",
  "patch": "16.20",
  "starter_items": [
@@ -90,8 +90,8 @@
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
@@ -100,9 +100,9 @@
    "Q",
    "W",
    "R",
-   "W",
-   "W",
    "E",
+   "W",
+   "W",
    "E"
   ]
  ],

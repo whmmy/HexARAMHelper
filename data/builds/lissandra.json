@@ -1,6 +1,6 @@
 {
  "slug": "lissandra",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/lissandra/build",
  "patch": "16.20",
  "starter_items": [
@@ -90,11 +90,11 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "W",
    "R",
-   "W",
+   "E",
    "W",
    "W",
    "E"

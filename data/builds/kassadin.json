@@ -1,6 +1,6 @@
 {
  "slug": "kassadin",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kassadin/build",
  "patch": "16.20",
  "starter_items": [
@@ -36,15 +36,15 @@
    "炽天使之拥"
   ],
   [
+   "时光之杖",
+   "炽天使之拥",
+   "残疫"
+  ],
+  [
    "女神之泪",
    "时光之杖",
    "炽天使之拥",
    "巫妖之祸"
-  ],
-  [
-   "时光之杖",
-   "炽天使之拥",
-   "残疫"
   ],
   [
    "女神之泪",

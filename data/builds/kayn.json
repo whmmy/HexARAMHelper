@@ -1,6 +1,6 @@
 {
  "slug": "kayn",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kayn/build",
  "patch": "16.20",
  "starter_items": [
@@ -46,9 +46,9 @@
    "收集者"
   ],
   [
-   "焚天",
+   "星蚀",
    "黑色切割者",
-   "死亡之舞"
+   "振奋盔甲"
   ]
  ],
  "skill_orders": [

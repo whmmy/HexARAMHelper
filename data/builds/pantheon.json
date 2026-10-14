@@ -1,15 +1,15 @@
 {
  "slug": "pantheon",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/pantheon/build",
  "patch": "16.20",
  "starter_items": [
   [
-   "长剑",
+   "鞋子",
    "考尔菲德的战锤"
   ],
   [
-   "鞋子",
+   "长剑",
    "考尔菲德的战锤"
   ]
  ],
@@ -94,10 +94,10 @@
    "Q",
    "E",
    "Q",
-   "E",
+   "W",
    "R",
    "E",
-   "W",
+   "E",
    "E",
    "W"
   ]

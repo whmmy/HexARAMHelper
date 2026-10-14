@@ -1,6 +1,6 @@
 {
  "slug": "zeri",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/zeri/build",
  "patch": "16.20",
  "starter_items": [
@@ -43,8 +43,8 @@
   ],
   [
    "育恩塔尔荒野箭",
-   "卢安娜的飓风",
-   "凡性的提醒"
+   "无尽之刃",
+   "卢安娜的飓风"
   ]
  ],
  "skill_orders": [

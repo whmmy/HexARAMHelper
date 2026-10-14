@@ -1,6 +1,6 @@
 {
  "slug": "rumble",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/rumble/build",
  "patch": "16.20",
  "starter_items": [
@@ -17,7 +17,7 @@
    "法师之靴"
   ],
   [
-   "水银之靴"
+   "明朗之靴"
   ]
  ],
  "core_builds": [
@@ -73,12 +73,12 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
    "E",
-   "W",
+   "E",
    "E",
    "W"
   ],
@@ -94,8 +94,8 @@
    "Q",
    "E",
    "R",
-   "W",
    "E",
+   "W",
    "E",
    "W"
   ]

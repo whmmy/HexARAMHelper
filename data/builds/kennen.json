@@ -1,6 +1,6 @@
 {
  "slug": "kennen",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kennen/build",
  "patch": "16.20",
  "starter_items": [
@@ -95,8 +95,8 @@
    "Q",
    "W",
    "R",
-   "E",
    "W",
+   "E",
    "W",
    "E"
   ]

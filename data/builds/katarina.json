@@ -1,6 +1,6 @@
 {
  "slug": "katarina",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/katarina/build",
  "patch": "16.20",
  "starter_items": [
@@ -92,12 +92,12 @@
    "R",
    "Q",
    "E",
-   "E",
    "Q",
+   "W",
    "R",
    "E",
    "E",
-   "W",
+   "E",
    "W"
   ]
  ],

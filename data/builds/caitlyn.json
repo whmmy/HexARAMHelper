@@ -1,6 +1,6 @@
 {
  "slug": "caitlyn",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/caitlyn/build",
  "patch": "16.20",
  "starter_items": [
@@ -44,9 +44,9 @@
    "无尽之刃"
   ],
   [
-   "海克斯镜片 C44",
+   "育恩塔尔荒野箭",
    "无尽之刃",
-   "多米尼克领主的致意"
+   "疾射火炮"
   ]
  ],
  "skill_orders": [

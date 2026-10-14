@@ -1,6 +1,6 @@
 {
  "slug": "ambessa",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/ambessa/build",
  "patch": "16.20",
  "starter_items": [
@@ -40,14 +40,14 @@
    "死亡之舞"
   ],
   [
-   "星蚀",
-   "朔极之矛",
-   "无穷饥渴"
-  ],
-  [
    "锯齿短匕",
    "狂妄",
    "死亡之舞",
+   "无穷饥渴"
+  ],
+  [
+   "星蚀",
+   "朔极之矛",
    "无穷饥渴"
   ]
  ],

@@ -1,6 +1,6 @@
 {
  "slug": "xerath",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/xerath/build",
  "patch": "16.20",
  "starter_items": [
@@ -38,13 +38,13 @@
   ],
   [
    "卢登的回声",
-   "影焰",
-   "视界专注"
+   "视界专注",
+   "灭世者的死亡之帽"
   ],
   [
    "卢登的回声",
-   "视界专注",
-   "灭世者的死亡之帽"
+   "影焰",
+   "视界专注"
   ]
  ],
  "skill_orders": [

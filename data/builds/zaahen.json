@@ -1,6 +1,6 @@
 {
  "slug": "zaahen",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/zaahen/build",
  "patch": "16.20",
  "starter_items": [
@@ -43,8 +43,8 @@
    "死亡之舞"
   ],
   [
+   "三相之力",
    "挺进破坏者",
-   "焚天",
    "死亡之舞"
   ]
  ],

@@ -1,6 +1,6 @@
 {
  "slug": "lulu",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/lulu/build",
  "patch": "16.20",
  "starter_items": [
@@ -51,7 +51,7 @@
    "女神之泪",
    "月石再生器",
    "歌之权冠",
-   "流水法杖"
+   "钢铁烈阳之匣"
   ]
  ],
  "skill_orders": [

@@ -1,6 +1,6 @@
 {
  "slug": "draven",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/draven/build",
  "patch": "16.20",
  "starter_items": [
@@ -24,15 +24,15 @@
  ],
  "core_builds": [
   [
-   "收集者",
-   "无尽之刃",
-   "多米尼克领主的致意"
-  ],
-  [
    "锯齿短匕",
    "狂妄",
    "收集者",
    "无尽之刃"
+  ],
+  [
+   "收集者",
+   "无尽之刃",
+   "多米尼克领主的致意"
   ],
   [
    "收集者",

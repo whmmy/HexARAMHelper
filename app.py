@@ -464,17 +464,19 @@ def main():
         name = cards[idx] if cards and idx < len(cards) else None
         if name and kb.valid_augment(name):
             _record_click(idx, name, None,
-                          ev=(t_click, x, y, idx, "direct", img), rid=rid)
+                          ev=(t_click, x, y, idx, "direct", img), rid=rid,
+                          crop=crop)
             return
         # 识别挪后台线程（迟滞窗口/OCR 迟滞期的点击也要能记账；历史缺陷：
         # 这里的点击被静默丢弃 → 台账缺记录；2026-09-29 起不再同步阻塞
-        # 记账线程 ~2s，连点两卡不漏）
+        # 记账线程 ~2s，连点两张卡不漏）
         detector.async_ocr_card_raw(
-            idx, lambda n, r, i=idx, rid=rid: _record_click(
-                i, n, r, ev=(t_click, x, y, i, "rescan", img), rid=rid),
+            idx, lambda n, r, i=idx, rid=rid, c=crop: _record_click(
+                i, n, r, ev=(t_click, x, y, i, "rescan", img), rid=rid,
+                crop=c),
             crop=crop)
 
-    def _record_click(idx, name, raw, ev=None, rid=None):
+    def _record_click(idx, name, raw, ev=None, rid=None, crop=None):
         """点击记账落位（稳定名直记 / 后台补扫回调共用）。
 
         库外名留痕：timeline 记下 OCR 原文随复盘日志落盘（知识库
@@ -484,7 +486,11 @@ def main():
         callback=无上下文兜底（不该出现，出现即上下文丢失线索）。
         rid：点击时刻的检测器轮次——成功记账即登记本轮（session 侧
         闸门数据源）并立即作废残留卡名（同 reroll 分支）：20261012
-        赏金猎人案，选卡后窗口期内商店/地面的 OCR 读数不得再入台账。"""
+        赏金猎人案，选卡后窗口期内商店/地面的 OCR 读数不得再入台账。
+        crop：点击定格帧的单卡裁剪——记账成功后后台 OCR 描述带入
+        描述自举库（升级：无尽之刃案 20261014：快选时 on_cards 稳定
+        门未及触发，该轮描述 OCR 从未跑过，已选海克斯从此只有名字
+        没有效果进 prompt）。"""
         if ev is None:
             ev = (time.time(), None, None, idx, "callback", None)
         t0, x, y, card, branch, img = ev
@@ -512,6 +518,11 @@ def main():
         if ok:
             detector.last_cards = None   # 残留卡名作废（选卡完成界面即关，
             detector.last_cards_raw = None   # 窗口期内读数只该走向丢弃分支）
+            if crop is not None:
+                detector.async_ocr_card_desc(
+                    crop, lambda text, n=name: (
+                        kb.record_augment_desc(n, text[:120])
+                        if text and len(text) >= 8 else None))
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
         else:
             ui(lambda n=name: print(f"[LEDGER] {n} 已在台账，忽略重复记录"))

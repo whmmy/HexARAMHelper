@@ -1,6 +1,6 @@
 {
  "slug": "karma",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/karma/build",
  "patch": "16.20",
  "starter_items": [
@@ -32,14 +32,14 @@
    "影焰"
   ],
   [
-   "残疫",
-   "卢登的回声",
-   "风暴狂涌"
-  ],
-  [
    "卢登的回声",
    "残疫",
    "影焰"
+  ],
+  [
+   "残疫",
+   "卢登的回声",
+   "风暴狂涌"
   ],
   [
    "残疫",

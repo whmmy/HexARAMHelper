@@ -132,13 +132,23 @@ def _cand_line(c) -> str:
 
 
 def _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                  enemy, first_augment="", coach=None, allies=None) -> str:
+                  enemy, first_augment="", coach=None, allies=None,
+                  augment_descs=None) -> str:
     lines = [
         f"我英雄已选海克斯：{'、'.join(augments) or '暂无'}",
         f"我身上装备：{'、'.join(my_items) or '无'}（金币 {gold:.0f}）",
         f"当前路线：{current_path.upper() if current_path else '未定（出门装阶段）'}",
         f"敌方阵容与威胁：{threat_summary or '未知'}",
     ]
+    # 已选海克斯卡面原文（升级：无尽之刃案 20261014）：升级型收益以持有
+    # 目标件为前提，只喂名字模型无从判断"先出目标件"；描述是 OCR 直出
+    # 事实（未收录的海克斯不出现在这里，调用方按库查名过滤）
+    if augment_descs:
+        desc_bits = [f"{n}：{augment_descs[n]}" for n in (augments or [])
+                     if augment_descs.get(n)]
+        if desc_bits:
+            lines.append("《已选海克斯描述（卡面OCR原文）》："
+                         + "；".join(desc_bits))
     if enemy:
         lines.append("敌方明细：" + "；".join(enemy))
     # 队友出装摘要（快照直出，含我；判断"谁在游走/谁缺装"归模型）
@@ -170,7 +180,7 @@ def _dedup_picks(picks: list, allowed: set) -> list:
 
 def suggest_opening(client, ctx, hero: str, first_augment: str,
                     threat_summary: str, rule_candidates: list,
-                    enemy=None) -> list:
+                    enemy=None, augment_descs=None) -> list:
     """出门装三选排序。ctx.opening_items 提供组合与场景；失败 → 规则版原序。
 
     返回 [{"name","reason","combo"}]（与 Candidate 解耦，调用方转换）。
@@ -186,7 +196,8 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
         _fmt_snapshot([], 0, "", threat_summary,
                       [first_augment] if first_augment else [],
                       enemy=enemy or [],
-                      coach=[]),  # 出门装阶段不带军师（阵容类提示尚未生成）
+                      coach=[],  # 出门装阶段不带军师（阵容类提示尚未生成）
+                      augment_descs=augment_descs),
         "《出门装候选组合》\n" + "\n".join(
             f"{i + 1}. {'+'.join(g['combo'])}（{g.get('when', '')}）"
             for i, g in enumerate(combos)),
@@ -218,7 +229,8 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
 def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
                  threat_summary: str, augments: list,
                  rule_candidates: list, coach_lines=None, enemy=None,
-                 allies=None, extra_allowed: list = None) -> list:
+                 allies=None, extra_allowed: list = None,
+                 augment_descs=None) -> list:
     """下一件三选重排+写理由。返回 [{"name","reason"}]；失败/有效<2 → 规则版。
 
     rule_candidates: 层 0 Candidate 列表（已带规则理由，作降级文案）。
@@ -237,12 +249,13 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
         return suggest_swap(client, ctx, my_items, gold, current_path,
                             threat_summary, augments, rule_candidates,
                             coach_lines=coach_lines, enemy=enemy,
-                            allies=allies)
+                            allies=allies, augment_descs=augment_descs)
     allowed = {c.name for c in rule_candidates}
     allowed |= {n for n in (extra_allowed or []) if isinstance(n, str)}
     parts = [
         _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                      enemy=enemy or [], coach=coach_lines, allies=allies),
+                      enemy=enemy or [], coach=coach_lines, allies=allies,
+                      augment_descs=augment_descs),
         "《候选清单（只能从中选）》\n" + "\n".join(
             _cand_line(c) for c in rule_candidates),
     ]
@@ -276,7 +289,7 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
 def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
                  threat_summary: str, augments: list,
                  swap_candidates: list, coach_lines=None, enemy=None,
-                 allies=None) -> list:
+                 allies=None, augment_descs=None) -> list:
     """满六神装替换对选优。返回 [{"name","reason"}]（name=买件名，
     与 suggest_next 同构，引擎层按 Candidate 协议转换）；失败/有效<2 → 规则版原序。
 
@@ -289,7 +302,8 @@ def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
     allowed = {c.buy for c in swap_candidates}
     parts = [
         _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
-                      enemy=enemy or [], coach=coach_lines, allies=allies),
+                      enemy=enemy or [], coach=coach_lines, allies=allies,
+                      augment_descs=augment_descs),
         "已满六神装，以下是《替换候选对（只能从中选，name 填买件名）》：",
     ] + [
         f"- 卖[{c.sell}] → 买[{c.buy}]（卖回{c.sell_price}G / 买价{c.price}G）：{c.reason}"

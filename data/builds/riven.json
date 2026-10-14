@@ -1,6 +1,6 @@
 {
  "slug": "riven",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/riven/build",
  "patch": "16.20",
  "starter_items": [
@@ -43,9 +43,8 @@
    "朔极之矛"
   ],
   [
-   "锯齿短匕",
-   "狂妄",
    "焚天",
+   "星蚀",
    "死亡之舞"
   ]
  ],
@@ -92,9 +91,9 @@
    "Q",
    "R",
    "Q",
-   "E",
-   "Q",
    "W",
+   "Q",
+   "E",
    "R",
    "E",
    "E",

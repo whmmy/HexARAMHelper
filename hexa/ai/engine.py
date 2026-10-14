@@ -27,6 +27,17 @@ KIND_NEXT = "next_items"
 KIND_RANKS = "augment_ranks"
 
 
+def _augment_descs(kb, taken):
+    """已选海克斯的卡面原文描述（升级：无尽之刃案 20261014）。
+
+    升级型海克斯（『升级：X』）的收益以持有目标件为前提，只喂名字时
+    模型无从判断"先出目标件"——真机实锤 System1 顶着已选
+    升级：无尽之刃仍推收集者先。描述是描述自举库（20261013）里的 OCR
+    原文，数据直出不预消化；未收录的海克斯跳过（不编造）。"""
+    return {n: kb.augment_desc(n) for n in (taken or [])
+            if kb.augment_desc(n)} or None
+
+
 class DecisionEngine(ABC):
     mode = "rule"
 
@@ -504,7 +515,8 @@ class AIDecisionEngine(DecisionEngine):
         def fn():
             picks = self.s1.suggest_opening(
                 self.client_s1, ctx, self._hero, first_augment, summary, base,
-                enemy=self._enemy_detail())
+                enemy=self._enemy_detail(),
+                augment_descs=_augment_descs(kb, taken))
             out = []
             for p in picks:
                 if not kb.item_available(p["name"], gm):
@@ -541,7 +553,8 @@ class AIDecisionEngine(DecisionEngine):
                 self.client_s1, ctx, my_items, gold, current_path, summary,
                 taken, base, enemy=self._enemy_detail(),
                 allies=self._ally_detail(),
-                extra_allowed=self._extra_allowed())
+                extra_allowed=self._extra_allowed(),
+                augment_descs=_augment_descs(kb, taken))
             return [Candidate(p["name"], p["reason"],
                               price=kb.items.get(p["name"], {}).get("gold", 0))
                     for p in picks

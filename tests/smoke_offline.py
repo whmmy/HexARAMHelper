@@ -1587,6 +1587,51 @@ def test_detect_and_layout():
           f"grabs={_grab_seen} thru={thru}")
     del det_a._grab_card_crop
 
+    # 记账描述补录（升级：无尽之刃案 20261014）：快选时 on_cards 稳定门
+    # 未及触发，该轮描述 OCR 从未跑过——已选海克斯卡面原文从此缺库。
+    # async_ocr_card_desc 消费点击定格帧的描述带：短行(<6)滤掉、按 y 排
+    # 序拼接、OCR 异常回调 None（不入账不炸）。
+    class _DescOcr:
+        available = True
+        out = [("暴击时造成随机额外暴击伤害", [0, 130, 200, 30], 0.9),
+               ("名行", [0, 40, 60, 20], 0.9),
+               ("你的无尽之刃获得升级", [0, 100, 200, 30], 0.9)]
+
+        @staticmethod
+        def recognize(image):
+            return list(_DescOcr.out)
+
+    det_a.ocr = _DescOcr()
+    import numpy as _np2
+    _card_crop = _np2.zeros((300, 200, 3), dtype=_np2.uint8)
+    _desc_got = []
+    det_a.async_ocr_card_desc(_card_crop,
+                              lambda t: _desc_got.append(t))
+    deadline = time.time() + 6
+    while time.time() < deadline and not _desc_got:
+        time.sleep(0.02)
+    check("记账描述补录：短行滤掉+按 y 拼接",
+          _desc_got == ["你的无尽之刃获得升级暴击时造成随机额外暴击伤害"],
+          str(_desc_got))
+
+    class _BoomOcr:
+        available = True
+
+        @staticmethod
+        def recognize(image):
+            raise RuntimeError("ocr boom")
+
+    det_a.ocr = _BoomOcr()
+    _desc_got2 = []
+    det_a.async_ocr_card_desc(_card_crop,
+                              lambda t: _desc_got2.append(t))
+    deadline = time.time() + 6
+    while time.time() < deadline and not _desc_got2:
+        time.sleep(0.02)
+    check("记账描述补录：OCR 异常回调 None（降级不入账）",
+          _desc_got2 == [None], str(_desc_got2))
+    det_a.ocr = _SyncOcr()
+
     # save_layout 并发原子性（检测线程自愈 × 手动标定线程两写者回归）：
     # 交错写后文件必须仍是完整 JSON，且无 .tmp 残留
     import tempfile as _tempfile
@@ -4447,7 +4492,9 @@ def test_upgrade_augment_link():
     （同 _suggest_next_items(reason="event")，引擎侧不受 periodic 20s
     min_interval 守门）+ 军师纯事实提示（不带出装结论，走 _push_coach
     去重/冷却）；③同轮防重复触发 / 撤销后台账与状态一致 / 出门装在屏
-    不覆盖（KIND_CTX 口径）/ AI 模式 System1 真被派发且回写。"""
+    不覆盖（KIND_CTX 口径）/ AI 模式 System1 真被派发且回写；④已选
+    海克斯描述进 System1 prompt（升级：无尽之刃案 20261014，OCR 原文
+    数据直出，先出哪件归模型判断）。"""
     print("\n[17] 升级型海克斯局内联动（升级联动案）")
     import json as _json
 
@@ -4614,6 +4661,85 @@ def test_upgrade_augment_link():
           f"serial={s3.suggestion.serial}/{target_serial} "
           f"source={s3.suggestion.source} "
           f"cands={[c.name for c in s3.suggestion.candidates]}")
+
+    # ⑤ 已选海克斯描述进 System1 prompt（升级：无尽之刃案 20261014）：
+    # 真机实锤——台账记了升级：无尽之刃（收益以持有无尽为前提），System1
+    # 只见名字不见效果，精修军师仍说"先收集者成装"。描述是描述自举库
+    # （20261013）的 OCR 原文，数据直出喂给模型，先出哪件归模型判断。
+    from hexa.ai import engine as _eng
+    from hexa.ai import system1 as _s1x
+    check("快照带描述段（OCR 原文直出）",
+          "已选海克斯描述（卡面OCR原文）" in _s1x._fmt_snapshot(
+              ["多兰之刃"], 500, "ad", "物伤×3", [upgrade_name], enemy=[],
+              augment_descs={upgrade_name: "持有无尽之刃时，暴击造成随机"
+                             "额外暴击伤害"})
+          and "随机额外暴击伤害" in _s1x._fmt_snapshot(
+              ["多兰之刃"], 500, "ad", "物伤×3", [upgrade_name], enemy=[],
+              augment_descs={upgrade_name: "持有无尽之刃时，暴击造成随机"
+                             "额外暴击伤害"}))
+    check("无描述/描述名与台账不符不出现描述段",
+          "已选海克斯描述" not in _s1x._fmt_snapshot(
+              ["多兰之刃"], 500, "ad", "物伤×3", [upgrade_name], enemy=[])
+          and "已选海克斯描述" not in _s1x._fmt_snapshot(
+              ["多兰之刃"], 500, "ad", "物伤×3", [upgrade_name], enemy=[],
+              augment_descs={base_aug: "名不在台账的描述不入快照"}))
+    # 真实描述库随对局自增长（真名可能已录描述），kb 相关断言一律换上
+    # 受控字典再跑，保证封闭性
+    _saved_descs = dict(kb.augment_descs)
+    kb.augment_descs.clear()
+    try:
+        check("引擎侧取描述：未收录返回 None（不编造）",
+              _eng._augment_descs(kb, [upgrade_name, base_aug]) is None)
+        kb.augment_descs[upgrade_name] = \
+            "持有中娅沙漏时，金身效果翻倍（测试原文）"
+        check("引擎侧取描述：命中返回 {名: 原文}",
+              _eng._augment_descs(kb, [upgrade_name, base_aug])
+              == {upgrade_name: "持有中娅沙漏时，金身效果翻倍（测试原文）"})
+        eng5, fc5, _fc5b = build_ai_engine(
+            script_s2=[ctx_json()],
+            # 三段按序弹出：①首海克斯出门装精修 ②首快照 periodic 下一件
+            # 精修 ③升级记账后事件式下一件精修（描述随本次进 prompt）
+            script_s1=[_json.dumps({"picks": [
+                            {"name": "红水晶", "reason": "出门防守"}]}),
+                       _json.dumps({"picks": [
+                           {"name": "焚天", "reason": "periodic 版本答案"}]}),
+                       _json.dumps({"picks": [
+                           {"name": "中娅沙漏", "reason": "升级目标先出"}]})],
+            min_interval=9999.0)
+        s5 = GameSession(kb, rules,
+                         settings=FakeSettings(min_interval=9999.0),
+                         engine=eng5)
+        s5.on_game_start({"ally": [hero], "enemy": ["黑暗之女"],
+                          "my_hero": hero, "source": "test"})
+        s5.on_in_progress()
+        deadline = time.time() + 6
+        while time.time() < deadline and eng5.cache.get() is None:
+            time.sleep(0.02)
+        s5.record_augment(base_aug, tier="棱彩")
+        s5.on_snapshot(make_snap(my_hero_en="Aatrox",
+                                 my_items=["多兰之刃"], my_gold=4000))
+        deadline = time.time() + 6
+        while time.time() < deadline and len(fc5.calls) < 2:
+            time.sleep(0.02)   # 等出门装+periodic 两次调用落位
+        check("无升级海克斯时快照不带描述段",
+              len(fc5.calls) >= 2
+              and all("已选海克斯描述" not in c
+                      for c in fc5.calls[:2]),
+              str(len(fc5.calls)))
+        check("升级型记账照常触发事件刷新",
+              s5.record_augment(upgrade_name, round_id=40) is True
+              and tl_count(s5, "upgrade_refresh") == 1)
+        deadline = time.time() + 6
+        while time.time() < deadline and len(fc5.calls) < 3:
+            time.sleep(0.02)   # 等升级后事件精修进 FakeClient
+        check("升级海克斯入账后快照带描述原文",
+              len(fc5.calls) >= 3
+              and "已选海克斯描述（卡面OCR原文）" in fc5.calls[2]
+              and "金身效果翻倍（测试原文）" in fc5.calls[2],
+              fc5.calls[2][-120:] if len(fc5.calls) >= 3 else "缺第三次调用")
+    finally:
+        kb.augment_descs.clear()
+        kb.augment_descs.update(_saved_descs)
 
 
 def test_prompt_copy():

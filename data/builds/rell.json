@@ -1,6 +1,6 @@
 {
  "slug": "rell",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/rell/build",
  "patch": "16.20",
  "starter_items": [
@@ -47,8 +47,8 @@
    "败魔"
   ],
   [
-   "末日寒冬",
-   "基克的聚合",
+   "心之钢",
+   "无终恨意",
    "荆棘之甲"
   ]
  ],

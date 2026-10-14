@@ -1,6 +1,6 @@
 {
  "slug": "corki",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/corki/build",
  "patch": "16.20",
  "starter_items": [
@@ -30,14 +30,14 @@
    "收集者"
   ],
   [
-   "夺萃之镰",
-   "收集者",
-   "无尽之刃"
-  ],
-  [
    "女神之泪",
    "三相之力",
    "魔切",
+   "无尽之刃"
+  ],
+  [
+   "夺萃之镰",
+   "收集者",
    "无尽之刃"
   ],
   [

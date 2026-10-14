@@ -1,6 +1,6 @@
 {
  "slug": "taliyah",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/taliyah/build",
  "patch": "16.20",
  "starter_items": [
@@ -42,9 +42,9 @@
    "影焰"
   ],
   [
-   "黯炎火炬",
+   "卢登的回声",
    "兰德里的折磨",
-   "影焰"
+   "瑞莱的冰晶节杖"
   ]
  ],
  "skill_orders": [

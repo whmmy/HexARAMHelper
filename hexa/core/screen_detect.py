@@ -970,6 +970,34 @@ class ScreenDetector(threading.Thread):
         threading.Thread(target=_work, daemon=True,
                          name="card-desc-ocr").start()
 
+    def async_ocr_card_desc(self, crop, on_done) -> None:
+        """点击定格帧的单卡描述带 OCR → on_done(描述文本|None)。
+
+        升级：无尽之刃案 20261014：快选（界面出现 ~1s 内点击）时
+        on_cards 稳定门未及触发，该轮描述 OCR 从未跑过——已选海克斯的
+        卡面原文从此缺库，next_items prompt 只有名字没有效果。记账成功
+        后用点击定格帧补一条描述入库；抓帧已由点击链完成（crop 传入，
+        不再抓屏），OCR 经 recognize 内部锁与检测线程串行，daemon 线程
+        与检测互不阻塞（同 async_ocr_card_raw 口径）。"""
+        def _work():
+            text = None
+            try:
+                ch = crop.shape[0] or 1
+                y0, y1 = self.DESC_ZONE
+                band = crop[int(y0 * ch):int(y1 * ch), :]
+                lines = [(r[1], t.strip())
+                         for t, r, _c in self.ocr.recognize(band)
+                         if t and len(t.strip()) >= 6]
+                if lines:
+                    lines.sort(key=lambda x: x[0])
+                    text = "".join(t for _y, t in lines) or None
+            except Exception as e:  # noqa: BLE001 —— 描述失败只降级不入账
+                print(f"[WARN] 记账描述 OCR 异常: {e}")
+            on_done(text)
+
+        threading.Thread(target=_work, daemon=True,
+                         name="pick-desc-ocr").start()
+
     def _ocr_cards(self, frame, card_rects, prev_texts=None) -> tuple:
         card_texts, any_text = [], False
         for i, rect in enumerate(card_rects):

@@ -1,6 +1,6 @@
 {
  "slug": "locke",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/locke/build",
  "patch": "16.20",
  "starter_items": [
@@ -30,13 +30,13 @@
   ],
   [
    "巫妖之祸",
-   "风暴狂涌",
-   "影焰"
+   "影焰",
+   "中娅沙漏"
   ],
   [
    "巫妖之祸",
-   "影焰",
-   "中娅沙漏"
+   "风暴狂涌",
+   "影焰"
   ],
   [
    "巫妖之祸",

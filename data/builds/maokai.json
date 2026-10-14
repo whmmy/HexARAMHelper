@@ -1,6 +1,6 @@
 {
  "slug": "maokai",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/maokai/build",
  "patch": "16.20",
  "starter_items": [
@@ -91,10 +91,10 @@
    "Q",
    "W",
    "E",
-   "Q",
+   "E",
    "E",
    "R",
-   "E",
+   "Q",
    "E",
    "E",
    "Q",

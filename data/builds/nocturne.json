@@ -1,6 +1,6 @@
 {
  "slug": "nocturne",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/nocturne/build",
  "patch": "16.20",
  "starter_items": [
@@ -77,12 +77,12 @@
    "Q",
    "R",
    "Q",
-   "W",
+   "E",
    "Q",
    "E",
    "R",
    "E",
-   "E",
+   "W",
    "E",
    "W"
   ],
@@ -94,12 +94,12 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
    "E",
-   "W",
+   "E",
    "E",
    "W"
   ]

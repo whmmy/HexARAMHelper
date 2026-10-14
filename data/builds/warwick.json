@@ -1,6 +1,6 @@
 {
  "slug": "warwick",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/warwick/build",
  "patch": "16.20",
  "starter_items": [
@@ -91,9 +91,9 @@
    "Q",
    "R",
    "Q",
-   "W",
-   "Q",
    "E",
+   "Q",
+   "W",
    "R",
    "E",
    "E",

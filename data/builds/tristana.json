@@ -1,6 +1,6 @@
 {
  "slug": "tristana",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/tristana/build",
  "patch": "16.20",
  "starter_items": [
@@ -42,8 +42,8 @@
    "多米尼克领主的致意"
   ],
   [
-   "育恩塔尔荒野箭",
    "收集者",
+   "纳沃利烁刃",
    "无尽之刃"
   ]
  ],

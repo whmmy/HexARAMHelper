@@ -1,6 +1,6 @@
 {
  "slug": "poppy",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/poppy/build",
  "patch": "16.20",
  "starter_items": [
@@ -49,8 +49,8 @@
   ],
   [
    "心之钢",
-   "狂徒铠甲",
-   "荆棘之甲"
+   "无终恨意",
+   "败魔"
   ]
  ],
  "skill_orders": [
@@ -100,8 +100,8 @@
    "Q",
    "E",
    "R",
-   "W",
    "E",
+   "W",
    "E",
    "W"
   ]

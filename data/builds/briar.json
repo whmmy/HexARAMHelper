@@ -1,6 +1,6 @@
 {
  "slug": "briar",
- "fetched_at": "2026-10-13",
+ "fetched_at": "2026-10-14",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/briar/build",
  "patch": "16.20",
  "starter_items": [
@@ -68,6 +68,23 @@
   ],
   [
    "Q",
+   "E",
+   "W",
+   "W",
+   "W",
+   "R",
+   "W",
+   "Q",
+   "W",
+   "Q",
+   "R",
+   "Q",
+   "Q",
+   "E",
+   "E"
+  ],
+  [
+   "Q",
    "W",
    "E",
    "W",
@@ -82,23 +99,6 @@
    "Q",
    "Q",
    "E"
-  ],
-  [
-   "Q",
-   "W",
-   "E",
-   "W",
-   "W",
-   "R",
-   "W",
-   "E",
-   "W",
-   "E",
-   "R",
-   "E",
-   "E",
-   "Q",
-   "Q"
   ]
  ],
  "skill_names": {
