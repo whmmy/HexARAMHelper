@@ -273,9 +273,10 @@ class LivePoller(threading.Thread):
         snap.raw_playerlist = playerlist or []
         # 海克斯落库探针（20261013，docs/真机验证清单.md §6 复核）：竞品
         # 实证 allgamedata.allPlayers[].runes.generalRunes[] 里 id>100000
-        # 疑似已选海克斯；playerlist 是否同带该字段未验证——两条路都落库
-        # 对照。探针炸只 print 不外抛：单帧失败跳过即可，绝不能拖垮快照
-        # 主链（同 run() 顶层兜底同理）。未接探针（None）零开销零请求。
+        # 疑似已选海克斯；playerlist 已实证不带该字段（20261013 局 2430
+        # 玩家·帧全 absent），落库留对照。探针炸只 print 不外抛：单帧失败
+        # 跳过即可，绝不能拖垮快照主链（同 run() 顶层兜底同理）。
+        # 未接探针（None）零开销零请求。
         if self.runes_probe is not None:
             if playerlist:
                 try:
@@ -288,10 +289,15 @@ class LivePoller(threading.Thread):
             if self._agd_tick >= 6:
                 self._agd_tick = 0
                 try:
-                    agd = self._get_json("/liveclientdata/allgamedata")
-                    allp = (agd or {}).get("allPlayers")
-                    if allp is not None:
-                        self.runes_probe.on_allgamedata(allp, snap.ts)
+                    # 端点名不含 /liveclientdata 前缀——BASE 已带（同上
+                    # activeplayer/playerlist）。20261013 真机局曾写成
+                    # "/liveclientdata/allgamedata" 双前缀整局 404 静默
+                    # （_get_json 非 200 返 None 无任何日志），allgamedata
+                    # 路 0 帧、§6 竞品结论落空。整包透传（含 None/缺键包）：
+                    # 端点应答但没有 allPlayers 也落空证据行，"通道死"与
+                    # "字段缺失"在落库里可分。
+                    agd = self._get_json("/allgamedata")
+                    self.runes_probe.on_allgamedata(agd, snap.ts)
                 except Exception as e:  # noqa: BLE001
                     print(f"[WARN] runes 探针 allgamedata 采集异常: {e}")
         # 死亡来源（游戏内才可用；未在对局/旧版本客户端返回 None → 空表跳过）

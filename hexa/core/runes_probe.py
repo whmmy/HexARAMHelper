@@ -98,7 +98,9 @@ class RunesProbe:
 
     def on_allgamedata(self, payload, ts):
         """allgamedata 落库：收整包（取 allPlayers，再退 playerlist 键）
-        或裸玩家列表均可——喂入口径不锁死，采集侧怎么方便怎么传"""
+        或裸玩家列表均可——喂入口径不锁死，采集侧怎么方便怎么传；
+        None（端点 404/应答无 allPlayers）也落一帧 players:[] 空证据行，
+        "通道死"与"字段缺失"在落库里可分（20261014 双前缀修复案）"""
         players = payload
         if isinstance(payload, dict):
             players = payload.get("allPlayers")

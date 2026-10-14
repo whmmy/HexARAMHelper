@@ -1090,7 +1090,7 @@ def test_runes_probe():
             {"championName": "曙光女神", "team": "ORDER"},
             {"championName": "Annie", "team": "CHAOS"}],
         "/eventdata": {"events": []},
-        "/liveclientdata/allgamedata": {"allPlayers": [
+        "/allgamedata": {"allPlayers": [
             {"championName": "Annie", "team": "CHAOS"}]},
     }
     poller._get_json = lambda endpoint: fake.get(endpoint)  # monkeypatch 断网
@@ -1103,6 +1103,85 @@ def test_runes_probe():
           f"snap={snap and (snap.ok, len(snap.players), snap.my_champion)}")
     check("allgamedata 低频计数归零重计", poller._agd_tick == 0,
           str(poller._agd_tick))
+
+    # None 也透传（20261014 双前缀修复案）：allgamedata 404/缺键时喂 None
+    # 空证据行而非静默跳过——否则"通道死"与"字段缺失"在落库里无法区分
+    rec_calls = []
+
+    class _RecProbe:
+        def on_playerlist(self, players, ts):
+            pass
+
+        def on_allgamedata(self, players, ts):
+            rec_calls.append(players)
+
+    poller.runes_probe = _RecProbe()
+    fake_404 = dict(fake)
+    fake_404["/allgamedata"] = None   # 模拟端点 404（_get_json 返 None）
+    poller._get_json = lambda endpoint: fake_404.get(endpoint)
+    poller._agd_tick = 5
+    poller._poll_once()
+    check("allgamedata 404 也喂空证据行（None 透传不静默）",
+          rec_calls == [None], str(rec_calls))
+
+    # URL 拼接回归（20261013 真机案）：上面按 endpoint 入参键 mock 绕过了
+    # BASE+endpoint 拼接，双前缀 "/liveclientdata/allgamedata" 整局 404
+    # 而冒烟全绿——这里走真 _get_json，咬死最终 URL 不许出现第二段
+    # /liveclientdata
+    import hexa.core.live_api as _lapi
+
+    class _FakeResp:
+        def __init__(self, payload):
+            self.status_code = 200 if payload is not None else 404
+            self._payload = payload
+
+        def json(self):
+            return self._payload
+
+    class _FakeSession:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, verify=False, timeout=None):
+            self.urls.append(url)
+            if url.endswith("/allgamedata"):
+                return _FakeResp({"allPlayers": [
+                    {"championName": "Annie", "team": "CHAOS"}]})
+            if url.endswith("/activeplayer"):
+                return _FakeResp({"championName": "Annie"})
+            if url.endswith("/playerlist"):
+                return _FakeResp([{"championName": "Annie",
+                                   "team": "CHAOS"}])
+            if url.endswith("/eventdata"):
+                return _FakeResp({"events": []})
+            return _FakeResp(None)
+
+    rec2_calls = []
+
+    class _RecProbe2:
+        def on_playerlist(self, players, ts):
+            pass
+
+        def on_allgamedata(self, players, ts):
+            rec2_calls.append(players)
+
+    sess = _FakeSession()
+    orig_session = _lapi._SESSION
+    _lapi._SESSION = sess
+    try:
+        poller2 = LivePoller(kb, runes_probe=_RecProbe2())
+        poller2._agd_tick = 5
+        poller2._poll_once()
+    finally:
+        _lapi._SESSION = orig_session
+    check("allgamedata 最终 URL 无双前缀（走真 _get_json 拼接）",
+          _lapi.BASE + "/allgamedata" in sess.urls
+          and not any(u.count("/liveclientdata") > 1 for u in sess.urls),
+          str(sess.urls))
+    check("真链路下探针收到 allgamedata 整包（整包透传）",
+          rec2_calls == [{"allPlayers": [
+              {"championName": "Annie", "team": "CHAOS"}]}],
+          str(rec2_calls))
 
     # summarize 脚本对样例 JSONL exit 0（纯 stdlib，无网络）
     script = (Path(__file__).resolve().parent.parent / "experiments"
