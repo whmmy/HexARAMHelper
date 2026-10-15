@@ -1,6 +1,6 @@
 {
  "slug": "locke",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/locke/build",
  "patch": "16.20",
  "starter_items": [
@@ -92,11 +92,11 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "E",
    "R",
-   "W",
+   "E",
    "E",
    "E",
    "W"

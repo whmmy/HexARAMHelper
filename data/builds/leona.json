@@ -1,6 +1,6 @@
 {
  "slug": "leona",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/leona/build",
  "patch": "16.20",
  "starter_items": [
@@ -42,13 +42,13 @@
   ],
   [
    "心之钢",
-   "荆棘之甲",
+   "末日寒冬",
    "无终恨意"
   ],
   [
    "心之钢",
    "荆棘之甲",
-   "狂徒铠甲"
+   "无终恨意"
   ]
  ],
  "skill_orders": [

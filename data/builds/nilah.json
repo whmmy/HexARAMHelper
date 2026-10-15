@@ -1,6 +1,6 @@
 {
  "slug": "nilah",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/nilah/build",
  "patch": "16.20",
  "starter_items": [
@@ -92,9 +92,9 @@
    "Q",
    "R",
    "Q",
-   "E",
-   "Q",
    "W",
+   "Q",
+   "E",
    "R",
    "E",
    "E",

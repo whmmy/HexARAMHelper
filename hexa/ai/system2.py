@@ -387,7 +387,8 @@ def generate(kb, rules, client, hero: str, ally: list, enemy: list,
             if attempt and last_err is not None:
                 user += (f"\n\n注意：上一次输出未通过校验（{last_err}）。"
                          "请严格按 schema 输出，名字必须逐字取自名单。")
-            text, meta = client.chat(SYSTEM_PROMPT, user, max_tokens=2000)
+            text, meta = client.chat(SYSTEM_PROMPT, user, max_tokens=2000,
+                             purpose="ctx")
             data = validate_and_clean(parse_json(text), kb, hero)
             return ChampionContext(data, hero, source="ai", meta=meta)
         except (LLMError, AttributeError, TypeError) as e:

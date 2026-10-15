@@ -1,6 +1,6 @@
 {
  "slug": "reksai",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/reksai/build",
  "patch": "16.20",
  "starter_items": [
@@ -46,7 +46,7 @@
   [
    "心之钢",
    "巨型九头蛇",
-   "焚天"
+   "振奋盔甲"
   ]
  ],
  "skill_orders": [

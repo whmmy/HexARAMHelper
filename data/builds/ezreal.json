@@ -1,6 +1,6 @@
 {
  "slug": "ezreal",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/ezreal/build",
  "patch": "16.20",
  "starter_items": [
@@ -19,7 +19,7 @@
    "明朗之靴"
   ],
   [
-   "暴食胫甲"
+   "水银之靴"
   ]
  ],
  "core_builds": [

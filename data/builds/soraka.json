@@ -1,6 +1,6 @@
 {
  "slug": "soraka",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/soraka/build",
  "patch": "16.20",
  "starter_items": [
@@ -36,15 +36,15 @@
    "狂徒铠甲"
   ],
   [
+   "时光之杖",
+   "月石再生器",
+   "狂徒铠甲"
+  ],
+  [
    "女神之泪",
    "月石再生器",
    "歌之权冠",
    "救赎"
-  ],
-  [
-   "时光之杖",
-   "月石再生器",
-   "狂徒铠甲"
   ],
   [
    "女神之泪",

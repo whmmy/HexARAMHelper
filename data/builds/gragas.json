@@ -1,6 +1,6 @@
 {
  "slug": "gragas",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/gragas/build",
  "patch": "16.20",
  "starter_items": [
@@ -44,8 +44,8 @@
   ],
   [
    "卢登的回声",
-   "影焰",
-   "巫妖之祸"
+   "巫妖之祸",
+   "影焰"
   ]
  ],
  "skill_orders": [

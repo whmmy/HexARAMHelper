@@ -1,6 +1,6 @@
 {
  "slug": "alistar",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/alistar/build",
  "patch": "16.20",
  "starter_items": [
@@ -45,12 +45,12 @@
   [
    "心之钢",
    "无终恨意",
-   "荆棘之甲"
+   "振奋盔甲"
   ],
   [
    "心之钢",
    "无终恨意",
-   "振奋盔甲"
+   "荆棘之甲"
   ]
  ],
  "skill_orders": [
@@ -79,9 +79,9 @@
    "Q",
    "R",
    "Q",
-   "W",
-   "Q",
    "E",
+   "Q",
+   "W",
    "R",
    "W",
    "W",
@@ -98,10 +98,10 @@
    "Q",
    "W",
    "Q",
-   "W",
+   "E",
    "R",
    "W",
-   "E",
+   "W",
    "W",
    "E"
   ]

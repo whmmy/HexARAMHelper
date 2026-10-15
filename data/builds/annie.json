@@ -1,6 +1,6 @@
 {
  "slug": "annie",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/annie/build",
  "patch": "16.20",
  "starter_items": [
@@ -38,13 +38,13 @@
   ],
   [
    "残疫",
-   "风暴狂涌",
-   "灭世者的死亡之帽"
+   "兰德里的折磨",
+   "瑞莱的冰晶节杖"
   ],
   [
    "残疫",
-   "兰德里的折磨",
-   "瑞莱的冰晶节杖"
+   "影焰",
+   "灭世者的死亡之帽"
   ]
  ],
  "skill_orders": [

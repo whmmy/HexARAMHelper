@@ -1,6 +1,6 @@
 {
  "slug": "gwen",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/gwen/build",
  "patch": "16.20",
  "starter_items": [
@@ -39,14 +39,14 @@
    "裂隙制造者"
   ],
   [
-   "黄昏与黎明",
-   "裂隙制造者",
-   "影焰"
-  ],
-  [
    "裂隙制造者",
    "黄昏与黎明",
    "纳什之牙"
+  ],
+  [
+   "裂隙制造者",
+   "纳什之牙",
+   "影焰"
   ]
  ],
  "skill_orders": [

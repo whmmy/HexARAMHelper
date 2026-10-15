@@ -1,6 +1,6 @@
 {
  "slug": "janna",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/janna/build",
  "patch": "16.20",
  "starter_items": [
@@ -42,15 +42,15 @@
    "月石再生器"
   ],
   [
+   "卢登的回声",
+   "视界专注",
+   "影焰"
+  ],
+  [
    "女神之泪",
    "帝国指令",
    "月石再生器",
    "歌之权冠"
-  ],
-  [
-   "卢登的回声",
-   "视界专注",
-   "影焰"
   ]
  ],
  "skill_orders": [
@@ -98,9 +98,9 @@
    "Q",
    "E",
    "Q",
-   "W",
-   "R",
    "E",
+   "R",
+   "W",
    "E",
    "E",
    "W"

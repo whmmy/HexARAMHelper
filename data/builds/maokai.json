@@ -1,6 +1,6 @@
 {
  "slug": "maokai",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/maokai/build",
  "patch": "16.20",
  "starter_items": [
@@ -47,7 +47,7 @@
    "残疫"
   ],
   [
-   "心之钢",
+   "末日寒冬",
    "无终恨意",
    "振奋盔甲"
   ]

@@ -623,12 +623,20 @@ def test_session():
     check("描述写回可读",
           kb_desc.record_augment_desc("大法师", "施放一个技能会返还另一个随机技能的花费，数额相当于30%原技能冷却时间")
           and kb_desc.augment_desc("大法师").startswith("施放一个技能"))
-    kb_desc.record_augment_desc("大法师", "改版后的新描述文本，长度足够入库直出")
-    check("描述覆写取新", kb_desc.augment_desc("大法师") == "改版后的新描述文本，长度足够入库直出")
-    check("描述同名同文跳过写盘", kb_desc.record_augment_desc("大法师", "改版后的新描述文本，长度足够入库直出") is False)
+    # 覆盖共识（20261015 案）：挑战文本 ≥2 次一致才覆盖——单帧 OCR 噪声
+    # 赢不了已入库文本（描述在评级 prompt 冲突时压过标签，污染杀伤力大）
+    _new_desc = "改版后的新描述文本，长度足够入库直出"
+    check("描述覆写需共识：挑战首读不覆盖",
+          kb_desc.record_augment_desc("大法师", _new_desc) is False
+          and kb_desc.augment_desc("大法师").startswith("施放一个技能"))
+    check("描述覆写需共识：二读一致才覆盖",
+          kb_desc.record_augment_desc("大法师", _new_desc) is True
+          and kb_desc.augment_desc("大法师") == _new_desc)
+    check("描述同名同文跳过写盘",
+          kb_desc.record_augment_desc("大法师", _new_desc) is False)
     kb_desc2 = KnowledgeBase(data_dir=_SMOKE_BASE / "kb_desc_d",
                              know_dir=_SMOKE_BASE / "kb_desc_k")
-    check("描述落盘持久化", kb_desc2.augment_desc("大法师") == "改版后的新描述文本，长度足够入库直出")
+    check("描述落盘持久化", kb_desc2.augment_desc("大法师") == _new_desc)
     check("描述未收录返回空", kb_desc2.augment_desc("库外海克斯") == "")
 
     # 海克斯识别状态标识（overlay 状态流转数据源）
@@ -1775,7 +1783,8 @@ class FakeClient:
     def configured(self):
         return True
 
-    def chat(self, system, user, max_tokens=None, json_mode=True):
+    def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
         self.calls.append(user)   # 存完整 user（重试带因等断言要看尾部）
         text = self.script.pop(0) if self.script else "{}"
         self.usage.add(100, 50)
@@ -2120,7 +2129,8 @@ def test_ai_build_pool():
         def __init__(self):
             self.user = ""
 
-        def chat(self, system, user, max_tokens=None, json_mode=True):
+        def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
             self.user = user
             return (_json.dumps({"picks": [
                 {"name": "黯炎火炬", "reason": "海克斯全偏AP"},
@@ -2196,7 +2206,8 @@ class _GatedRoutedClient(FakeClient):
         self.routes = dict(routes)     # hero → canned 文本
         self.gate = threading.Event()
 
-    def chat(self, system, user, max_tokens=None, json_mode=True):
+    def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
         self.calls.append(user)
         self.gate.wait(timeout=5)
         hero = user.split("英雄：", 1)[1].split("\n", 1)[0]
@@ -2828,7 +2839,8 @@ def test_coach_save_gap():
         def __init__(self):
             self.user = ""
 
-        def chat(self, system, user, max_tokens=None, json_mode=True):
+        def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
             self.user = user
             return ('{"picks": [{"name": "星蚀", "reason": "r"}],'
                     ' "coach": "逆风先保命，魔抗优先"}', {})
@@ -2856,7 +2868,8 @@ def test_coach_save_gap():
         def __init__(self):
             self.system = self.user = ""
 
-        def chat(self, system, user, max_tokens=None, json_mode=True):
+        def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
             self.system, self.user = system, user
             return ('{"picks": [{"name": "星蚀", "reason": "r"}]}', {})
 
@@ -4841,7 +4854,8 @@ def test_prompt_copy():
         def __init__(self):
             self.calls = []
 
-        def chat(self, system, user, max_tokens=None, json_mode=True):
+        def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
             self.calls.append(user)
             return "not a json", {}
 
@@ -4860,8 +4874,13 @@ def test_prompt_copy():
     session.on_game_start({"ally": [hero, "九尾妖狐"],
                            "enemy": ["黑暗之女"],
                            "my_hero": hero, "source": "test"})
+    # 等待条件必须是断言对象本身（ctx_briefing 军师入列），不能是
+    # eng.cache.get()——cache.set 与 KIND_CTX 回调是 gen 线程里相邻
+    # 两步，等前者断言后者是竞态（20261015 冒烟复现：主线程 20ms 轮询
+    # 恰落在两步之间时，coach_notes 尚空，三连误报）
     deadline = time.time() + 6
-    while eng.cache.get() is None and time.time() < deadline:
+    while time.time() < deadline and not any(
+            c["key"] == "ctx_briefing" for c in session.coach_notes):
         time.sleep(0.02)
     check("KIND_CTX 就绪推开局定调进军师（key=ctx_briefing）",
           session.coach_notes
@@ -4889,7 +4908,8 @@ def test_prompt_copy():
         def __init__(self):
             self.user = ""
 
-        def chat(self, system, user, max_tokens=None, json_mode=True):
+        def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
             self.user = user
             return _json.dumps({"picks": []}), {}
 
@@ -5055,6 +5075,222 @@ def test_review_panel():
 
 # ── main ─────────────────────────────────────────────────────────
 
+def test_desc_consensus_and_ai_ledger():
+    """描述入库校验链 + AI 调用台账（20261015 描述共识案）五件套：
+    ①kb 覆盖共识边界（交替噪声凑不齐/票仓换槽语义）；②字符健康门
+    （CJK 占比，两处描述出口共用）；③DescValidator（判坏拒收/verdict
+    缓存零调用/异常放行/未配置禁用/每局上限+new_game 归零）；
+    ④UsageLedger JSONL 落盘（成功/失败行+ctx+写盘失败不外抛）；
+    ⑤LLMClient 埋点（成功/降级重试各一行）+ purpose 贯通调用点。"""
+    print("\n[20] 描述入库共识 + AI 调用台账（描述共识案）")
+    import json as _json
+    from pathlib import Path as _Path
+
+    # ---- ① kb 覆盖共识边界 ----
+    kbc = KnowledgeBase(data_dir=_SMOKE_BASE / "kb_cons_d",
+                        know_dir=_SMOKE_BASE / "kb_cons_k")
+    name = sorted(kb.augment_names)[5]
+    t_old = "旧版描述文本足够长度直接入库"
+    noise_a = "噪声甲又是另一种乱码串文本"
+    noise_b = "噪声乙完全不同的乱码串文本"
+    check("共识：库外新名首写不受限",
+          kbc.record_augment_desc(name, t_old) is True
+          and kbc.augment_desc(name) == t_old)
+    check("共识：一致读计票不刷盘",
+          kbc.record_augment_desc(name, t_old) is False
+          and kbc.augment_desc(name) == t_old)
+    check("共识：交替噪声凑不齐（票仓换槽归一）",
+          kbc.record_augment_desc(name, noise_a) is False
+          and kbc.record_augment_desc(name, noise_b) is False
+          and kbc.record_augment_desc(name, noise_a) is False
+          and kbc.augment_desc(name) == t_old)
+    check("共识：两票一致才覆盖",
+          kbc.record_augment_desc(name, noise_a) is True
+          and kbc.augment_desc(name) == noise_a)
+    kbc_r = KnowledgeBase(data_dir=_SMOKE_BASE / "kb_cons_d",
+                          know_dir=_SMOKE_BASE / "kb_cons_k")
+    check("共识：覆盖随 hits 快照持久化",
+          kbc_r.augment_desc(name) == noise_a
+          and kbc_r.record_augment_desc(name, noise_a) is False)
+
+    # ---- ② 字符健康门（真实卡面样本口径） ----
+    from hexa.core.screen_detect import desc_healthy
+    check("健康门：正常中文描述放行（含数字标点）",
+          desc_healthy("获得100攻击距离，并且强化你的技能效果。"))
+    check("健康门：结尾截断的中文仍放行（截断归校验器管）",
+          desc_healthy("对附近的敌人们造成魔法伤害并减速"))
+    check("健康门：拉丁/数字噪声拒收",
+          not desc_healthy("abcdef gh12345678")
+          and not desc_healthy("12 34 56 78 90 ab cd"))
+    check("健康门：过短拒收", not desc_healthy("太短了"))
+    check("健康门：空串拒收", not desc_healthy("") and not desc_healthy(None))
+
+    # ---- ③ DescValidator（先切默认台账到临时目录，防测试行污染真 log） ----
+    import tempfile as _tempfile
+    from hexa.ai import desc_validator as _dv
+    from hexa.ai import usage_ledger as _ul
+    from hexa.ai.client import LLMClient as _LLM
+
+    _default_saved = _ul.get()
+    _tmp_led = _Path(_tempfile.mkdtemp(prefix="smoke_ledger_"))
+    _ul.set_default(_ul.UsageLedger(log_dir=_tmp_led))
+
+    class _ValSettings:
+        """desc_check 槽位协议子集（configured 可切）"""
+
+        def __init__(self, configured=True):
+            self._d = {"desc_check": ({"model": "fake-check",
+                                       "api_key": "sk-test"}
+                                      if configured else {})}
+
+        def get(self, *keys, default=None):
+            node = self._d
+            for k in keys:
+                if not isinstance(node, dict) or k not in node:
+                    return default
+                node = node[k]
+            return node
+
+        def get_float(self, *keys, default):
+            return default
+
+        def resolve_api_key(self, slot):
+            return self.get(slot, "api_key", default="")
+
+    def _mk_validator(script_ok=True, configured=True):
+        """validator + 桩 transport（_call_once 打桩，零网络；
+        validator 与 client 共用同一 settings，未配置分支才真实生效）"""
+        st = _ValSettings(configured=configured)
+        val = _dv.DescValidator(st)
+        c = _LLM(st, "desc_check")
+        calls = []
+
+        def fake_once(model, system, user, max_tokens, temperature,
+                      json_mode):
+            calls.append(user)
+            if script_ok is None:
+                raise RuntimeError("transport boom")
+            return _json.dumps({"ok": script_ok}), {
+                "model": model, "latency": 0.01,
+                "tokens_in": 10, "tokens_out": 1}
+
+        c._call_once = fake_once
+        val._client = c
+        return val, calls
+
+    try:
+        val, calls = _mk_validator(script_ok=False)
+        check("校验器：判坏拒收", val.check("乱码文本样例足长入参") is False
+              and len(calls) == 1)
+        check("校验器：verdict 缓存零调用",
+              val.check("乱码文本样例足长入参") is False and len(calls) == 1)
+        val2, calls2 = _mk_validator(script_ok=True)
+        check("校验器：判好放行",
+              val2.check("正常通顺的描述文本样例") is True)
+        val3, calls3 = _mk_validator(script_ok=None)
+        check("校验器：transport 异常放行（兜底不误杀）",
+              val3.check("随便什么文本都足长") is None and len(calls3) == 2,
+              f"calls={len(calls3)}")   # chat 内建重试一次，两炸才 LLMError
+        val4, calls4 = _mk_validator(script_ok=True, configured=False)
+        check("校验器：槽位未配置禁用（纯共识模式）",
+              val4.check("未配置也要能问") is None and len(calls4) == 0
+              and val4.check("再问一次还是禁用") is None and len(calls4) == 0)
+        # 每局上限：净新文本调用封顶，new_game 归零恢复
+        _saved_cap = _dv.CALLS_PER_GAME
+        _dv.CALLS_PER_GAME = 2
+        try:
+            val5, calls5 = _mk_validator(script_ok=True)
+            r = [val5.check(f"逐条不同文本第{i}条足够长") for i in range(4)]
+            check("校验器：每局调用上限封顶后放行",
+                  r[:2] == [True, True] and r[2] is None and r[3] is None
+                  and len(calls5) == 2)
+            val5.new_game()
+            check("校验器：new_game 计数归零恢复",
+                  val5.check("新一局的新文本足够长度") is True)
+        finally:
+            _dv.CALLS_PER_GAME = _saved_cap
+
+        # ---- ④ UsageLedger JSONL 落盘（上面 ③ 的校验调用已顺带入账） ----
+        rows = [ _json.loads(l) for l in
+                 (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
+                 .strip().splitlines() ]
+        check("台账：校验调用逐行落盘（purpose/slot/model）",
+              len(rows) >= 1 and rows[0]["purpose"] == "desc_check"
+              and rows[0]["slot"] == "desc_check"
+              and rows[0]["ok"] is True and rows[0]["model"] == "fake-check")
+        led = _ul.UsageLedger(log_dir=_tmp_led)
+        led.set_context(hero="暗裔剑魔")
+        led.record("next", "system1", True, model="fake-flash",
+                   latency=0.123, tokens_in=100, tokens_out=50)
+        led.record("ranks", "system1", False, model="fake-flash",
+                   latency=1.2, error="超时爆炸")
+        rows_b = [ _json.loads(l) for l in
+                   (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
+                   .strip().splitlines() ]
+        tail = rows_b[-2:]
+        check("台账：成功行字段齐全（ctx/purpose/tokens）",
+              tail[0]["ok"] is True and tail[0]["hero"] == "暗裔剑魔"
+              and tail[0]["purpose"] == "next" and tail[0]["slot"] == "system1"
+              and tail[0]["model"] == "fake-flash"
+              and tail[0]["tokens_in"] == 100 and tail[0]["tokens_out"] == 50)
+        check("台账：失败行带错误摘要",
+              tail[1]["ok"] is False and tail[1]["purpose"] == "ranks"
+              and "超时爆炸" in tail[1]["error"])
+        led_fail = _ul.UsageLedger(log_dir=_tmp_led / "not_a_dir" / "f")
+        (_tmp_led / "not_a_dir").write_text("占位文件，mkdir 必炸",
+                                            encoding="utf-8")
+        try:
+            led_fail.record("ctx", "system2", True, model="m")
+            check("台账：写盘失败不外抛（限频 WARN）", True)
+        except Exception as e:  # noqa: BLE001
+            check("台账：写盘失败不外抛（限频 WARN）", False, str(e))
+
+        # ---- ⑤ LLMClient 埋点 + purpose 贯通 ----
+        client = _LLM(_ValSettings(configured=True), "system1")
+        client._call_once = (lambda model, system, user, max_tokens,
+                             temperature, json_mode: (
+                "x", {"model": "m1", "latency": 0.05,
+                      "tokens_in": 7, "tokens_out": 3}))
+        out, _meta = client.chat("sys", "user", max_tokens=10, purpose="next")
+        rows5 = [ _json.loads(l) for l in
+                  (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
+                  .strip().splitlines() ]
+        check("台账埋点：成功调用落一行（purpose/model/tokens）",
+              out == "x" and rows5[-1]["purpose"] == "next"
+              and rows5[-1]["ok"] is True and rows5[-1]["model"] == "m1"
+              and rows5[-1]["tokens_in"] == 7
+              and rows5[-1]["tokens_out"] == 3
+              and rows5[-1]["slot"] == "system1")
+
+        def _boom(*a, **k):
+            raise RuntimeError("net down")
+        client2 = _LLM(_ValSettings(configured=True), "system1")
+        client2._call_once = _boom
+        raised = False
+        n_before = len(rows5)
+        try:
+            client2.chat("sys", "user", max_tokens=10, purpose="ctx")
+        except Exception:  # noqa: BLE001 —— 预期 LLMError（两次尝试全败）
+            raised = True
+        rows5b = [ _json.loads(l) for l in
+                   (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
+                   .strip().splitlines() ]
+        check("台账埋点：降级重试逐次落失败行",
+              raised and len(rows5b) == n_before + 2
+              and rows5b[-2]["ok"] is False and rows5b[-1]["ok"] is False
+              and rows5b[-2]["purpose"] == "ctx"
+              and "net down" in rows5b[-1]["error"])
+        fc = FakeClient([])
+        try:
+            fc.chat("s", "u", purpose="next")
+            check("purpose 贯通：FakeClient 协议兼容（调用点不炸）", True)
+        except TypeError as e:
+            check("purpose 贯通：FakeClient 协议兼容（调用点不炸）",
+                  False, str(e))
+    finally:
+        _ul.set_default(_default_saved)
+
+
 if __name__ == "__main__":
     test_kb()
     test_rules()
@@ -5092,6 +5328,7 @@ if __name__ == "__main__":
     test_ui_design_system()
     test_prompt_copy()
     test_review_panel()
+    test_desc_consensus_and_ai_ledger()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

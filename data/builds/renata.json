@@ -1,6 +1,6 @@
 {
  "slug": "renata",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/renata/build",
  "patch": "16.20",
  "starter_items": [
@@ -43,13 +43,13 @@
    "女神之泪",
    "月石再生器",
    "歌之权冠",
-   "救赎"
+   "炽热香炉"
   ],
   [
    "女神之泪",
    "月石再生器",
    "歌之权冠",
-   "炽热香炉"
+   "救赎"
   ]
  ],
  "skill_orders": [
@@ -89,19 +89,19 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "E",
    "E",
    "R",
    "E",
    "W",
    "E",
+   "W",
+   "R",
+   "W",
+   "W",
    "Q",
-   "R",
-   "W",
-   "W",
-   "W",
    "Q"
   ]
  ],

@@ -1,6 +1,6 @@
 {
  "slug": "trundle",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/trundle/build",
  "patch": "16.20",
  "starter_items": [
@@ -40,13 +40,13 @@
   ],
   [
    "心之钢",
-   "焚天",
-   "荆棘之甲"
+   "振奋盔甲",
+   "破败王者之刃"
   ],
   [
    "心之钢",
-   "振奋盔甲",
-   "破败王者之刃"
+   "破败王者之刃",
+   "荆棘之甲"
   ]
  ],
  "skill_orders": [
@@ -92,11 +92,11 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "W",
    "R",
-   "W",
+   "E",
    "W",
    "W",
    "E"

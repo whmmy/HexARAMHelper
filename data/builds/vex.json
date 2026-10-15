@@ -1,6 +1,6 @@
 {
  "slug": "vex",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/vex/build",
  "patch": "16.20",
  "starter_items": [
@@ -73,11 +73,11 @@
    "Q",
    "R",
    "Q",
-   "W",
+   "E",
    "Q",
    "W",
    "R",
-   "E",
+   "W",
    "W",
    "W",
    "E"
@@ -90,11 +90,11 @@
    "Q",
    "R",
    "Q",
-   "E",
+   "W",
    "Q",
    "W",
    "R",
-   "W",
+   "E",
    "W",
    "W",
    "E"

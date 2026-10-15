@@ -1,6 +1,6 @@
 {
  "slug": "heimerdinger",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/heimerdinger/build",
  "patch": "16.20",
  "starter_items": [
@@ -9,7 +9,9 @@
    "遗失的章节"
   ],
   [
-   "遗失的章节"
+   "生命药水",
+   "命定灰烬",
+   "女神之泪"
   ]
  ],
  "boots": [

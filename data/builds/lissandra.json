@@ -1,6 +1,6 @@
 {
  "slug": "lissandra",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/lissandra/build",
  "patch": "16.20",
  "starter_items": [
@@ -38,13 +38,13 @@
   ],
   [
    "残疫",
-   "影焰",
-   "灭世者的死亡之帽"
+   "兰德里的折磨",
+   "中娅沙漏"
   ],
   [
    "残疫",
-   "兰德里的折磨",
-   "中娅沙漏"
+   "影焰",
+   "灭世者的死亡之帽"
   ]
  ],
  "skill_orders": [
@@ -90,11 +90,11 @@
    "Q",
    "R",
    "Q",
-   "W",
+   "E",
    "Q",
    "W",
    "R",
-   "E",
+   "W",
    "W",
    "W",
    "E"

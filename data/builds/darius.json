@@ -1,6 +1,6 @@
 {
  "slug": "darius",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/darius/build",
  "patch": "16.20",
  "starter_items": [
@@ -40,13 +40,13 @@
   ],
   [
    "三相之力",
-   "焚天",
-   "斯特拉克的挑战护手"
+   "斯特拉克的挑战护手",
+   "死亡之舞"
   ],
   [
    "三相之力",
-   "斯特拉克的挑战护手",
-   "死亡之舞"
+   "焚天",
+   "斯特拉克的挑战护手"
   ]
  ],
  "skill_orders": [

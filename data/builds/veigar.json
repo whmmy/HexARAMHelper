@@ -1,6 +1,6 @@
 {
  "slug": "veigar",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/veigar/build",
  "patch": "16.20",
  "starter_items": [
@@ -47,7 +47,7 @@
   [
    "卢登的回声",
    "风暴狂涌",
-   "影焰"
+   "灭世者的死亡之帽"
   ]
  ],
  "skill_orders": [

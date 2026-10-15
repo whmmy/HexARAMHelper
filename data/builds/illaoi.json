@@ -1,6 +1,6 @@
 {
  "slug": "illaoi",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/illaoi/build",
  "patch": "16.20",
  "starter_items": [
@@ -88,17 +88,17 @@
    "Q",
    "W",
    "E",
-   "Q",
+   "E",
    "E",
    "R",
    "E",
-   "E",
-   "E",
-   "Q",
-   "R",
-   "Q",
-   "Q",
    "W",
+   "E",
+   "Q",
+   "R",
+   "Q",
+   "Q",
+   "Q",
    "W"
   ]
  ],

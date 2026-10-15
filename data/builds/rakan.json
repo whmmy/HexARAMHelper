@@ -1,6 +1,6 @@
 {
  "slug": "rakan",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/rakan/build",
  "patch": "16.20",
  "starter_items": [
@@ -90,8 +90,8 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "W",
    "W",
    "R",
@@ -100,9 +100,9 @@
    "W",
    "E",
    "R",
+   "E",
+   "E",
    "Q",
-   "E",
-   "E",
    "Q"
   ]
  ],

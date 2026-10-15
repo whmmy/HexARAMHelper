@@ -91,6 +91,8 @@ def main():
     os.chdir(BASE_DIR)
 
     from hexa.ai import engine as engine_mod
+    from hexa.ai.desc_validator import DescValidator
+    from hexa.ai.usage_ledger import get as get_usage_ledger
     from hexa.core.fixtures import FixtureDumper
     from hexa.core.game_state import GameSession
     from hexa.core.live_api import LivePoller
@@ -192,6 +194,36 @@ def main():
     # ── 决策引擎（规则 / AI 双槽位） ──────────────────────────────
     engine = engine_mod.build_engine(kb, rules, settings)
     lcu = LCUConnector(kb)
+    # ── 描述入库校验链（20261015 描述共识案）────────────────────────
+    # OCR 健康门（screen_detect.desc_healthy，字符级）→ LLM 通顺判定
+    # （desc_check 槽位，未配置自动退化为纯共识）→ kb 共识写入（挑战者
+    # ≥2 次一致才覆盖）。两条写路径（点击补录/评级取数）共用一道闸。
+    desc_validator = DescValidator(settings)
+    usage_ledger = get_usage_ledger()
+
+    def _accept_desc(name, text):
+        """描述文本入库闸（两条写路径共用）：判坏拒收，其余交 kb 共识。
+
+        与库内一致的读数直接进 kb 计一致票（零校验调用）；新/异文本
+        过校验器（False 拒收，True/None 放行）。text 已过 OCR 健康门。"""
+        text = (text or "").strip()
+        if not name or not text:
+            return
+        text = text[:120]
+        if kb.augment_desc(name) != text and desc_validator.check(text) is False:
+            ui(lambda n=name, t=text: print(
+                f"[LEDGER] 描述校验拒收: {n}（{t[:30]}…）"))
+            return
+        kb.record_augment_desc(name, text)
+
+    def _phase_game_start(payload):
+        """开局钩子：校验器每局计数归零 + AI 台账挂局上下文（复盘按 ts
+        对齐复盘日志时能直接看到这是谁的局）"""
+        desc_validator.new_game()
+        usage_ledger.set_context(
+            hero=str((payload or {}).get("my_hero") or ""))
+        session.on_game_start(payload)
+
     # ── 海克斯落库探针（20261013，诊断专用）────────────────────────
     # 竞品实证 allgamedata.allPlayers[].runes.generalRunes[] 中 id>100000
     # 疑似已选海克斯，逐局落盘 log/runes_probe/runes_probe.jsonl 供
@@ -216,7 +248,7 @@ def main():
 
     phase = PhaseMachine(lcu, callbacks={
         "on_champ_select": session.on_champ_select,
-        "on_game_start": session.on_game_start,
+        "on_game_start": _phase_game_start,
         # 20261002 寒冰案：局内相位切换 MouseLedger 轮询通道开关——LL 钩子
         # 在游戏窗口焦点期收不到事件（客户端窗口期正常）。回调在相位机
         # 首次触发时才解引用，ledger 必已构造（phase.start() 在其后）。
@@ -340,7 +372,7 @@ def main():
                 text = (descs.get(i) or "").strip()
                 if len(text) >= 8:
                     out[n] = text[:120]
-                    kb.record_augment_desc(n, out[n])   # 自增长资产：随对局自更新
+                    _accept_desc(n, out[n])   # 自增长资产：校验+共识入出库
                 elif kb.augment_desc(n):
                     out[n] = kb.augment_desc(n)   # 本轮该卡没读到 → 库缓存兜底
             return out or None
@@ -520,9 +552,7 @@ def main():
             detector.last_cards_raw = None   # 窗口期内读数只该走向丢弃分支）
             if crop is not None:
                 detector.async_ocr_card_desc(
-                    crop, lambda text, n=name: (
-                        kb.record_augment_desc(n, text[:120])
-                        if text and len(text) >= 8 else None))
+                    crop, lambda text, n=name: _accept_desc(n, text))
             ui(lambda n=name: print(f"[LEDGER] 记账: 卡片{idx + 1} {n}"))
         else:
             ui(lambda n=name: print(f"[LEDGER] {n} 已在台账，忽略重复记录"))

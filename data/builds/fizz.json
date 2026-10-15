@@ -1,6 +1,6 @@
 {
  "slug": "fizz",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/fizz/build",
  "patch": "16.20",
  "starter_items": [
@@ -34,11 +34,6 @@
    "中娅沙漏"
   ],
   [
-   "巫妖之祸",
-   "影焰",
-   "中娅沙漏"
-  ],
-  [
    "卢登的回声",
    "巫妖之祸",
    "风暴狂涌"
@@ -47,6 +42,11 @@
    "卢登的回声",
    "风暴狂涌",
    "影焰"
+  ],
+  [
+   "巫妖之祸",
+   "影焰",
+   "中娅沙漏"
   ]
  ],
  "skill_orders": [

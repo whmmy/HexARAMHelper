@@ -1,6 +1,6 @@
 {
  "slug": "kayn",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kayn/build",
  "patch": "16.20",
  "starter_items": [
@@ -79,10 +79,10 @@
    "Q",
    "W",
    "Q",
-   "W",
+   "E",
    "R",
    "W",
-   "E",
+   "W",
    "W",
    "E"
   ],
@@ -96,10 +96,10 @@
    "Q",
    "W",
    "Q",
-   "E",
+   "W",
    "R",
    "W",
-   "W",
+   "E",
    "W",
    "E"
   ]

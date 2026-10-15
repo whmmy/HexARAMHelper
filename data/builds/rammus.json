@@ -1,6 +1,6 @@
 {
  "slug": "rammus",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/rammus/build",
  "patch": "16.20",
  "starter_items": [
@@ -36,18 +36,18 @@
   ],
   [
    "荆棘之甲",
+   "千变者贾修",
+   "狂徒铠甲"
+  ],
+  [
+   "荆棘之甲",
    "无终恨意",
    "千变者贾修"
   ],
   [
    "荆棘之甲",
    "千变者贾修",
-   "狂徒铠甲"
-  ],
-  [
-   "荆棘之甲",
-   "日炎圣盾",
-   "千变者贾修"
+   "日炎圣盾"
   ]
  ],
  "skill_orders": [

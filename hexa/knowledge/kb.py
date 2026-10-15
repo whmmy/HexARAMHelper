@@ -17,6 +17,10 @@ from pathlib import Path
 
 from hexa.config import DATA_DIR, KNOW_DIR
 
+# 描述覆盖共识门槛：同一挑战文本累计见到 N 次才允许覆盖库内
+# （20261015 案：单帧 OCR 噪声永远赢不了已入库文本，见 record_augment_desc）
+DESC_CONSENSUS = 2
+
 # DD item tags → 伤害/路线语义（current_path 推断用，rules_engine 消费）
 # 注：DD 中魔抗 tag 为 SpellBlock（无 MagicResist 这个 tag）
 ITEM_TAG_PATH = {
@@ -64,6 +68,12 @@ class KnowledgeBase:
         # 花费返还——原文才是事实源，评级 prompt 冲突时以描述为准）
         self.augment_descs = {}
         self._desc_lock = threading.Lock()
+        # 描述共识状态（20261015 覆盖共识案，均为内存态，重启归零可接受
+        # ——资产是增速器，票仓随下次对局重积）：
+        # _desc_hits：库内现文本的一致读计数；_desc_votes：挑战者票仓
+        # （每名一个槽位，交替出现的多种噪声永远凑不齐共识）
+        self._desc_hits = {}
+        self._desc_votes = {}
         self._load_all()
 
     # ── 加载 ──────────────────────────────────────────────────────
@@ -129,6 +139,11 @@ class KnowledgeBase:
                 self.augment_descs = {name: (entry.get("text") or "")
                                       for name, entry in
                                       (data.get("descs") or {}).items()}
+                # hits 随写盘快照（上次写时的一致读数）；缺省 1=能进库说明
+                # 至少过了一次共识，restart 后从 1 起步不阻塞后续覆盖
+                self._desc_hits = {name: int(entry.get("hits") or 1)
+                                   for name, entry in
+                                   (data.get("descs") or {}).items()}
             except Exception as e:
                 print(f"[WARN] augment_descs.json 读取失败: {e}")
 
@@ -137,22 +152,43 @@ class KnowledgeBase:
         return self.augment_descs.get(name, "")
 
     def record_augment_desc(self, name: str, text: str) -> bool:
-        """写回一条卡面描述（OCR 线程调用）：锁内合并 + 原子落盘。
+        """写回一条卡面描述（OCR 线程调用）：共识合并 + 原子落盘。
 
-        同名已有且文本一致 → 跳过写盘（每轮评级都会回调，不刷盘）；
-        文本不同（版本改版/上轮 OCR 噪声）→ 覆盖取新。写盘失败只警告
-        （资产是增速器，丢一轮下局再长）。"""
+        覆盖共识（20261015 案）：描述是自由文本没有白名单可比，单帧
+        OCR 噪声曾可"后写覆盖"永久污染库（而描述在评级 prompt 冲突时
+        压过标签，污染杀伤力大）。现约定：
+        - 首写（库内无此名）不受限，即写即用；
+        - 与库内文本一致 → _desc_hits+1（不刷盘，防评级每轮回调刷盘；
+          计数重启归零可接受）；
+        - 与库内不同 → 进挑战者票仓，同一挑战文本累计 ≥DESC_CONSENSUS
+          次才覆盖库内（真改版/上轮噪声两条一致即通过；每名一个票仓
+          槽位，交替出现的多种噪声永远凑不齐）。
+        通顺性判定在调用方校验器（desc_validator），本层只管共识与落盘。
+        返回 True=库内文本发生变化（新写或覆盖）。写盘失败只警告。"""
         if not name or not text:
             return False
         with self._desc_lock:
-            if self.augment_descs.get(name) == text:
+            cur = self.augment_descs.get(name)
+            if cur == text:
+                self._desc_hits[name] = self._desc_hits.get(name, 0) + 1
                 return False
+            if cur is not None:
+                vote = self._desc_votes.get(name)
+                if not vote or vote["text"] != text:
+                    self._desc_votes[name] = {"text": text, "hits": 1}
+                    return False
+                vote["hits"] += 1
+                if vote["hits"] < DESC_CONSENSUS:
+                    return False
+                self._desc_votes.pop(name, None)
             self.augment_descs[name] = text
+            self._desc_hits[name] = 1
             path = self.know_dir / "augment_descs.json"
             try:
                 path.parent.mkdir(parents=True, exist_ok=True)
                 data = {"version": 1, "descs": {
-                    n: {"text": t, "ts": time.time()}
+                    n: {"text": t, "ts": time.time(),
+                        "hits": self._desc_hits.get(n, 1)}
                     for n, t in self.augment_descs.items()}}
                 tmp = path.with_suffix(".json.tmp")
                 tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1),

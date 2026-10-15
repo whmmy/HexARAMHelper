@@ -1,6 +1,6 @@
 {
  "slug": "briar",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/briar/build",
  "patch": "16.20",
  "starter_items": [
@@ -34,12 +34,12 @@
   ],
   [
    "焚天",
-   "死亡之舞",
+   "星蚀",
    "振奋盔甲"
   ],
   [
    "焚天",
-   "星蚀",
+   "死亡之舞",
    "振奋盔甲"
   ],
   [

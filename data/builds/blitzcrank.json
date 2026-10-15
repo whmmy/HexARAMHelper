@@ -1,6 +1,6 @@
 {
  "slug": "blitzcrank",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/blitzcrank/build",
  "patch": "16.20",
  "starter_items": [
@@ -19,7 +19,7 @@
    "水银之靴"
   ],
   [
-   "法师之靴"
+   "明朗之靴"
   ]
  ],
  "core_builds": [

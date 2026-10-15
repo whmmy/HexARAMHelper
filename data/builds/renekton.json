@@ -1,6 +1,6 @@
 {
  "slug": "renekton",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/renekton/build",
  "patch": "16.20",
  "starter_items": [
@@ -68,8 +68,8 @@
   ],
   [
    "Q",
-   "W",
    "E",
+   "W",
    "Q",
    "Q",
    "R",
@@ -78,15 +78,15 @@
    "Q",
    "E",
    "R",
+   "E",
+   "E",
    "W",
-   "E",
-   "E",
    "W"
   ],
   [
    "Q",
-   "E",
    "W",
+   "E",
    "Q",
    "Q",
    "R",
@@ -95,9 +95,9 @@
    "Q",
    "E",
    "R",
-   "E",
-   "E",
    "W",
+   "E",
+   "E",
    "W"
   ]
  ],

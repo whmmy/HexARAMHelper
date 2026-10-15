@@ -1,6 +1,6 @@
 {
  "slug": "vayne",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/vayne/build",
  "patch": "16.20",
  "starter_items": [
@@ -43,8 +43,8 @@
    "海妖杀手"
   ],
   [
-   "海妖杀手",
-   "鬼索的狂暴之刃",
+   "破败王者之刃",
+   "智慧末刃",
    "界弓"
   ]
  ],

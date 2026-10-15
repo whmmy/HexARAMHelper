@@ -1,6 +1,6 @@
 {
  "slug": "braum",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/braum/build",
  "patch": "16.20",
  "starter_items": [
@@ -48,9 +48,9 @@
    "荆棘之甲"
   ],
   [
-   "心之钢",
-   "无终恨意",
-   "败魔"
+   "末日寒冬",
+   "败魔",
+   "荆棘之甲"
   ]
  ],
  "skill_orders": [

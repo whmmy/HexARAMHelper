@@ -209,7 +209,8 @@ def suggest_opening(client, ctx, hero: str, first_augment: str,
         parts.insert(1, brief)
     user = "\n\n".join(parts)
     try:
-        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=300)
+        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=300,
+                              purpose="opening")
         picks = _dedup_picks(parse_json(text).get("picks"), allowed)
     except LLMError as e:
         print(f"[WARN] System1 出门装降级规则序: {e}")
@@ -268,7 +269,8 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
     parts.append(PICKS_FORMAT)
     user = "\n\n".join(parts)
     try:
-        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=400)
+        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=400,
+                              purpose="next")
         data = parse_json(text)
         picks = _dedup_picks(data.get("picks"), allowed)
         _set_last_coach(_clean_coach(data.get("coach")))
@@ -323,7 +325,8 @@ def suggest_swap(client, ctx, my_items: list, gold: float, current_path: str,
     user = "\n\n".join(parts)
     try:
         # 输出与下一件同规模（3 项 × 名字+短理由），max_tokens 相应收窄
-        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=300)
+        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=300,
+                              purpose="swap")
         data = parse_json(text)
         picks = _dedup_picks(data.get("picks"), allowed)
         _set_last_coach(_clean_coach(data.get("coach")))
@@ -394,7 +397,8 @@ def rank_augments(client, ctx, hero: str, card_names: list, augments_taken: list
             '{"grades":[{"name":"卡片原名","grade":"S|A|B|C","reason":"<=20字"}]}',
         ]
         user = "\n\n".join(parts)
-        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=260)
+        text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=260,
+                              purpose="ranks")
         data = parse_json(text)
         valid = {r["name"] for r in rule_ranks}
         by_name = {r["name"]: r for r in rule_ranks}

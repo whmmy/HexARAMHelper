@@ -39,6 +39,20 @@ from hexa.config import BASE_DIR
 # gitignore 排除 *.json，用户屏幕专属不入库）
 CALIB_DIR = BASE_DIR / "calibrations"
 
+
+def desc_healthy(text) -> bool:
+    """描述文本健康门（字符级事实守卫，非语义——20261015 描述共识案配套）。
+
+    描述带是中文卡面：拉丁/数字占比过高的串是 UI 元素噪声不是描述，
+    len>=6 的行级过滤拦不住长噪声行。CJK 占比 ≥60% 且总长 ≥8 才放行；
+    语义级"是否通顺"归上层校验器（desc_validator），本层只拦字符垃圾。
+    模块级函数：_ocr_desc_band（评级取数端）与 async_ocr_card_desc
+    （点击补录端）两处描述出口共用同一道门。"""
+    if not text or len(text) < 8:
+        return False
+    cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
+    return cjk / len(text) >= 0.6
+
 # ── 默认布局（16:9 比例；2026-09-25 由 2560x1440 真机海克斯界面整帧
 # OCR + 金框扫描线实测，10 个录像关键帧几何一致，见 media/analysis/） ──
 # title_bands: 三个卡名文本带 (x, y, w, h)；cards: 三张卡片全框（OCR 区 +
@@ -943,7 +957,9 @@ class ScreenDetector(threading.Thread):
                      if t and len(t.strip()) >= 6]
             if lines:
                 lines.sort(key=lambda x: x[0])
-                out[i] = "".join(t for _y, t in lines)
+                text = "".join(t for _y, t in lines)
+                if desc_healthy(text):   # 字符垃圾不出门（健康门见函数注释）
+                    out[i] = text
         return out
 
     def async_ocr_descriptions(self, on_done, round_id=None) -> None:
@@ -991,6 +1007,8 @@ class ScreenDetector(threading.Thread):
                 if lines:
                     lines.sort(key=lambda x: x[0])
                     text = "".join(t for _y, t in lines) or None
+                    if text and not desc_healthy(text):
+                        text = None   # 字符垃圾不入账（同 _ocr_desc_band 门）
             except Exception as e:  # noqa: BLE001 —— 描述失败只降级不入账
                 print(f"[WARN] 记账描述 OCR 异常: {e}")
             on_done(text)

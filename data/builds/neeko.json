@@ -1,6 +1,6 @@
 {
  "slug": "neeko",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/neeko/build",
  "patch": "16.20",
  "starter_items": [
@@ -38,14 +38,14 @@
    "灭世者的死亡之帽"
   ],
   [
-   "残疫",
-   "风暴狂涌",
-   "影焰"
-  ],
-  [
    "卢登的回声",
    "风暴狂涌",
    "中娅沙漏"
+  ],
+  [
+   "残疫",
+   "风暴狂涌",
+   "影焰"
   ]
  ],
  "skill_orders": [

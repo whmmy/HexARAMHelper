@@ -1,6 +1,6 @@
 {
  "slug": "kindred",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/kindred/build",
  "patch": "16.20",
  "starter_items": [
@@ -39,13 +39,13 @@
   ],
   [
    "收集者",
-   "无尽之刃",
-   "多米尼克领主的致意"
+   "破败王者之刃",
+   "无尽之刃"
   ],
   [
    "收集者",
-   "破败王者之刃",
-   "无尽之刃"
+   "无尽之刃",
+   "多米尼克领主的致意"
   ]
  ],
  "skill_orders": [

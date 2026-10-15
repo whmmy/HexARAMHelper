@@ -1,6 +1,6 @@
 {
  "slug": "hecarim",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/hecarim/build",
  "patch": "16.20",
  "starter_items": [
@@ -36,15 +36,15 @@
    "魔切"
   ],
   [
+   "星蚀",
+   "朔极之矛",
+   "死亡之舞"
+  ],
+  [
    "女神之泪",
    "星蚀",
    "魔切",
    "朔极之矛"
-  ],
-  [
-   "星蚀",
-   "朔极之矛",
-   "死亡之舞"
   ],
   [
    "女神之泪",
@@ -100,8 +100,8 @@
    "Q",
    "W",
    "R",
-   "E",
    "W",
+   "E",
    "W",
    "E"
   ]

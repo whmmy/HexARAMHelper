@@ -1,6 +1,6 @@
 {
  "slug": "nautilus",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/nautilus/build",
  "patch": "16.20",
  "starter_items": [
@@ -45,12 +45,12 @@
   [
    "心之钢",
    "无终恨意",
-   "振奋盔甲"
+   "荆棘之甲"
   ],
   [
    "心之钢",
-   "无终恨意",
-   "荆棘之甲"
+   "狂徒铠甲",
+   "败魔"
   ]
  ],
  "skill_orders": [

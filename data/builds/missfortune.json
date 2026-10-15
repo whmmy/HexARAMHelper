@@ -1,6 +1,6 @@
 {
  "slug": "missfortune",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/missfortune/build",
  "patch": "16.20",
  "starter_items": [
@@ -44,9 +44,9 @@
    "饮血剑"
   ],
   [
-   "收集者",
-   "公理圆弧",
-   "魔切"
+   "黯炎火炬",
+   "兰德里的折磨",
+   "影焰"
   ]
  ],
  "skill_orders": [
