@@ -1,6 +1,6 @@
 {
  "slug": "yunara",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/yunara/build",
  "patch": "16.20",
  "starter_items": [
@@ -93,9 +93,9 @@
    "Q",
    "E",
    "Q",
-   "E",
-   "R",
    "W",
+   "R",
+   "E",
    "E",
    "E",
    "W"

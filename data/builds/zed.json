@@ -1,6 +1,6 @@
 {
  "slug": "zed",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/zed/build",
  "patch": "16.20",
  "starter_items": [
@@ -48,10 +48,9 @@
    "公理圆弧"
   ],
   [
-   "锯齿短匕",
-   "狂妄",
+   "电震涡流剑",
    "公理圆弧",
-   "星蚀"
+   "赛瑞尔达的怨恨"
   ]
  ],
  "skill_orders": [

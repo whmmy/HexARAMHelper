@@ -1,6 +1,6 @@
 {
  "slug": "yasuo",
- "fetched_at": "2026-10-14",
+ "fetched_at": "2026-10-15",
  "url_build": "https://op.gg/zh-cn/lol/modes/aram-mayhem/yasuo/build",
  "patch": "16.20",
  "starter_items": [
@@ -44,9 +44,9 @@
    "智慧末刃"
   ],
   [
-   "不朽盾弓",
+   "育恩塔尔荒野箭",
    "无尽之刃",
-   "死亡之舞"
+   "饮血剑"
   ]
  ],
  "skill_orders": [
