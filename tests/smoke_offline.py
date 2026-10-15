@@ -346,8 +346,20 @@ def test_rules():
                                               prefer=[c.name for c in seq_t])
     check("腰带不再往已拥有的心之钢合",
           target_t and target_t != "心之钢", note_t)
-    check("腰带目标对齐推荐序列",
-          target_t in [c.name for c in seq_t], str(target_t))
+    # 20261015 数据刷新案：16.20 OP.GG 日女坦克线（无终恨意/荆棘之甲/败魔）
+    # 合成链均不含巨人腰带，对齐分支无从命中，回落同路线腰带合成件——断言
+    # 改为"命中推荐序列，或回落件确由腰带合成且路线一致"，不再钉具体件名
+    in_seq = target_t in [c.name for c in seq_t]
+    from_belt = "1011" in (kb.items.get(target_t, {}).get("from") or [])
+    check("腰带目标对齐推荐序列（或回落同路线腰带件）",
+          target_t and (in_seq or (from_belt
+                                   and kb.item_path_bias(target_t) == "tank")),
+          f"{target_t} in_seq={in_seq} from_belt={from_belt}")
+    tgt_pre, note_pre = rules.component_advice(
+        ["巨人腰带"], "tank", game_map="12", prefer=["原生质护带"])
+    check("prefer 序列命中即直接置顶",
+          tgt_pre == "原生质护带" and "与当前路线一致" in note_pre,
+          (tgt_pre, note_pre))
     target_f, _ = rules.component_advice(mine_t, "tank", game_map="12")
     check("数据序兜底同样排除已拥有",
           target_f and target_f != "心之钢", str(target_f))
