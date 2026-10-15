@@ -554,11 +554,26 @@ class AIDecisionEngine(DecisionEngine):
                 taken, base, enemy=self._enemy_detail(),
                 allies=self._ally_detail(),
                 extra_allowed=self._extra_allowed(),
-                augment_descs=_augment_descs(kb, taken))
-            return [Candidate(p["name"], p["reason"],
-                              price=kb.items.get(p["name"], {}).get("gold", 0))
-                    for p in picks
-                    if kb.item_available(p["name"], gm)]
+                augment_descs=_augment_descs(kb, taken),
+                allow_nomination=True)
+            owned = {str(n) for n in (my_items or [])}
+            out = []
+            for p in picks:
+                # 开放提名件（清单外，钢化你心案 20261015）：逐字过防幻觉
+                # 校验——真实装备 + 地图可买 + 杂项守卫 + 未拥有，任一不过
+                # 即丢弃；池内件本就来自 System2 方案，沿用地图可买原口径
+                if p.get("nominated"):
+                    if not (kb.valid_item(p["name"])
+                            and kb.item_available(p["name"], gm)
+                            and not _is_fullstat_item(kb, p["name"])
+                            and p["name"] not in owned):
+                        continue
+                elif not kb.item_available(p["name"], gm):
+                    continue
+                out.append(Candidate(
+                    p["name"], p["reason"],
+                    price=kb.items.get(p["name"], {}).get("gold", 0)))
+            return out
         self._submit(KIND_NEXT, serial, fn)
         return base
 

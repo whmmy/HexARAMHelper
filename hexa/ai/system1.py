@@ -23,8 +23,9 @@ SYSTEM_PROMPT = """你是英雄联盟海克斯大乱斗的局内快讯参谋。�
 你的任务：结合当下局面，在候选内排序/微调档位，并写精炼理由。
 
 铁律：
-1. 装备名/海克斯名只能用输入清单里的原名，一个字都不能改，\
-也不得引入清单外的任何名字。
+1. 装备名/海克斯名只能用输入清单里的原名，一个字都不能改；\
+清单外的名字仅当任务明确允许"开放提名"时可用（且必须同为真实\
+装备原名），否则不得引入。
 2. 理由 <=22 字，结合敌方阵容/威胁/已选海克斯/身上小件，说人话。
 3. 只输出 JSON，不输出任何其他文字；具体字段以任务末尾给出的《输出格式》为准。"""
 
@@ -38,6 +39,18 @@ PICKS_FORMAT = """《输出格式》只输出 JSON：
 "coach": "≤30字军师总提示（可选）"}
 picks 按推荐度降序，恰好 3 项（候选不足 3 时给实际数量）。\
 coach 可省略；给出时结合《军师提示》修正规则层判断，须 <=30 字。"""
+
+# 开放提名（钢化你心案 20261015）：任务型海克斯描述会点名具体装备
+# （"需求：持有【心之钢】"），而 System2 池锚 OP.GG——16.20 数据把
+# 心之钢从狼人核心线摘掉后，模型看得到点名却无件可选，整局 60 条建议
+# 零次提及。选择权扩到池外 1 件：点名依据必须来自输入事实（描述原文/
+# 战局实证），引擎侧再过 kb.valid_item + 地图可买性 + 杂项/已拥有守卫；
+# 不写任何"海克斯→装备"映射表（判断归模型，代码只守校验边界）。
+NOMINATION_RULE = """《开放提名（最多 1 件）》若已选海克斯的卡面描述（OCR 原文）\
+或其他输入事实点名了某件具体装备（如任务要求"持有【X】"），而它不在候选清单里，\
+picks 里可以直接给这件装备：name 用装备原名（一个字不能改），reason \
+引用点名依据（哪条事实要求它）。其余 picks 仍必须来自候选清单；\
+没有这样的事实时不得提名，非法提名会被系统丢弃。"""
 
 # ── 军师上下文模块态（GameSession ↔ System1 桥接） ────────────────
 # engine 层接口（next_candidates）不透传军师数据（本期未改 engine.py），
@@ -165,16 +178,29 @@ def _fmt_snapshot(my_items, gold, current_path, threat_summary, augments,
     return "\n".join(lines)
 
 
-def _dedup_picks(picks: list, allowed: set) -> list:
-    """防幻觉过滤：只留候选内名字，保持模型给出的顺序"""
-    out, seen = [], set()
+def _dedup_picks(picks: list, allowed: set, nominate: bool = False) -> list:
+    """防幻觉过滤：只留候选内名字，保持模型给出的顺序。
+
+    nominate=True 时放行至多 1 件清单外提名（开放提名，钢化你心案
+    20261015）：打 nominated 标记交引擎侧二次校验（真实装备 + 地图
+    可买 + 杂项守卫），本函数只做形状、去重与数量上限。
+    """
+    out, seen, nominated = [], set(), False
     for p in picks or []:
         if not isinstance(p, dict):
             continue
         name = (p.get("name") or "").strip()
-        if name in allowed and name not in seen:
+        if not name or name in seen:
+            continue
+        if name in allowed:
             seen.add(name)
             out.append({"name": name, "reason": str(p.get("reason") or "")[:24]})
+        elif nominate and not nominated:
+            nominated = True
+            seen.add(name)
+            out.append({"name": name,
+                        "reason": str(p.get("reason") or "")[:24],
+                        "nominated": True})
     return out
 
 
@@ -231,7 +257,7 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
                  threat_summary: str, augments: list,
                  rule_candidates: list, coach_lines=None, enemy=None,
                  allies=None, extra_allowed: list = None,
-                 augment_descs=None) -> list:
+                 augment_descs=None, allow_nomination: bool = False) -> list:
     """下一件三选重排+写理由。返回 [{"name","reason"}]；失败/有效<2 → 规则版。
 
     rule_candidates: 层 0 Candidate 列表（已带规则理由，作降级文案）。
@@ -241,6 +267,9 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
     allies: 队友出装摘要行 ["英雄: 装备1、装备2"]（快照直出，含我）。
     extra_allowed: 跨方案权衡白名单（全方案池并集，engine 已过校验/
     地图可买性/杂项过滤）——模型可从其他方案取件，防幻觉边界不变。
+    allow_nomination: 开放提名（钢化你心案 20261015）——任务允许 picks
+    携带至多 1 件清单外装备（nominated 标记），点名依据须为输入事实；
+    引擎侧逐字过校验后才进推荐，本函数不做白名单判断。
     模型可选输出 coach 字段（≤30字）→ 模块态 last_coach，由
     GameSession._apply_ai_coach 消费覆盖规则军师文案。
     """
@@ -260,6 +289,8 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
         "《候选清单（只能从中选）》\n" + "\n".join(
             _cand_line(c) for c in rule_candidates),
     ]
+    if allow_nomination:
+        parts.append(NOMINATION_RULE)
     brief = _briefing_line(ctx)
     if brief:
         parts.append(brief)
@@ -272,7 +303,8 @@ def suggest_next(client, ctx, my_items: list, gold: float, current_path: str,
         text, _ = client.chat(SYSTEM_PROMPT, user, max_tokens=400,
                               purpose="next")
         data = parse_json(text)
-        picks = _dedup_picks(data.get("picks"), allowed)
+        picks = _dedup_picks(data.get("picks"), allowed,
+                             nominate=allow_nomination)
         _set_last_coach(_clean_coach(data.get("coach")))
     except LLMError as e:
         print(f"[WARN] System1 下一件降级规则序: {e}")

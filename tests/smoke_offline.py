@@ -2162,6 +2162,101 @@ def test_ai_build_pool():
     check("无白名单时跨方案名触发规则版回退",
           out2 and out2[0]["name"] == "焚天", str(out2))
 
+    # ---- 开放提名（钢化你心案 20261015）：池外 1 件点名装备可进推荐 ----
+    # 16.20 数据把心之钢从狼人核心线摘掉，而海克斯"钢化你心"卡面点名
+    # "需求：持有【心之钢】"——System1 拿到描述事实后须能提名池外件；
+    # 引擎侧逐字校验（真实装备+地图可买+杂项+已拥有），防幻觉边界不破。
+    class _CapNom:
+        configured = True
+        usage = UsageStats()
+
+        def __init__(self, picks):
+            self.picks = picks
+            self.user = ""
+
+        def chat(self, system, user, max_tokens=None, json_mode=True,
+                 purpose=""):
+            self.user = user
+            return (_json.dumps({"picks": self.picks}), {})
+
+    cand_pool = [_Cand("焚天", "r", price=3000),
+                 _Cand("破败王者之刃", "r2", price=3200)]
+    cap_nom = _CapNom([{"name": "心之钢", "reason": "钢化你心要求持有"},
+                       {"name": "焚天", "reason": "主线"},
+                       {"name": "破败王者之刃", "reason": "次序"}])
+    nom_ok = system1.suggest_next(
+        cap_nom, ctx2b, ["长剑"], 900, "ad", "威胁", [], cand_pool,
+        allow_nomination=True)
+    check("提名规则随 allow_nomination 进 prompt",
+          "开放提名" in cap_nom.user, cap_nom.user[-120:])
+    check("开放提名：池外件带 nominated 标记保留且置顶",
+          nom_ok and nom_ok[0]["name"] == "心之钢"
+          and nom_ok[0].get("nominated") is True
+          and [p["name"] for p in nom_ok[1:]] == ["焚天", "破败王者之刃"],
+          str(nom_ok))
+    nom_two = system1.suggest_next(
+        _CapNom([{"name": "心之钢", "reason": "提名"},
+                 {"name": "巨人腰带", "reason": "越界第二件"},
+                 {"name": "焚天", "reason": "主线"}]),
+        ctx2b, ["长剑"], 900, "ad", "威胁", [], cand_pool,
+        allow_nomination=True)
+    check("开放提名：至多 1 件清单外（越界第二件丢弃）",
+          sum(1 for p in nom_two if p.get("nominated")) == 1
+          and "巨人腰带" not in {p["name"] for p in nom_two}, str(nom_two))
+    nom_off = system1.suggest_next(
+        _CapNom([{"name": "心之钢", "reason": "提名"},
+                 {"name": "焚天", "reason": "主线"}]),
+        ctx2b, ["长剑"], 900, "ad", "威胁", [], cand_pool)
+    check("默认不开提名：池外名丢弃并触发规则版回退",
+          nom_off and all(not p.get("nominated") for p in nom_off)
+          and nom_off[0]["name"] == "焚天", str(nom_off))
+
+    # ---- 引擎接线：提名件过校验链才进推荐 ----
+    eng_n, _c1n, _c2n = build_ai_engine(
+        script_s2=[_json.dumps(two_builds)],
+        script_s1=[
+            _json.dumps({"picks": [
+                {"name": "心之钢", "reason": "钢化你心点名持有"},
+                {"name": "焚天", "reason": "主线"}]}),
+            _json.dumps({"picks": [
+                {"name": "魔法心之刃", "reason": "幻觉提名"},
+                {"name": "焚天", "reason": "主线"},
+                {"name": "星蚀", "reason": "次序"}]}),
+            _json.dumps({"picks": [
+                {"name": "心之钢", "reason": "已拥有仍提名"},
+                {"name": "焚天", "reason": "主线"}]})])
+    got_n = []
+    eng_n.bind(lambda kind, payload, serial: got_n.append((kind, payload,
+                                                           serial)))
+    eng_n.start_game(hero, [hero], ["黑暗之女"])
+    deadline = time.time() + 6
+    while eng_n.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    eng_n.next_candidates(["长剑"], 900, "ad", ThreatProfile(),
+                          serial=11, reason="event")
+    eng_n.next_candidates(["长剑"], 900, "ad", ThreatProfile(),
+                          serial=12, reason="event")
+    eng_n.next_candidates(["心之钢", "长剑"], 900, "ad", ThreatProfile(),
+                          serial=13, reason="event")
+    deadline = time.time() + 6
+    while sum(1 for k, _p, _s in got_n if k == KIND_NEXT) < 3 \
+            and time.time() < deadline:
+        time.sleep(0.02)
+    by_serial = {s: p for k, p, s in got_n if k == KIND_NEXT}
+    nom_payload = by_serial.get(11) or []
+    check("引擎侧提名件过校验进推荐（心之钢 3000G 置顶）",
+          nom_payload and nom_payload[0].name == "心之钢"
+          and nom_payload[0].price == 3000, str(nom_payload))
+    hall_payload = by_serial.get(12) or []
+    check("引擎侧幻觉提名丢弃，池内件照常",
+          hall_payload and all(c.name != "魔法心之刃" for c in hall_payload)
+          and [c.name for c in hall_payload] == ["焚天", "星蚀"],
+          str(hall_payload))
+    owned_payload = by_serial.get(13) or []
+    check("引擎侧已拥有提名丢弃（与 2026-09-27 排除口径一致）",
+          owned_payload and all(c.name != "心之钢" for c in owned_payload),
+          str(owned_payload))
+
     # ---- 会话级：KIND_CTX 就绪自动刷新建议（方案池替换 OP.GG 兜底） ----
     s7 = GameSession(kb, rules)
     eng7, _f1, _f2 = build_ai_engine(script_s2=[_json.dumps(two_builds)])
