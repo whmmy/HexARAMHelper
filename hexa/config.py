@@ -99,6 +99,7 @@ DEFAULTS = {
     "diagnostics": {
         "elevate_auto": True,         # 未提权时自动弹 UAC 重启（游戏内点击记账前提）
         "click_capture": True,        # 点击定格截图落 log/captures/（排障用）
+        "ai_ledger_keep_days": 14,    # AI 调用台账（提示词+返回原文）保留天数
     },
     "ui": {
         "overlay_visible": True,

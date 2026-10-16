@@ -200,6 +200,11 @@ def main():
     # ≥2 次一致才覆盖）。两条写路径（点击补录/评级取数）共用一道闸。
     desc_validator = DescValidator(settings)
     usage_ledger = get_usage_ledger()
+    # 台账按对局分文件（log/ai_calls/{起局时刻}_{英雄}.jsonl，与复盘日志
+    # 同款命名），保留天数可配，每局轮转时清理过期
+    usage_ledger.keep_days = max(
+        0, settings.get_float("diagnostics", "ai_ledger_keep_days",
+                              default=14))
 
     def _accept_desc(name, text):
         """描述文本入库闸（两条写路径共用）：判坏拒收，其余交 kb 共识。
@@ -217,12 +222,21 @@ def main():
         kb.record_augment_desc(name, text)
 
     def _phase_game_start(payload):
-        """开局钩子：校验器每局计数归零 + AI 台账挂局上下文（复盘按 ts
-        对齐复盘日志时能直接看到这是谁的局）"""
-        desc_validator.new_game()
-        usage_ledger.set_context(
-            hero=str((payload or {}).get("my_hero") or ""))
+        """开局钩子：校验器每局计数归零 + AI 台账轮转到本局文件。轮转
+        放在 session.on_game_start 之后——对局文件名直接取复盘同源
+        （session._game_t0 + 英雄），两处文件一一同名对应；选人期缓冲
+        的 ctx 预生成记录随本局文件落盘。"""
         session.on_game_start(payload)
+        desc_validator.new_game()
+        try:
+            ts = time.strftime("%Y%m%d_%H%M%S",
+                               time.localtime(session._game_t0))
+            safe_hero = "".join(
+                ch for ch in (session.my_hero or "unknown")
+                if ch.isalnum() or "\u4e00" <= ch <= "\u9fff") or "unknown"
+            usage_ledger.new_game(f"{ts}_{safe_hero}", hero=session.my_hero)
+        except Exception as e:  # noqa: BLE001 —— 台账轮转不拖垮开局
+            print(f"[WARN] AI 台账轮转失败（继续用旧文件）: {e}")
 
     # ── 海克斯落库探针（20261013，诊断专用）────────────────────────
     # 竞品实证 allgamedata.allPlayers[].runes.generalRunes[] 中 id>100000

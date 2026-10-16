@@ -112,7 +112,9 @@ class LLMClient:
 
         purpose=业务环节标签（ctx/opening/next/swap/ranks/desc_check…），
         缺省回退槽位名；每次尝试（含降级重试）各落一行 AI 台账（20261015
-        各环节账单案），复盘按 ts 对齐复盘日志。"""
+        各环节账单案），含发出去的 system/user 提示词全文与模型返回原文
+        （20261016 复盘口径：评估模型好坏/要不要换模型，看 log/ai_calls/
+        按对局分文件即可），并按槽位单价折算 cost（元）。"""
         max_tokens = max_tokens or int(
             self.settings.get_float(self.slot, "max_tokens", default=800))
         temperature = self.settings.get_float(self.slot, "temperature", default=0.3)
@@ -120,23 +122,30 @@ class LLMClient:
         fb = self.settings.get(self.slot, "fallback_model", default="")
         attempts = [model, fb] if (fb and fb != model) else [model, model]
         last_err = None
+        price_in = self.settings.get_float(self.slot, "price_in", default=0.0)
+        price_out = self.settings.get_float(self.slot, "price_out", default=0.0)
         for i, model in enumerate(attempts):
             t0 = time.time()
             try:
                 out, meta = self._call_once(model, system, user, max_tokens,
                                             temperature, json_mode)
+                tin = meta.get("tokens_in", 0)
+                tout = meta.get("tokens_out", 0)
                 _ul.get().record(purpose or self.slot, self.slot, ok=True,
                                  model=meta.get("model", model),
                                  latency=meta.get("latency"),
-                                 tokens_in=meta.get("tokens_in", 0),
-                                 tokens_out=meta.get("tokens_out", 0))
+                                 tokens_in=tin, tokens_out=tout,
+                                 cost=tin / 1e6 * price_in
+                                 + tout / 1e6 * price_out,
+                                 system=system, user=user, response=out)
                 return out, meta
             except Exception as e:  # noqa: BLE001 —— 任何 SDK/网络异常都走降级链
                 last_err = e
                 self.last_error = f"{type(e).__name__}: {e}"[:200]
                 _ul.get().record(purpose or self.slot, self.slot, ok=False,
                                  model=model,
-                                 latency=time.time() - t0, error=e)
+                                 latency=time.time() - t0, error=e,
+                                 system=system, user=user, response="")
                 # 超时类错误才值得换降级模型；其余首试失败直接二试同模型意义不大，
                 # 但保留统一重试语义（间隔 0.5s）。
                 time.sleep(0.5)
@@ -215,19 +224,22 @@ class LLMClient:
         if not self._resolve_key():
             return {"ok": False, "error": "未配置 API Key"}
         t0 = time.time()
+        _sys, _user = "你是连通性探测器。", "回复 JSON: {\"ok\": true}"
         try:
-            _, meta = self._call_once(
-                self.model, "你是连通性探测器。", "回复 JSON: {\"ok\": true}",
+            out, meta = self._call_once(
+                self.model, _sys, _user,
                 max_tokens=16, temperature=0.0, json_mode=True)
             _ul.get().record("test_connection", self.slot, ok=True,
                              model=meta.get("model", self.model),
                              latency=meta.get("latency"),
                              tokens_in=meta.get("tokens_in", 0),
-                             tokens_out=meta.get("tokens_out", 0))
+                             tokens_out=meta.get("tokens_out", 0),
+                             system=_sys, user=_user, response=out)
             return {"ok": True, "latency": meta["latency"], "model": meta["model"]}
         except Exception as e:  # noqa: BLE001 —— 测试连接需把失败原因带给 UI
             _ul.get().record("test_connection", self.slot, ok=False,
-                             model=self.model, latency=time.time() - t0, error=e)
+                             model=self.model, latency=time.time() - t0,
+                             error=e, system=_sys, user=_user, response="")
             return {"ok": False, "error": f"{type(e).__name__}: {e}"[:160]}
 
 

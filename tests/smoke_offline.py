@@ -5241,6 +5241,7 @@ def test_desc_consensus_and_ai_ledger():
     _default_saved = _ul.get()
     _tmp_led = _Path(_tempfile.mkdtemp(prefix="smoke_ledger_"))
     _ul.set_default(_ul.UsageLedger(log_dir=_tmp_led))
+    _ul.get().new_game("20261016_110000_盖伦", hero="盖伦")   # 开局轮转：③ 起的调用落本局文件
 
     class _ValSettings:
         """desc_check 槽位协议子集（configured 可切）"""
@@ -5317,32 +5318,59 @@ def test_desc_consensus_and_ai_ledger():
         finally:
             _dv.CALLS_PER_GAME = _saved_cap
 
-        # ---- ④ UsageLedger JSONL 落盘（上面 ③ 的校验调用已顺带入账） ----
-        rows = [ _json.loads(l) for l in
-                 (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
-                 .strip().splitlines() ]
-        check("台账：校验调用逐行落盘（purpose/slot/model）",
+        # ---- ④ 台账按对局分文件 + 提示词/返回原文 + 过期清理 ----
+        _game0 = "20261016_110000_盖伦"
+        _rd = lambda p: [ _json.loads(l) for l in
+                          (_tmp_led / p).read_text(encoding="utf-8")
+                          .strip().splitlines() ]
+        rows = _rd(f"{_game0}.jsonl")
+        check("台账：校验调用落对局文件（purpose/slot/model）",
               len(rows) >= 1 and rows[0]["purpose"] == "desc_check"
               and rows[0]["slot"] == "desc_check"
               and rows[0]["ok"] is True and rows[0]["model"] == "fake-check")
+        # 开局前调用缓冲 → new_game 随本局文件落盘（选人期 ctx 归属不丢）
+        _game1 = "20261016_120000_暗裔剑魔"
         led = _ul.UsageLedger(log_dir=_tmp_led)
-        led.set_context(hero="暗裔剑魔")
-        led.record("next", "system1", True, model="fake-flash",
-                   latency=0.123, tokens_in=100, tokens_out=50)
-        led.record("ranks", "system1", False, model="fake-flash",
-                   latency=1.2, error="超时爆炸")
-        rows_b = [ _json.loads(l) for l in
-                   (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
-                   .strip().splitlines() ]
-        tail = rows_b[-2:]
-        check("台账：成功行字段齐全（ctx/purpose/tokens）",
-              tail[0]["ok"] is True and tail[0]["hero"] == "暗裔剑魔"
-              and tail[0]["purpose"] == "next" and tail[0]["slot"] == "system1"
-              and tail[0]["model"] == "fake-flash"
-              and tail[0]["tokens_in"] == 100 and tail[0]["tokens_out"] == 50)
-        check("台账：失败行带错误摘要",
-              tail[1]["ok"] is False and tail[1]["purpose"] == "ranks"
-              and "超时爆炸" in tail[1]["error"])
+        led.record("ctx", "system2", True, model="m2",
+                   tokens_in=9, tokens_out=1,
+                   system="S2系统提示", user="S2用户提示", response="S2返回")
+        check("台账：开局前调用缓冲不落盘",
+              not (_tmp_led / f"{_game1}.jsonl").exists())
+        led.new_game(_game1, hero="暗裔剑魔")
+        rows_b = _rd(f"{_game1}.jsonl")
+        check("台账：缓冲随开局落盘且带提示词/返回全文",
+              len(rows_b) == 1 and rows_b[0]["hero"] == ""   # hero 记录时刻快照，开局前为空；对局归属看文件名
+              and rows_b[0]["purpose"] == "ctx"
+              and rows_b[0]["system"] == "S2系统提示"
+              and rows_b[0]["user"] == "S2用户提示"
+              and rows_b[0]["response"] == "S2返回")
+        led.record("next", "system1", False, model="fake-flash",
+                   latency=1.2, error="超时爆炸",
+                   system="S1系统", user="S1用户", response="")
+        led.record("ranks", "system1", True, model="fake-flash",
+                   latency=0.123, tokens_in=100, tokens_out=50,
+                   cost=0.000215)
+        rows_c = _rd(f"{_game1}.jsonl")
+        tail = rows_c[-2:]
+        check("台账：失败行带错误摘要（response 置空不误当结果）",
+              tail[0]["ok"] is False and tail[0]["purpose"] == "next"
+              and "超时爆炸" in tail[0]["error"]
+              and tail[0]["system"] == "S1系统" and tail[0]["response"] == "")
+        check("台账：账单行 tokens/cost 齐全",
+              tail[1]["ok"] is True and tail[1]["purpose"] == "ranks"
+              and tail[1]["model"] == "fake-flash"
+              and tail[1]["tokens_in"] == 100 and tail[1]["tokens_out"] == 50
+              and abs(tail[1]["cost"] - 0.000215) < 1e-9)
+        # 定时清除：每局轮转时按 mtime 清 keep_days 前的台账文件
+        import os as _os
+        _old = _tmp_led / "20200101_000000_远古对局.jsonl"
+        _kept = _tmp_led / "20990101_000000_保留期内.jsonl"
+        _old.write_text("x", encoding="utf-8")
+        _kept.write_text("x", encoding="utf-8")
+        _os.utime(_old, (0, 0))   # mtime → 1970，14 天阈值外必删
+        led.new_game("20261016_130000_九尾妖狐", hero="九尾妖狐")
+        check("台账：过期文件轮转时清除（保留期内不动）",
+              not _old.exists() and _kept.exists())
         led_fail = _ul.UsageLedger(log_dir=_tmp_led / "not_a_dir" / "f")
         (_tmp_led / "not_a_dir").write_text("占位文件，mkdir 必炸",
                                             encoding="utf-8")
@@ -5352,22 +5380,24 @@ def test_desc_consensus_and_ai_ledger():
         except Exception as e:  # noqa: BLE001
             check("台账：写盘失败不外抛（限频 WARN）", False, str(e))
 
-        # ---- ⑤ LLMClient 埋点 + purpose 贯通 ----
+        # ---- ⑤ LLMClient 埋点 + purpose 贯通（默认实例轮转到新对局） ----
+        _game5 = "20261016_140000_莫甘娜"
+        _ul.get().new_game(_game5, hero="莫甘娜")
         client = _LLM(_ValSettings(configured=True), "system1")
         client._call_once = (lambda model, system, user, max_tokens,
                              temperature, json_mode: (
                 "x", {"model": "m1", "latency": 0.05,
                       "tokens_in": 7, "tokens_out": 3}))
         out, _meta = client.chat("sys", "user", max_tokens=10, purpose="next")
-        rows5 = [ _json.loads(l) for l in
-                  (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
-                  .strip().splitlines() ]
-        check("台账埋点：成功调用落一行（purpose/model/tokens）",
+        rows5 = _rd(f"{_game5}.jsonl")
+        check("台账埋点：成功行带发送提示词与返回原文",
               out == "x" and rows5[-1]["purpose"] == "next"
               and rows5[-1]["ok"] is True and rows5[-1]["model"] == "m1"
               and rows5[-1]["tokens_in"] == 7
               and rows5[-1]["tokens_out"] == 3
-              and rows5[-1]["slot"] == "system1")
+              and rows5[-1]["slot"] == "system1"
+              and rows5[-1]["system"] == "sys" and rows5[-1]["user"] == "user"
+              and rows5[-1]["response"] == "x")
 
         def _boom(*a, **k):
             raise RuntimeError("net down")
@@ -5379,13 +5409,12 @@ def test_desc_consensus_and_ai_ledger():
             client2.chat("sys", "user", max_tokens=10, purpose="ctx")
         except Exception:  # noqa: BLE001 —— 预期 LLMError（两次尝试全败）
             raised = True
-        rows5b = [ _json.loads(l) for l in
-                   (_tmp_led / "ai_calls.jsonl").read_text(encoding="utf-8")
-                   .strip().splitlines() ]
-        check("台账埋点：降级重试逐次落失败行",
+        rows5b = _rd(f"{_game5}.jsonl")
+        check("台账埋点：降级重试逐次落失败行（提示词留痕）",
               raised and len(rows5b) == n_before + 2
               and rows5b[-2]["ok"] is False and rows5b[-1]["ok"] is False
               and rows5b[-2]["purpose"] == "ctx"
+              and rows5b[-1]["user"] == "user"
               and "net down" in rows5b[-1]["error"])
         fc = FakeClient([])
         try:
