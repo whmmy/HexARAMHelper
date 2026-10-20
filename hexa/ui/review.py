@@ -229,9 +229,9 @@ def compute_ledger(doc) -> dict:
     绝不抛、绝不编造）。
 
     对账口径（全部时间对齐，无名单无阈值）：
-    - 出门装：最早一条 opening 建议 → 其后首个购买事件（同帧新增集合
-      与候选集合有交集 = 听劝）。
-    - 海克斯：card_ranks 条目按「相邻条目 ts」切窗（同轮"基准+精修"
+    - 出门装：最后一条 opening 建议（屏上最终精修版）→ 其后首个购买
+      事件（同帧新增集合与候选集合有交集 = 听劝）。
+    - 海克斯：card_ranks 条目按「相邻轮组首条 ts」切窗（同轮"基准+精修"
       双条按候选名集合相同合并为同一轮，防采纳率分母虚增）→ 落在窗内
       的台账（augments）选择即该轮所选；选中名 ∈ 当轮选项名集合 = 采纳，
       位次为选中卡的推荐序（数据直出）。
@@ -253,22 +253,23 @@ def compute_ledger(doc) -> dict:
     picks.sort(key=lambda x: x[0])
     buys = _purchase_events(doc.get("item_events"))
 
-    # ① 出门装（听劝）
+    # ① 出门装（听劝）：双条（规则版+AI 精修版）取末条对账——精修回包
+    # 原地改写屏上建议，玩家看到并照买的是末条候选集（真机双 opening
+    # 两条 ts 同秒，规则版在屏时间为零）；ts 平局时稳定排序保持落盘序
+    # （规则在前、精修在后），末条必为精修版
     opening = None
-    for e in sug:
-        if e.get("kind") != "opening":
-            continue
-        ts0 = _entry_ts(e)
+    for e in (x for x in sug if x.get("kind") == "opening"):
         cands = _parse_opening(_as_str(e.get("text")))
+        if not cands:
+            continue        # 文本对不上（异常条目）不硬算，与海克斯同口径
+        ts0 = _entry_ts(e)
         first = next((f for f in buys
                       if ts0 is not None and f[0] >= ts0 and f[1]), None)
         opening = {
             "candidates": cands,
             "bought": (first[1] if first else []),
-            "adopted": (bool(set(first[1]) & set(cands))
-                        if first and cands else None),
+            "adopted": (bool(set(first[1]) & set(cands)) if first else None),
         }
-        break
 
     # ② 海克斯轮次（先按候选名集合合并"基准+精修"同轮双条）
     rounds, groups = [], []
@@ -278,10 +279,14 @@ def compute_ledger(doc) -> dict:
             continue        # 文本对不上（异常条目）不硬算，如实少一轮
         names = tuple(n for _, n, _ in opts)
         if groups and groups[-1][0] == names:
-            groups[-1][2] = e   # 同轮：窗口终点延展（下一轮首条 ts 定界）
+            # 同轮精修条：并入只为防轮次虚增；窗口锚保持本组首条（精修
+            # 回包时刻不定，点击落在基准与精修之间都算本轮）；展示选项跟
+            # 屏上最终版（末条——精修原地改写屏上评级）
+            groups[-1][1] = opts
+            groups[-1][3] = e
         else:
-            groups.append([names, opts, e])
-    for gi, (names, opts, first_e) in enumerate(groups):
+            groups.append([names, opts, e, e])
+    for gi, (names, opts, first_e, _last_e) in enumerate(groups):
         ts_i = _entry_ts(first_e)
         ts_next = (_entry_ts(groups[gi + 1][2])
                    if gi + 1 < len(groups) else None)

@@ -69,6 +69,13 @@
     走签名跳过+keepalive 接线源级守卫/PhaseMachine 失败两路径（进程不
     在·连着取不到 phase）共用指数退避梯且复位/LCU _io_lock 互斥（可重
     入+并发 _request 串行化探针）
+25. 修复批回归（20261020）：海克斯白名单=榜单∪标签库并集（默认+兜底
+    双装载路径吃进并集全集、差集名过校验/路线票/防放宽）/替换精修守卫
+    比对改写前快照（M2）/
+    去重帧不占号在屏号回包仍认领（L10）/官方终局块后台回填线程
+    （M6：立即返回·join 后断言·不回流会话态·文件被删放弃）/账本
+    窗口锚与末条 opening（M3/M5）/nearest_recorded 读取端复用（L8）/
+    浮窗签名提交时序+台账轮次直出+主窗卡片滚动画布（源级）
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -196,6 +203,63 @@ def test_kb():
           len(kb.augment_names) >= 200 and len(kb.augment_names) < 300
           and "？？？" not in kb.augment_names,
           f"got {len(kb.augment_names)}")
+    # ---- 白名单并集语义（20261020 海克斯白名单案）：gen_augment_names
+    #      取「榜单(CSV) ∪ 标签库(augments.json 键)」并集——CSV 是英雄×
+    #      海克斯胜率榜，只收录有胜率统计的条目，新海克斯/低出场率条目
+    #      长期缺席；标签库键才是库内全集事实源。校验机制（逐字精确
+    #      匹配）不变，防放宽断言同组在列。
+    import csv as _csv
+    import json as _json_kb
+    import tempfile as _tmpmod
+    root_kb = Path(__file__).resolve().parent.parent
+    tags = _json_kb.loads(
+        (root_kb / "hexa" / "knowledge" / "augments.json")
+        .read_text(encoding="utf-8")).get("augments", {})
+    csv_names = set()
+    with open(root_kb / "data" / "hero_augments.csv",
+              encoding="utf-8-sig") as f:
+        reader = _csv.reader(f)
+        next(reader, None)   # 表头（与 gen_champ_profile 同口径）
+        for row in reader:
+            if len(row) >= 6 and row[5].strip():
+                csv_names.add(row[5].strip())
+    union = {k.strip() for k in tags if k.strip()} | csv_names
+    asset = _json_kb.loads(
+        (root_kb / "hexa" / "knowledge" / "augment_names.json")
+        .read_text(encoding="utf-8"))
+    check("白名单资产=榜单∪标签库并集（真实海克斯名不被榜单挤出）",
+          set(asset.get("names", [])) == union
+          and asset.get("count") == len(asset.get("names", [])),
+          f"asset={len(asset.get('names', []))} union={len(union)}")
+    # 兜底装载路径（CSV 缺席 → augment_names.json 兜底）：差集名全部
+    # 进入校验集——只有标签库收录的新海克斯不再被 valid_augment 拒真
+    nocsv_dir = Path(_tmpmod.mkdtemp(prefix="hexaram_smoke_nocsv_"))
+    atexit.register(shutil.rmtree, nocsv_dir, ignore_errors=True)
+    kb_nocsv = KnowledgeBase(data_dir=nocsv_dir)
+    diff_sample = ["虚空冲刺", "升级：雪球", "魄罗之王的弹跳", "坚若磐石",
+                   "坚韧"]
+    check("兜底装载吃进并集全集（差集样例全过 valid_augment）",
+          kb_nocsv.augment_names == union
+          and all(kb_nocsv.valid_augment(n) for n in union),
+          f"nocsv={len(kb_nocsv.augment_names)} union={len(union)}")
+    check("差集样例逐名 valid（虚空冲刺/升级：雪球/魄罗之王的弹跳/"
+          "坚若磐石/坚韧）",
+          all(kb_nocsv.valid_augment(n) for n in diff_sample),
+          str([n for n in diff_sample if not kb_nocsv.valid_augment(n)]))
+    # 默认装载路径（CSV 在场 = app 唯一运行形态）同样吃进并集全集——
+    # kb 装载端生效点（_load_augment_tags 尾部并入标签库键）由此咬住：
+    # 只改资产不落装载端时，本断言在默认路径下即红（H1 返工案 20261020，
+    # 曾因只有兜底路径断言而 839 全绿漏网）
+    check("默认装载（CSV 在场）=并集全集（差集样例全过 valid_augment）",
+          kb.augment_names == union
+          and all(kb.valid_augment(n) for n in diff_sample),
+          f"default={len(kb.augment_names)} union={len(union)} "
+          f"diff_fail={[n for n in diff_sample if not kb.valid_augment(n)]}")
+    check("校验边界不放宽：陌生名拒绝/占位符不入集（默认与兜底双路径）",
+          not kb_nocsv.valid_augment("不存在的海克斯XYZ")
+          and "？？？" not in kb_nocsv.augment_names
+          and not kb.valid_augment("不存在的海克斯XYZ")
+          and "？？？" not in kb.augment_names)
     check("装备库加载", len(kb.items) > 250, f"got {len(kb.items)}")
     check("DD 版本号", kb.dd_version.startswith("16."), kb.dd_version)
     # 峡谷/大乱斗商店买不到的模式专属件不入库（推荐出去 = 幻觉）
@@ -266,6 +330,11 @@ def test_rules():
     check("坦克装备推断", rules.infer_current_path(["日炎圣盾"], []) == "tank")
     check("海克斯偏移(心之刚示例)",
           rules.infer_current_path(["巨人腰带"], ["心之刚"]) == "tank")
+    # 白名单并集名投路线票（20261020 白名单案）：仅标签库收录的差集名
+    # 带 path_bias 照常数据直出参与投票；bias=none 的位移型不投
+    check("海克斯偏移（标签库差集名 坚若磐石→tank / 虚空冲刺 bias=none 不投）",
+          rules.infer_current_path([], ["坚若磐石"]) == "tank"
+          and rules.infer_current_path([], ["虚空冲刺"]) == "")
 
     # 出门装：OP.GG starter 优先（P1 升级），手工池补足，全部真实装备
     cands = rules.opening_candidates("黑暗之女")  # Annie=ap
@@ -2994,6 +3063,128 @@ def test_history_buckets_and_fingerprint():
               if k == "card_ranks") == 2)
 
 
+# ── 6b++. 替换精修守卫（M2） + 去重帧不占号（L10，20261020） ──────
+
+def test_swap_refine_guard_and_serial_reuse():
+    """满装替换 AI 精修守卫（M2）+ 建议序号落位时占（L10，20261020）。
+
+    ① M2：swap 精修映射回在屏候选对是**原地改写理由**——结论指纹守卫
+      必须比对改写前快照；先改写后比对会退化成「改写后 vs 改写后」恒等，
+      同顺序换理由的精修被当同结论吞掉而屏已变（source/史不跟进）。
+      对照组：原样背回（同序同理由）仍判同结论，不落 AI 不入史。
+    ② L10：建议版本号改在 _set_suggestion 真落位时才占——去重跳过的
+      空转帧不再预占号，在途旧回包按在屏号仍能认领；新结论真落位推进
+      号，旧号回包不覆盖（防旧覆新语义不变）。
+    """
+    print("\n[6b++] 替换精修守卫（M2） + 去重帧不占号（L10）")
+    from hexa.core.rules_engine import Candidate
+    from hexa.core.game_state import Suggestion
+
+    # ---- L10：规则版在屏 → 同结论跨档帧不占号 → 在屏号回包仍认领 ----
+    s = GameSession(kb, rules)
+    s.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                     "my_hero": "暗裔剑魔", "source": "test"})
+    s.on_in_progress()
+    s.record_augment(REAL_AUG, tier="棱彩")
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=500))
+    serial0 = s._sug_serial
+    n_refresh = len(s.history["refresh"])
+    check("前置：规则建议在屏且带在屏号", s.suggestion.source == "rule"
+          and s.suggestion.serial == serial0,
+          f"serial={serial0} kind={s.suggestion.kind}")
+    # 500→760 跨 250G 签名档但同结论指纹 → 去重跳过：序号不推进、史不增
+    # （旧码在入口预占号，空转帧即作废在途回包）
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=760))
+    check("去重跳过帧不推进序号不写史（L10：旧码空转帧预占号）",
+          s._sug_serial == serial0 and s.suggestion.serial == serial0
+          and len(s.history["refresh"]) == n_refresh,
+          f"serial={s._sug_serial}/{serial0} "
+          f"refresh={len(s.history['refresh'])}/{n_refresh}")
+    s._on_engine_result(KIND_NEXT,
+                        [Candidate("星蚀", "AI 版本答案", price=3300)],
+                        serial0)
+    check("在屏号回包仍能认领上屏（source→ai）",
+          s.suggestion.source == "ai"
+          and s.suggestion.candidates[0].name == "星蚀",
+          s.suggestion.source)
+    # 新结论（可买性跨档）真落位：占新号；旧号回包不覆盖（防旧覆新不变）
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=20000))
+    serial1 = s.suggestion.serial
+    check("新结论真落位推进号（规则版回落在屏）",
+          s.suggestion.source == "rule" and serial1 == serial0 + 1
+          and s._sug_serial == serial1,
+          f"serial={serial1}/{s._sug_serial} source={s.suggestion.source}")
+    s._on_engine_result(KIND_NEXT,
+                        [Candidate("焚天", "迟到旧包", price=3300)], serial0)
+    check("旧号回包不覆盖新落位（防旧覆新不变）",
+          s.suggestion.source == "rule"
+          and s.suggestion.candidates[0].name != "焚天",
+          s.suggestion.candidates[0].name)
+
+    # ---- M2：满装替换精修——同顺序换理由必须落位，原样背回不落位 ----
+    full_ap = ["灭世者的死亡之帽", "虚空之杖", "瑞莱的冰晶节杖", "振奋盔甲",
+               "残疫", "明朗之靴"]
+    s2 = GameSession(kb, rules)
+    s2.on_game_start({"ally": ["黑暗之女"],
+                      "enemy": ["九尾妖狐", "皎月女神", "乐芙兰", "盲僧",
+                                "众星之子"],
+                      "my_hero": "黑暗之女", "source": "test"})
+    s2.on_in_progress()
+    s2.on_snapshot(make_snap(my_hero_en="Annie", my_items=full_ap,
+                             my_gold=2000))
+    cur = s2.suggestion
+    check("前置：满装替换规则版在屏", cur.kind == "swap_items"
+          and cur.source == "rule", f"{cur.kind}/{cur.source}")
+    serial = cur.serial
+    buys = [c.buy for c in cur.candidates]
+    reasons0 = [c.reason for c in cur.candidates]
+    n_dec = len(s2.history["decision"])
+    # 对照组：AI 原样背回（同序同理由）→ 同结论不落 AI 不入史
+    s2._on_engine_result(KIND_NEXT,
+                         [Candidate(b, r) for b, r in zip(buys, reasons0)],
+                         serial)
+    check("对照组原样背回：source 保持 rule 不加史",
+          s2.suggestion.source == "rule"
+          and len(s2.history["decision"]) == n_dec,
+          f"{s2.suggestion.source} dec={len(s2.history['decision'])}/{n_dec}")
+    # 同顺序换理由 → 精修落位（旧码守卫先改写后比对，恒等吞掉本条）
+    ai_txt = [f"AI 认为这件更稳{i}" for i in range(len(buys))]
+    s2._on_engine_result(KIND_NEXT,
+                         [Candidate(b, r) for b, r in zip(buys, ai_txt)],
+                         serial)
+    check("同顺序换理由落位 AI（M2：守卫比对改写前快照）",
+          s2.suggestion.source == "ai"
+          and s2.suggestion.candidates[0].reason == ai_txt[0],
+          f"{s2.suggestion.source}/{s2.suggestion.candidates[0].reason}")
+    check("决策桶含 AI 文案（满装替换理由重写即入史）",
+          len(s2.history["decision"]) == n_dec + 1
+          and any("AI 认为这件更稳" in t for _, k, t in s2.history["decision"]
+                  if k == "swap_items"),
+          str(len(s2.history["decision"])))
+    check("_ai_covered 为真（同情形规则版被认定已回答）",
+          s2._ai_covered(Suggestion("swap_items", s2.suggestion.candidates,
+                                    gold=s2.suggestion.gold,
+                                    facts=s2.suggestion.facts)))
+    n_dec = len(s2.history["decision"])
+    s2._suggest_next_items(reason="event")
+    check("后续同情形规则帧不回落不重记（N3 覆盖不闪烁）",
+          s2.suggestion.source == "ai"
+          and len(s2.history["decision"]) == n_dec,
+          f"{s2.suggestion.source} dec={len(s2.history['decision'])}/{n_dec}")
+    # 重排回包 → 换序落位（同号继续认领）
+    s2._on_engine_result(KIND_NEXT,
+                         [Candidate(buys[-1], "AI 置顶换件"),
+                          Candidate(buys[0], "次选")], serial)
+    check("重排回包落位（同号认领换序新结论）",
+          s2.suggestion.source == "ai"
+          and [c.buy for c in s2.suggestion.candidates[:2]]
+          == [buys[-1], buys[0]],
+          str([(c.buy, c.reason) for c in s2.suggestion.candidates[:2]]))
+
+
 # ── 6d. 复盘结果维度 + 本局账本（N4） ─────────────────────────────
 
 def test_review_ledger():
@@ -3085,6 +3276,11 @@ def test_review_ledger():
           len(s.item_events) == 2, str(len(s.item_events)))
     games_dir_6d = BASE_DIR / "log" / "games"
     s.on_end_of_game("EndOfGame")
+    # M6（20261020）：终局块改后台回填线程落盘——断言前必须 join，否则
+    # 依赖「回填线程赢得与读文件的竞速」（fetcher 即返时本机常绿，
+    # 慢机/CI 会闪）
+    if s._eog_thread is not None:
+        s._eog_thread.join(timeout=5)
     newest = sorted(games_dir_6d.glob("*.json"), key=lambda p: p.stat().st_mtime)
     doc = (_json.loads(newest[-1].read_text(encoding="utf-8"))
            if newest else {})
@@ -3140,6 +3336,92 @@ def test_review_ledger():
     s3.on_end_of_game("dodge_requeue")
     check("data_stall/秒退重开不取终局块（跳过名单）",
           fetched["n"] == 0, str(fetched["n"]))
+
+    # ---- ③+ 官方终局块后台回填（M6 20261020）：PhaseMachine 线程不再
+    #      同步等 REST——on_end_of_game 立即返回，复盘先按快照口径落盘
+    #      （官方块缺省），结果由 daemon 线程按文件补写；只碰文件不回流
+    #      会话态（会话已 reset，字段属于下一局） ----
+    gate6 = threading.Event()
+
+    def _slow_fetch():
+        gate6.wait(5)   # 延迟放行：模拟 PreEndOfGame 端点就绪延迟
+        return {"result": "win", "kills": 7, "deaths": 4, "assists": 8}
+
+    s4 = GameSession(kb, rules, result_fetcher=_slow_fetch)
+    s4.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s4.on_in_progress()
+    s4.record_augment(REAL_AUG, tier="棱彩")
+    t_eog = time.time()
+    s4.on_end_of_game("EndOfGame")
+    newest6 = sorted(games_dir_6d.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    doc4 = (_json.loads(newest6[-1].read_text(encoding="utf-8"))
+            if newest6 else {})
+    check("终局回调立即返回（回填线程在途，不拖状态机事件链）",
+          time.time() - t_eog < 0.3 and s4._eog_thread is not None
+          and s4._eog_thread.is_alive(),
+          f"dt={time.time() - t_eog:.3f} "
+          f"thread={s4._eog_thread is not None}")
+    check("复盘先按快照口径落盘（官方块未回，result/kda 暂缺不编造）",
+          doc4.get("hero") == "暗裔剑魔" and "result" not in doc4
+          and "kda" not in doc4, str(sorted(doc4)))
+    gate6.set()
+    s4._eog_thread.join(timeout=5)
+    doc4 = _json.loads(newest6[-1].read_text(encoding="utf-8"))
+    check("join 后官方 result/KDA 已按文件回填",
+          doc4.get("result") == "win"
+          and doc4.get("kda") == {"kills": 7, "deaths": 4, "assists": 8},
+          str((doc4.get("result"), doc4.get("kda"))))
+    check("回填不回流会话态（game_result 仍空，不泄进下一局）",
+          s4.game_result is None, str(s4.game_result))
+
+    # 复盘文件被删：回填放弃且不另起文件。fetcher 延迟放行——先删文件
+    # 再放行，防回填先完成与断言删文件竞速（exists 检查与写回间的
+    # TOCTOU 窗离线咬不住，生产会话侧从不删复盘文件，无此窗口）
+    gone6 = threading.Event()
+
+    def _gone_fetch():
+        gone6.wait(5)
+        return {"result": "loss", "kills": 0, "deaths": 9, "assists": 1}
+
+    s5 = GameSession(kb, rules, result_fetcher=_gone_fetch)
+    s5.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s5.on_in_progress()
+    s5.record_augment(REAL_AUG, tier="棱彩")
+    s5.on_end_of_game("EndOfGame")
+    newest5 = sorted(games_dir_6d.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    target5 = newest5[-1]
+    n_at_eog = len(list(games_dir_6d.glob("*.json")))
+    target5.unlink()
+    gone6.set()
+    s5._eog_thread.join(timeout=5)
+    check("复盘文件被删：回填放弃且不另起文件",
+          not target5.exists()
+          and len(list(games_dir_6d.glob("*.json"))) == n_at_eog - 1,
+          f"files={len(list(games_dir_6d.glob('*.json')))}//{n_at_eog}")
+
+    # ---- 读取端复用（L8 20261020）：experiments/replay_history 的
+    #      nearest_recorded 改走 review._suggestion_entries——N2 后落盘
+    #      为按 kind 分桶 dict，裸迭代 suggestions 会把桶键当条目 ----
+    import importlib.util as _ilu
+    _rh_path = (Path(__file__).resolve().parent.parent / "experiments"
+                / "replay_history.py")
+    _spec = _ilu.spec_from_file_location("_smoke_replay_history", _rh_path)
+    _rh = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_rh)
+    near = _rh.nearest_recorded({"suggestions": {"decision": [
+        {"ts": 10.0, "kind": "next_items", "text": "甲"},
+        {"ts": 40.0, "kind": "card_ranks", "text": "乙"}],
+        "refresh": [{"ts": 25.0, "kind": "next_items", "text": "丙"}]}}, 24.0)
+    check("nearest_recorded 认 N2 分桶 dict（取最近条，不 TypeError）",
+          near is not None and near.get("text") == "丙", str(near))
+    check("nearest_recorded 旧平列表/缺键安全（None 不炸）",
+          (_rh.nearest_recorded({"suggestions": [
+              {"ts": 1.0, "kind": "opening", "text": "旧"}]}, 5.0) or {}
+          ).get("text") == "旧"
+          and _rh.nearest_recorded({}, 5.0) is None)
+
 
     # ---- ④ 账本对账纯函数（时间对齐，无名单无阈值） ----
     doc_led = {
@@ -3253,6 +3535,77 @@ def test_review_ledger():
           and rows_old[2] == "海克斯: -（无三选评级记录）"
           and rows_old[3] == "出装采纳: -（无建议记录）",
           str(rows_old))
+
+    # ---- ④+ 窗口锚与末条 opening（M3/M5 20261020）：同轮"基准+精修"
+    #      合并不再把窗口锚右移到精修条；出门装双条取末条（屏上精修版）
+    #      对账——真机双 opening 同 ts，规则版在屏时间为零 ----
+    doc_m3 = {
+        "augments": [{"name": "贪欲束缚", "tier": "棱彩", "ts": 296.0}],
+        "item_events": [],
+        "suggestions": {"decision": [
+            {"ts": 295.0, "kind": "card_ranks",
+             "text": "① 贪欲束缚（A）—— 主C\n② 铁婕的守护（A）—— 承伤\n"
+                     "③ 黑暗收割（B）—— 收割"},
+            {"ts": 298.0, "kind": "card_ranks",
+             "text": "① 贪欲束缚（S）—— 主C精修\n② 铁婕的守护（A）—— 承伤\n"
+                     "③ 黑暗收割（B）—— 收割"}],
+            "refresh": []}}
+    led3 = compute_ledger(doc_m3)
+    check("账本：点击落在基准与精修之间仍归本轮（合并不右移窗口锚）",
+          len(led3["hex_rounds"]) == 1
+          and led3["hex_rounds"][0]["picked"] == "贪欲束缚"
+          and led3["hex_rounds"][0]["adopted"] is True
+          and led3["hex_rounds"][0]["rank"] == 1,
+          str(led3["hex_rounds"]))
+    check("账本：同轮展示选项跟屏上最终版（精修档位 S）",
+          led3["hex_rounds"][0]["options"][0]["grade"] == "S",
+          str(led3["hex_rounds"][0]["options"][:1]))
+    doc_m3b = {
+        "augments": [{"name": "炼狱之刃", "tier": "黄金", "ts": 201.0}],
+        "item_events": [],
+        "suggestions": {"decision": [
+            {"ts": 100.0, "kind": "card_ranks",
+             "text": "① 贪欲束缚（S）—— 一\n② 铁婕的守护（A）—— 二\n"
+                     "③ 黑暗收割（B）—— 三"},
+            {"ts": 103.0, "kind": "card_ranks",
+             "text": "① 贪欲束缚（S）—— 一精修\n② 铁婕的守护（A）—— 二\n"
+                     "③ 黑暗收割（B）—— 三"},
+            {"ts": 200.0, "kind": "card_ranks",
+             "text": "① 炼狱之刃（A）—— 输出\n② 守护天使（S）—— 保命\n"
+                     "③ 黑暗收割（B）—— 收割"},
+            {"ts": 203.0, "kind": "card_ranks",
+             "text": "① 炼狱之刃（A）—— 输出精修\n② 守护天使（S）—— 保命\n"
+                     "③ 黑暗收割（B）—— 收割"}],
+            "refresh": []}}
+    led3b = compute_ledger(doc_m3b)
+    rr1, rr2 = led3b["hex_rounds"]
+    check("账本：第2轮点击不误归第1轮（r1 picked 空，不再误判『不在当轮"
+          "推荐内』）",
+          len(led3b["hex_rounds"]) == 2 and rr1["picked"] == ""
+          and rr1["adopted"] is None, str(rr1))
+    check("账本：第2轮窗口锚为本轮首条（ts201 归第2轮且 rank=1）",
+          rr2["picked"] == "炼狱之刃" and rr2["adopted"] is True
+          and rr2["rank"] == 1, str(rr2))
+    # M5：双 opening 同 ts（规则 3 件在前、精修 2 件在后）两方向——
+    # 买精修独有件算听劝；买规则独有件（屏上从未显示）不算
+    for m5_label, m5_bought, m5_want in (
+            ("买精修独有件（屏上显示过）→ 听劝", ["多兰之刃", "长剑"], True),
+            ("买规则独有件（屏上从未显示）→ 不算听劝", ["红水晶"], False)):
+        doc_m5 = {
+            "augments": [],
+            "item_events": [{"ts": 30.0, "items": m5_bought}],
+            "suggestions": {"decision": [
+                {"ts": 20.0, "kind": "opening",
+                 "text": "[推荐1] 多兰之刃 —— 进攻\n[推荐2] 红水晶 —— 防守\n"
+                         "[推荐3] 长剑 —— 标准"},
+                {"ts": 20.0, "kind": "opening",
+                 "text": "[推荐1] 多兰之刃 —— 进攻\n[推荐2] 长剑 —— 精修"}],
+                "refresh": []}}
+        led5 = compute_ledger(doc_m5)
+        check(f"账本：双 opening 同 ts 取末条精修版——{m5_label}",
+              led5["opening"]["candidates"] == ["多兰之刃", "长剑"]
+              and led5["opening"]["adopted"] is m5_want,
+              str(led5["opening"]))
 
 
 # ── 6c. 满六神装替换建议（v4.4：格满后改推"卖X换Y"） ────────────
@@ -5050,6 +5403,24 @@ def test_ui_design_system():
           "finally:" in ka and "TOPMOST_KEEPALIVE_MS, self._keep_topmost"
           in ka and "TOPMOST_KEEPALIVE_MS = 1000" in srcs["overlay.py"])
 
+    # 10) 20261020 浮窗签名提交时序 + 台账轮次直出 + 主窗卡片滚动画布
+    #     （源级断言，无 Tk 窗口；行为级已真机验证）
+    ov_src, mw_src = srcs["overlay.py"], srcs["main_window.py"]
+    check("overlay 签名整帧画完才提交（_last_sig 置位在 _fit_height 之后，"
+          "唯一一处；失败帧不提交→下一帧原样重画自愈）",
+          ov_src.index("self._fit_height()")
+          < ov_src.index("self._last_sig = sig")
+          and ov_src.count("self._last_sig = sig") == 1)
+    check("台账轮次 round_id 直出（浮窗+主窗去掉 +1，与游戏轮次/日志同口径）",
+          'round_no=a.get("round_id")' in ov_src and "round_no=rid," in mw_src
+          and "rid + 1" not in ov_src and "rid + 1" not in mw_src
+          and 'round_id") + 1' not in ov_src)
+    check("主窗卡片叠挂滚动画布（create_window/滚轮祖籍过滤/校准前顶画布高/"
+          "账本卡仍挂画布内 main）",
+          "create_window" in mw_src and "<MouseWheel>" in mw_src
+          and "self.canvas.config(height=main.winfo_reqheight())" in mw_src
+          and 'self._card(main, "上局账本"' in mw_src)
+
 
 # ── 17. P3 杂项：启动延迟刷新可取消 + 起飞提示计数可见（20261013） ──
 
@@ -6391,6 +6762,12 @@ def test_n1_tier_probe():
           ledger_line(0, REAL_AUG, "棱彩", round_no=3)
           == f"③ {REAL_AUG}（棱彩）",
           ledger_line(0, REAL_AUG, "棱彩", round_no=3))
+    # 20261020 轮次直出案：首次出现即第 1 轮，round_no=1 直传必须仍渲染
+    # 圈数字『①』（漏测分支恰是本 bug 显示位；直传防 +1 复发）
+    check("ledger_line：round_no=1 首轮直传『① 名字（棱彩）』",
+          ledger_line(0, "贪欲束缚", "棱彩", round_no=1)
+          == "① 贪欲束缚（棱彩）",
+          ledger_line(0, "贪欲束缚", "棱彩", round_no=1))
     check("ledger_line：round_no=None 回退下标（旧快照兼容）",
           ledger_line(1, "x", "", round_no=None) == "② x")
     check("ledger_line：先验档位标『先验』",
@@ -6509,6 +6886,7 @@ if __name__ == "__main__":
     test_auto_elevation()
     test_session_ai_serial()
     test_history_buckets_and_fingerprint()
+    test_swap_refine_guard_and_serial_reuse()
     test_review_ledger()
     test_swap_mode()
     test_coach_save_gap()

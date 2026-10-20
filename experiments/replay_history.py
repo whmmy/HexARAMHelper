@@ -27,6 +27,7 @@ from hexa.core.game_state import GameSession
 from hexa.core.live_api import LiveSnapshot, PlayerInfo
 from hexa.core.rules_engine import RulesEngine
 from hexa.knowledge.kb import KnowledgeBase
+from hexa.ui.review import _suggestion_entries
 
 GAMES = [
     Path("log/games/20260925_210743_不祥之刃.json"),
@@ -108,7 +109,9 @@ def replay_stage(rec, kb, rules, stage):
 
 
 def nearest_recorded(rec, ts):
-    cands = rec.get("suggestions") or []
+    # 建议条目解析复用 review.py（N2 复盘分层案后落盘为按 kind 分桶
+    # dict，新旧双格式单一事实源在读取端 review.py，此处不再自持一份）
+    cands = _suggestion_entries(rec)
     if not cands:
         return None
     return min(cands, key=lambda s: abs(s["ts"] - ts))

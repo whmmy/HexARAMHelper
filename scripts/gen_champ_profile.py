@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """生成知识库派生数据（纯标准库，可重复运行）：
 
-1. hexa/knowledge/augment_names.json      —— 从 hero_augments.csv 提取 229 海克斯唯一名
+1. hexa/knowledge/augment_names.json      —— 海克斯唯一名白名单（榜单 ∪ 标签库并集）
 2. hexa/knowledge/champ_damage_profile.json —— 从 DD champion.json 生成英雄伤害类型粗分类
 
 用法: python scripts/gen_champ_profile.py
@@ -16,6 +16,12 @@ KNOW = ROOT / "hexa" / "knowledge"
 DATA = ROOT / "data"
 
 # ── 1. 海克斯唯一名单 ────────────────────────────────────────────
+# 白名单的语义是「游戏海克斯全集的当前事实源」，不是「榜单覆盖」：
+# hero_augments.csv 是英雄×海克斯胜率榜，只收录第三方站有胜率统计的
+# 条目，新海克斯/低出场率条目长期缺席（重抓换源后只会更缩水）；而
+# augments.json 标签库的 augment 键覆盖库内已知全集。两处取并集，
+# 防止真实存在的海克斯名被挤出 OCR 匹配与 valid_augment 校验集。
+# 校验机制本身不变（仍逐字精确匹配），只是成员范围取全。
 
 def gen_augment_names():
     names = set()
@@ -25,13 +31,16 @@ def gen_augment_names():
         for row in reader:
             if len(row) >= 6 and row[5].strip():
                 names.add(row[5].strip())
+    tags = json.loads(
+        (KNOW / "augments.json").read_text(encoding="utf-8")).get("augments", {})
+    names.update(k.strip() for k in tags if k.strip())
     out = {
         "count": len(names),
         "names": sorted(names),
     }
     path = KNOW / "augment_names.json"
     path.write_text(json.dumps(out, ensure_ascii=False, indent=1), encoding="utf-8")
-    print(f"[OK] augment_names.json: {len(names)} 个唯一海克斯名 -> {path}")
+    print(f"[OK] augment_names.json: {len(names)} 个唯一海克斯名（榜单 ∪ 标签库并集） -> {path}")
 
 # ── 2. 英雄伤害粗分类画像 ─────────────────────────────────────────
 # P0 启发式（P1 用 DD 精化/特例覆盖）：

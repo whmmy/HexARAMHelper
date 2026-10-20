@@ -4,7 +4,9 @@
 - hero_augments.csv        → 英雄×海克斯先验排名（A 层）
 - champions.json           → 中文名 ↔ 英文名映射
 - pinyin_map.json          → 拼音模糊匹配（LCU 断连时手动输英雄兜底）
-- augment_names.json       → 229 海克斯唯一名（OCR 校验集 / 幻觉检测）
+- augment_names.json       → 海克斯唯一名兜底源（仅 CSV 缺席时播种）；
+  运行时白名单 = 榜单(CSV) ∪ 标签库(augments.json) 并集
+  （OCR 校验集 / 幻觉检测，装载端并集见 _load_augment_tags）
 - champ_damage_profile.json→ 英雄伤害类型粗分类（敌方威胁画像）
 - items_raw.json           → DD 装备元数据（幻觉校验 + current_path 标签）
 """
@@ -129,6 +131,14 @@ class KnowledgeBase:
                     self.augment_tags_version = data["version"]
             except Exception as e:
                 print(f"[WARN] augments.json 读取失败: {e}")
+        # 白名单生效点（20261020 海克斯白名单案）：标签库键并入
+        # augment_names——运行时白名单 = 榜单(CSV) ∪ 标签库，与
+        # gen_augment_names 资产同源同参。CSV 是英雄×海克斯胜率榜，
+        # 新海克斯/低出场率条目长期缺席（虚空冲刺/升级：雪球等真名
+        # 实跑曾被拒），不并入则 OCR 校验集/幻觉白名单拒真。逐字精确
+        # 匹配的校验机制不变，只扩白名单成员范围。
+        self.augment_names.update(
+            k.strip() for k in self.augment_tags if k.strip())
 
     def _load_augment_descs(self):
         """卡面原文描述库（20261013 描述自举；对局 OCR 写回，随版本自更新）"""
@@ -262,7 +272,9 @@ class KnowledgeBase:
             data = json.loads(path.read_text(encoding="utf-8"))
             self.champ_profile = data.get("champions", {})
             self.dd_version = data.get("version", "")
-        # augment_names.json 是 CSV 的派生文件，仅当 CSV 缺失时兜底
+        # augment_names.json（gen_augment_names 产物，榜单∪标签库并集快照）
+        # 仅当 CSV 缺席时播种；CSV 在场时的并集在 _load_augment_tags 尾部
+        # 落地——两条装载路径同源同参，收敛到同一份白名单
         if not self.augment_names:
             path = self.know_dir / "augment_names.json"
             if path.exists():

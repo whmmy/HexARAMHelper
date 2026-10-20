@@ -404,11 +404,15 @@ class Overlay:
         # config 同值也会标脏触发整窗重绘（「同一句话一直在闪」的视觉主
         # 源）；签名一致直接返回——不 config、不 update_idletasks 量高。
         # 分工：结论指纹（game_state）管「推不推」，这里管「画不画」。
+        # 签名必须等整帧画完才提交（方法末尾）：渲染中途抛错 = 本帧没画
+        # 成，不提交，下一帧签名不等 → 原样整帧重画（各 config 幂等，
+        # 撕裂帧自愈），_refresh 的「下一帧自动恢复」才成立；若在这里先
+        # 置位，等于把「打算画」当「画成了」，失败后同内容帧被去重短路、
+        # 重试永不发生，内容冻结到下次数据变化。
         state = self.session.ui_state()
         sig = overlay_content_signature(state)
         if sig == self._last_sig:
             return
-        self._last_sig = sig
         P = Palette
         stage = state["stage"]
         hero = state["my_hero"]
@@ -426,13 +430,13 @@ class Overlay:
         self._render_coach(state.get("coach_latest") or "")
         self.lbl_skill.config(text=f"加点: {state.get('skill_order') or '-'}")
         # 台账带品质：『① 贪欲束缚（棱彩）』，tier 缺省省略括号；
-        # 轮序号用 round_id+1（检测器界面轮次 0 起，N1 20261019），
-        # 先验推定档位 ledger_line 内标「先验」防误读成实抽
+        # 轮序号用 round_id 直出（检测器界面首次出现即自增为第 1 轮，
+        # 与游戏轮次/日志「第 N 轮」同口径，N1 20261019），先验推定
+        # 档位 ledger_line 内标「先验」防误读成实抽
         self.lbl_augments.config(
             text="\n".join(
                 ledger_line(i, a.get("name", "?"), a.get("tier") or "",
-                            round_no=(None if a.get("round_id") is None
-                                      else a.get("round_id") + 1),
+                            round_no=a.get("round_id"),
                             tier_src=a.get("tier_src") or "")
                 for i, a in enumerate(state["augments"])) or "-")
         self.lbl_threat.config(text=strip_emoji(state["threat"]) or "-")
@@ -444,6 +448,7 @@ class Overlay:
         self._render_ai_busy(state.get("engine") or {})
         self._render_moment(state)
         self._fit_height()
+        self._last_sig = sig
 
     def _snap_to_content(self):
         """首帧贴内容：build 完直接量所需高度，避免先撑 560 再收缩的跳变。"""

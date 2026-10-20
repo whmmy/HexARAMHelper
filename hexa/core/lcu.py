@@ -218,15 +218,16 @@ class LCUConnector:
             "assists": _int(self._eog_stat(stats, "ASSISTS", "assists")),
         }
 
-    def get_eog_stats(self, attempts: int = 3, interval: float = 1.5):
+    def get_eog_stats(self, attempts: int = 20, interval: float = 1.5):
         """终局统计块 → 我方条目 dict；拿不到返回 None（复盘如实缺省）。
 
-        端点 /lol-end-of-game/v1/eog-stats-block 仅收尾相位可用
-        （PreEndOfGame 早段可能尚未就绪 404）→ 短间隔重试；LCU 未连接/
-        请求失败/statistics 缺失一律 None，绝不抛（终局链不能因结果
-        采集炸掉：on_end_of_game 的落盘/清场在它之后）。在 PhaseMachine
-        线程同步调用（GameSession.on_end_of_game 锁外），attempts×
-        LCU_TIMEOUT 最坏阻塞十几秒——局已终，无实时性要求。"""
+        端点 /lol-end-of-game/v1/eog-stats-block 仅收尾相位可用，且就绪
+        不早于 PreEndOfGame（InProgress 刚离开时常 404）→ 短间隔重试，
+        默认窗口 ≈20×(1.5s 间隔+最坏 3s 超时)≈90s：收尾相位推进节奏无
+        保证，调用方是局终后台回填线程（GameSession._attach_eog_result，
+        daemon）等得起——窗口远短于下一局可能的终局时点，不会取到别局
+        数据；LCU 未连接/请求失败/statistics 缺失一律 None，绝不抛。重试
+        sleep 在 LCU io 锁外，不占锁饿死 phase/快照请求。"""
         if not self.base_url or not self.auth_token:
             return None
         for i in range(max(1, attempts)):

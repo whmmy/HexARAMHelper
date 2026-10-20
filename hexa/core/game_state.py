@@ -188,8 +188,9 @@ class GameSession:
         self.dumper = fixture_dumper
         self.live = live_poller
         # 终局结果获取器（N4 复盘结果维度 20261019）：app 注入
-        # lcu.get_eog_stats，on_end_of_game 锁外调用拿胜负 + 官方终局
-        # KDA；拿不到（data_stall/秒退/LCU 不可用）复盘如实缺省
+        # lcu.get_eog_stats，局终由后台回填线程调用（PhaseMachine 线程
+        # 不做同步 REST），拿到胜负 + 官方终局 KDA 后按文件回填复盘；
+        # 拿不到（data_stall/秒退/LCU 不可用）复盘如实缺省
         self.result_fetcher = result_fetcher
         self.engine = engine or engine_mod.RuleDecisionEngine(kb, rules)
         self.mouse_stats_fn = mouse_stats_fn   # fn() -> [统计窗dict]（复盘用）
@@ -219,7 +220,9 @@ class GameSession:
             self._prev_my_items = []
             self._prev_dead = False
             # 结果维度（N4 复盘结果维度 20261019）：快照侧持续更新，
-            # 末帧≈终局；game_result 由 result_fetcher 局终注入
+            # 末帧≈终局；官方终局块由后台回填直改复盘文件（落盘后会话
+            # 已 reset，不回流本字段，防泄进下一局），本字段保留同步
+            # 写入口径
             self.game_result = None       # {"result","kills","deaths","assists"} | None
             self.my_kda = (0, 0, 0)       # 快照侧 KDA（官方终局块拿不到时的兜底）
             self.summoner_name = ""       # 召唤师名（快照 me 条目 riotId 直出）
@@ -266,6 +269,9 @@ class GameSession:
             # 复盘草稿周期落盘状态（进程死亡护身符，见 _maybe_flush_review_draft）
             self._review_path = None      # 本局复盘文件名（首写后整局稳定覆盖）
             self._draft_ts = 0.0          # 上次草稿写入时间（限频）
+            # 官方终局块后台回填线程引用（见 _spawn_result_attach；reset
+            # 只丢句柄不掐线程，下一局终局自然覆盖）
+            self._eog_thread = None
             # 数据流停摆兜底（终局监听不依赖 phase 查询，见 report_data_stall）
             self._last_data_ts = time.time()
             self._log("session_reset")
@@ -382,32 +388,89 @@ class GameSession:
                         print(f"[WARN] runes 探针 new_game 异常: {e}")
 
     def on_end_of_game(self, reason):
-        # 结果获取在锁外（N4）：LCU REST 重试最坏十几秒，绝不持锁等 IO
-        # （同引擎派发"锁外起线程"规矩）。跳过名单：data_stall（快照断流
-        # 兜底，LCU 大概率同死）、dodge_requeue（秒退重开，本局无终局块）。
-        result = None
-        if reason not in ("data_stall", "dodge_requeue") \
-                and self.result_fetcher:
-            try:
-                result = self.result_fetcher()
-            except Exception as e:  # noqa: BLE001 —— 结果采集不拖垮收尾
-                print(f"[WARN] 终局结果获取异常（复盘该字段缺省）: {e}")
+        # 官方终局块改由后台线程取回后按文件回填（_spawn_result_attach）：
+        # 本回调在 PhaseMachine 线程执行，同步 REST 重试最坏十几秒会把
+        # 状态机整条事件链顺延（选人期预生成等全部迟到）；且端点就绪
+        # 不早于 PreEndOfGame，短重试窗口本就常落空——落盘先按"非空才
+        # 写键"如实缺省，官方块拿到后回填覆盖。跳过名单：data_stall
+        # （快照断流兜底，LCU 大概率同死）、dodge_requeue（秒退重开，
+        # 本局无终局块）。
+        job = None
         with self._lock:
             # 幂等门：会话已收尾（data_stall 兜底先触发过/重复终局事件）
-            # 就不拿空会话再写一份零内容文件、不重置已清场的新局状态
+            # 就不拿空会话再写一份零内容文件、不重置已清场的新局状态；
+            # 回填任务在门后提取，防重复事件给旧文件叠错局的结果
             if self.stage not in ("game_start", "in_game"):
                 return
-            # 拿到才存（dict 或 None）：落盘侧按"非空才写键"如实缺省
-            self.game_result = result if isinstance(result, dict) else None
-            if result:
-                self._log("game_result", str(result.get("result") or "?"))
             self._log("end_of_game", reason)
             self._write_review_log()
             if self.live:
                 self.live.leave_game()
             if self.dumper:
                 self.dumper.end_session()
+            # 补写实参 reset 前提取（reset 清 _review_path）
+            if (reason not in ("data_stall", "dodge_requeue")
+                    and self.result_fetcher):
+                job = (self.result_fetcher, self._review_path)
             self.reset()
+        if job:
+            self._spawn_result_attach(*job)
+
+    # ── 官方终局块后台回填（N4：复盘 result/KDA 补写） ─────────────
+
+    def _spawn_result_attach(self, fetcher, review_path: str):
+        """单局至多一个的回填线程（daemon，锁外起线程同引擎派发规矩）。
+        线程引用挂在会话上供冒烟/排障 join 等待回填完成，下一局终局
+        自然覆盖。"""
+        if not review_path:
+            return
+        t = threading.Thread(target=self._attach_eog_result,
+                             args=(fetcher, review_path),
+                             daemon=True, name="eog-result-attach")
+        self._eog_thread = t
+        t.start()
+
+    def _attach_eog_result(self, fetcher, review_path: str):
+        try:
+            result = fetcher()
+        except Exception as e:  # noqa: BLE001 —— 结果采集不拖垮任何链路
+            print(f"[WARN] 终局结果获取异常（复盘该字段缺省）: {e}")
+            return
+        if isinstance(result, dict) and result:
+            self.attach_game_result(review_path, result)
+
+    def attach_game_result(self, review_path: str, result: dict):
+        """官方终局块回填复盘文件：按 _write_review_log 同口径补/覆盖
+        result 与官方 KDA 后原位写回。
+
+        只碰文件、不碰会话态——调用时本局已 reset，会话字段属于下一局，
+        结果回流会泄局。文件缺失（终局落盘失败/被清理）直接放弃，不另
+        起新文件。KDA 官方优先：官方块给出整数值才覆盖快照侧末帧兜底，
+        缺整数不抹既有实测值；result 空（胜负字段缺失）不写键。"""
+        if not (review_path and isinstance(result, dict)):
+            return
+        path = BASE_DIR / "log" / "games" / review_path
+        try:
+            with self._lock:
+                if not path.exists():
+                    print(f"[WARN] 终局结果回填放弃（复盘文件不在）: "
+                          f"{review_path}")
+                    return
+                doc = json.loads(path.read_text(encoding="utf-8"))
+                if not isinstance(doc, dict):
+                    return
+                if result.get("result"):
+                    doc["result"] = str(result["result"])
+                kda = {k: result[k] for k in ("kills", "deaths", "assists")
+                       if isinstance(result.get(k), int)}
+                if kda:
+                    doc["kda"] = kda
+                path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
+                                encoding="utf-8")
+            print(f"[SESSION] 终局结果已回填 {review_path}: "
+                  f"{result.get('result') or '?'}")
+        except Exception as e:  # noqa: BLE001 —— 回填失败不影响任何主链
+            print(f"[WARN] 终局结果回填失败: {e}")
 
     # ── LivePoller 回调（轮询线程） ────────────────────────────────
 
@@ -879,9 +942,11 @@ class GameSession:
         cands = self.engine.opening_candidates(first, threat, serial,
                                                augment_tiers=first_tier)
         note = f"首个海克斯【{first}】已联动"
+        # 序号显式传入（不走落位自增）：AI 精修已随 engine 调用带号出发，
+        # 派发先于落位，落位必须同号对齐，回包才认领得上
         self._set_suggestion(Suggestion(
-            "opening", cands, note=note, serial=serial,
-            facts=(first, threat.summary() if threat else "")))
+            "opening", cands, note=note,
+            facts=(first, threat.summary() if threat else "")), serial=serial)
         self._log("opening_offered", first)
         return False
 
@@ -905,12 +970,15 @@ class GameSession:
         facts = (tuple(a["name"] for a in self.augments),
                  self.current_path,
                  threat.summary() if threat else "")
-        serial = self._new_serial()
         # 规则底线预演：与引擎派发走同一规则实现，序列确定性一致；
-        # pool 同源自引擎（AI 适配方案池，ctx 未就绪为 None 回 OP.GG）
+        # pool 同源自引擎（AI 适配方案池，ctx 未就绪为 None 回 OP.GG）。
+        # 规则层不消费序号（Candidate 不带版本号），传占位值只为接口
+        # 完整——真序号在本帧真落位时才占（_set_suggestion），去重跳过
+        # 的帧不占号，在途旧回包不因结论未变的空转帧被新号作废
         rule_engine = getattr(self.engine, "delegate", self.engine)
         seq = rule_engine.next_candidates(self.my_items, self._my_gold,
-                                          self.current_path, threat, serial,
+                                          self.current_path, threat,
+                                          self._sug_serial + 1,
                                           reason=reason,
                                           augments=list(self.augments),
                                           pool=self.engine.pool_for(
@@ -979,17 +1047,16 @@ class GameSession:
             if not seq:
                 sugg = Suggestion("swap_items", [],
                                   note="六神装成型，暂无更优替换（保持现装）",
-                                  gold=self._my_gold, serial=serial,
-                                  facts=facts)
+                                  gold=self._my_gold, facts=facts)
                 if self._set_suggestion(sugg):
                     self._log("swap_mode", "满装无替换候选")
             else:
-                sugg = self._suggest_swap(seq, serial, reason, facts)
+                sugg = self._suggest_swap(seq, reason, facts)
         else:
             # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
             self._apply_afford(seq)
             sugg = Suggestion("next_items", seq, note=save_note,
-                              gold=self._my_gold, serial=serial, facts=facts)
+                              gold=self._my_gold, facts=facts)
             self._set_suggestion(sugg)
         # 精修派发必须在建议落位之后：AI 回包按 serial 认领"当前建议"——
         # 派发先于落位时，瞬时回包会写进即将被 _set_suggestion 整体替换的
@@ -1006,6 +1073,11 @@ class GameSession:
         if self.suggestion is sugg or not self._ai_covered(sugg):
             self._set_coach_context()
             if self.engine.mode != "rule":
+                # 派发序号 = 在屏建议的版本号：真落位即落位时占的新号；
+                # 去重跳过帧不占号、复用在屏号——在途旧回包不被空转帧
+                # 作废，补派回包与在途回包同号竞速、先回先认领
+                serial = (sugg.serial if self.suggestion is sugg
+                          else self._sug_serial)
                 self.engine.next_candidates(self.my_items, self._my_gold,
                                             self.current_path, threat, serial,
                                             reason=reason,
@@ -1019,7 +1091,7 @@ class GameSession:
         单独构成满装——2026-09-28 真机 3 传说+2 组件+鞋误判案）。"""
         return is_full_build(self.kb, self.my_items)
 
-    def _suggest_swap(self, swaps: list, serial: int, reason: str = "event",
+    def _suggest_swap(self, swaps: list, reason: str = "event",
                       facts: tuple = ()) -> Suggestion:
         """替换建议落位：补记金币净差 + 台账联动重排。
 
@@ -1047,7 +1119,7 @@ class GameSession:
         if target:
             note = f"先合成：{cnote}"
         sugg = Suggestion("swap_items", swaps, note=note,
-                          gold=self._my_gold, serial=serial, facts=facts)
+                          gold=self._my_gold, facts=facts)
         if self._set_suggestion(sugg):
             self._log("swap_mode",
                       f"{len(swaps)} 对（{reason}）"
@@ -1057,6 +1129,10 @@ class GameSession:
     # ── 建议落位（serial 管理 + N2 分桶历史 + N3 结论指纹去重） ────
 
     def _new_serial(self) -> int:
+        """预占一个建议版本号。仅出门装链路使用：精修派发内嵌在
+        engine.opening_candidates（先于落位出发），必须先有号；其余建议
+        的序号一律在 _set_suggestion 真落位时才占——去重跳过的帧不占号，
+        在途旧回包不被空转帧的新号作废（N3 去重帧的补派场景）。"""
         with self._lock:
             self._sug_serial += 1
             return self._sug_serial
@@ -1105,13 +1181,17 @@ class GameSession:
     def _set_suggestion(self, sugg: Suggestion, serial: int = None) -> bool:
         """建议落位：与当前建议结论指纹一致时整体跳过（overlay 内容不动、
         history 不追加），返回 False 让调用方把 AI 精修派发一并省掉——
-        同一事实不重复呈现、不重复问（N3）。serial 只在真落位时赋值；
-        被去重跳过的帧不占展示位（序号已由调用方预消费，在途旧回包按
-        原 serial 认领语义不变）。"""
+        同一事实不重复呈现、不重复问（N3）。版本号在真落位时才占
+        （serial=None 时锁内自增赋号）：被去重跳过的帧不推进序号，在途
+        旧回包按在屏 serial 认领不失效；显式传 serial 仅用于出门装链路
+        （精修派发先于落位出发，落位同号对齐，见 _decide_opening_or_next）。"""
         with self._lock:
             if not self._sugg_fresh(sugg):
                 return False
-            sugg.serial = serial if serial is not None else self._sug_serial
+            if serial is None:
+                self._sug_serial += 1
+                serial = self._sug_serial
+            sugg.serial = serial
             self.suggestion = sugg
             self._append_history(sugg.kind, sugg.render())
             return True
@@ -1160,8 +1240,8 @@ class GameSession:
                 # 方案池。仅下一件模式刷新：出门装态（opening 建议在展示，
                 # 不消费方案池）与满装替换态（replacement_candidates 不吃
                 # pool）刷新只会打乱流程/白烧预算。必须锁外执行——
-                # _suggest_next_items 内部 _new_serial 要拿同一把锁
-                # （threading.Lock 不可重入，锁内直调死锁）。
+                # _suggest_next_items 的落位与 AI 派发要拿同一把锁并起
+                # 后台线程（不持锁起线程）。
                 if self.opening_state == "offered" and self.my_items:
                     # 出门装期间已购装：与 periodic 同款翻转
                     self.opening_state = "bypassed"
@@ -1225,6 +1305,12 @@ class GameSession:
                     # 映射回当前替换对（按 buy 名，集合内），重排 + 换理由；
                     # 差价/净差等事实字段保持规则版（数据出事实，模型出判断）
                     if payload:
+                        # 结论指纹先取改写前快照：by_buy 映射回的正是在屏
+                        # 候选对象本身，下方理由改写是原地变更——守卫的
+                        # 成立前提是"比较双方互不相干"，先改写后比对会退化
+                        # 成「改写后 vs 改写后」恒等，理由精修被当成同结论
+                        # 吞掉而对象已被改（屏已变、source/史/coach 未跟进）
+                        old_fp = cur.fingerprint()
                         by_buy = {c.buy: c for c in cur.candidates
                                   if isinstance(c, SwapCandidate)}
                         merged, seen = [], set()
@@ -1239,8 +1325,7 @@ class GameSession:
                                    if b not in seen]
                         if merged and Suggestion(
                                 "swap_items", merged[:3], note=cur.note,
-                                gold=cur.gold).fingerprint() \
-                                != cur.fingerprint():
+                                gold=cur.gold).fingerprint() != old_fp:
                             cur.candidates = merged[:3]
                             cur.source = "ai"
                             cur.ts = time.time()

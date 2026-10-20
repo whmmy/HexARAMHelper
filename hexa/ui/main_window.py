@@ -23,6 +23,12 @@ ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度�
   摘要 + format_ledger 采纳对账（出门装听劝/海克斯轮次/出装采纳/胜负
   KDA+分均，纯事实对账）同卡渲染；落盘侧新增 result/kda/summoner_name/
   item_events/total_gold 由 game_state/live_api/lcu 采集
+- 20261020 卡片叠改挂滚动画布：卡片叠内容高无上界（账本轮数/成型度行数
+  都随对局增长，N4 账本段一屏运行期 +数百 px）而窗口高固定（构建期一次
+  校准 + minsize + 屏幕工作区夹取），腔体不足时放不下的后 pack 卡片被
+  packer 整张 unmap（评级卡/AI 仪表行/账本本体不可见且够不着，1080p
+  必现）。画布作受压方：pack 顺位最后、被截短只是少显示内容不 unmap，
+  滚动条常驻兜底。卡片/段落顺序、_render_* 消费方式不变
 """
 import queue
 import time
@@ -78,16 +84,17 @@ class MainWindow:
         self.root.minsize(480, 560)
         Theme.style_root(self.root)
 
-        main = ttk.Frame(self.root)
-        main.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
-        main.bind("<Configure>", self._on_resize)
+        outer = ttk.Frame(self.root)
+        outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
         # 日志：自建 Text + ttk 滚动条，不用 scrolledtext.ScrolledText。
         # 原因（本 Python 3.12 的 ScrolledText 是 **Text 子类**：Text 挂在内层
         # frame 上却没被 pack，frame 保持 Tk 默认浅底 → 日志区右侧/下方露白，
         # 实机出图才看出来（2026-09-30）；且它的滚动条是经典 tk.Scrollbar，
         # 吃不到 theme 注册的深色 TScrollbar（旧版那个亮灰滚动条就是这么来的）。
-        logcard = card_frame(main, title="日志",
+        # 先 pack（side=BOTTOM）才在 packer 分配里先于滚动外壳被满足：腔体
+        # 不足时截短的是卡片叠画布，日志卡永不被挤出可见区。
+        logcard = card_frame(outer, title="日志",
                              pack=dict(side=tk.BOTTOM, fill=tk.BOTH,
                                        expand=True, pady=(8, 0)))
         log_body = tk.Frame(logcard, bg=P["surface_inset"])
@@ -102,6 +109,35 @@ class MainWindow:
                                 command=self.txt_log.yview)
         log_bar.pack(side=tk.RIGHT, fill=tk.Y)
         self.txt_log.config(yscrollcommand=log_bar.set)
+
+        # 卡片滚动外壳：卡片叠内容高无上界（账本轮数/成型度行数随对局增长）
+        # 而窗口高固定——直排在外层时腔体不足，packer 会把放不下的后 pack
+        # 卡片整张 unmap（1080p 被屏幕夹窗后评级卡/仪表行/账本本体不可见且
+        # 无任何自救，见文末几何校准注释记录的同款坑）。画布作受压方：pack
+        # 顺位最后、被截短只是少显示内容永不 unmap，滚动条兜底到每张卡。
+        # 滚动条常驻不做按需显隐——显隐让画布宽跳一个滚动条宽，wraplength
+        # 连锁重排抖动。
+        scroll = ttk.Scrollbar(outer, orient=tk.VERTICAL)
+        scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        canvas = tk.Canvas(outer, bg=P["bg"], highlightthickness=0, bd=0)
+        canvas.pack(side=tk.TOP, fill=tk.BOTH)
+        self.canvas = canvas
+        scroll.config(command=canvas.yview)
+        canvas.config(yscrollcommand=scroll.set)
+        # 卡片叠容器沿用 main 命名：下方全部卡片/行的父容器引用逐字不动，
+        # 滚动外壳只是包在它外面的新增一层
+        main = tk.Frame(canvas, bg=P["bg"])
+        self._canvas_item = canvas.create_window((0, 0), window=main,
+                                                 anchor="nw")
+        # 画布宽变（拉窗/滚动条出现）→ 内层 frame 跟宽，卡片只纵滚不横滚
+        canvas.bind("<Configure>", lambda ev: canvas.itemconfigure(
+            self._canvas_item, width=ev.width))
+        # 内层 frame 宽高变（wraplength 重排/卡片文本增删）→ 刷 scrollregion
+        main.bind("<Configure>", self._on_resize)
+        # 滚轮事件递给指针下的具体控件（多为卡内 label/frame），不会沿几何
+        # 父链冒泡到画布，只能全局绑定后按祖籍过滤；日志卡在画布外有自己的
+        # 滚动（Text 类绑定），祖籍不是画布时不抢
+        canvas.bind_all("<MouseWheel>", self._on_wheel)
 
         # 状态行：阶段色片 + 英雄（路线已删，见模块 docstring）
         status = tk.Frame(main, bg=P["bg"])
@@ -215,6 +251,13 @@ class MainWindow:
         # 需 ~1120px、窗口 1000px 时 pack 会把**最后 pack 的卡片压成 0 高度**
         # （海克斯台账/评级整张卡不可见且够不着）。旧公式让窗口略微超屏，
         # 代价只是日志底部几十像素在屏外（可拖动/缩放），明显更优，故保留原样。
+        #
+        # 画布不向 packer 上报卡片叠的内容高（超出部分被裁进滚动区），校准前
+        # 先把画布请求高顶到卡片叠所需高：初始窗口仍按整卡叠+日志校准；滚动
+        # 只在窗口被屏幕夹小/手动缩小或运行期内容长高（上局账本一屏整段
+        # +数百 px，本窗高构建后不再跟随）时接管。
+        self.root.update_idletasks()
+        self.canvas.config(height=main.winfo_reqheight())
         self.root.update_idletasks()
         self.root.geometry(f"560x{max(MIN_H, self.root.winfo_reqheight())}")
 
@@ -231,11 +274,30 @@ class MainWindow:
         return body
 
     def _on_resize(self, ev):
-        """wraplength 跟随窗口宽（旧值写死 500/250，缩放后换行错乱/底部截断）"""
+        """wraplength 跟随窗口宽（旧值写死 500/250，缩放后换行错乱/底部截断）；
+        内层 frame 挂在滚动画布里，宽高变化同时刷新 scrollregion"""
         width = max(160, ev.width - Metrics["pad_card"] * 2)
         for lbl, frac in self._wraps:
             try:
                 lbl.config(wraplength=max(120, int(width * frac) - 6))
+            except tk.TclError:
+                pass
+        try:
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except tk.TclError:
+            pass
+
+    def _on_wheel(self, ev):
+        """滚轮跟随指针：仅指针落在卡片叠（画布或其内层后代）时滚动画布。
+        事件递给指针下的具体控件、不沿几何父链冒泡，故全局绑定 + 祖籍过滤；
+        日志卡祖籍不是画布，不抢它 Text 自带的滚动。"""
+        w = getattr(ev, "widget", None)
+        canvas = self.canvas
+        while w is not None and w is not canvas:
+            w = getattr(w, "master", None)
+        if w is canvas:
+            try:
+                canvas.yview_scroll(int(-ev.delta / 120), "units")
             except tk.TclError:
                 pass
 
@@ -361,8 +423,9 @@ class MainWindow:
 
         条目为 ui_state 直出的 {"name","tier","tier_src","round_id"}；行文
         与 overlay 同口径走 theme.ledger_line——『① 贪欲束缚（棱彩）』，
-        tier 缺省省略括号；轮序号用 round_id+1、先验档位标「先验」
-        （N1 20261019），旧快照缺字段回退下标。"""
+        tier 缺省省略括号；轮序号用 round_id 直出（检测器界面首次出现即
+        第 1 轮，与游戏轮次/日志同口径，N1 20261019）、先验档位标「先验」，
+        旧快照缺字段回退下标。"""
         P = Palette
         key = tuple((a.get("name", ""), a.get("tier", ""),
                      a.get("tier_src", ""), a.get("round_id"))
@@ -384,7 +447,7 @@ class MainWindow:
             row.pack(anchor=tk.W, fill=tk.X, pady=2)
             tk.Label(row, text=ledger_line(
                          i, name, a.get("tier") or "",
-                         round_no=None if rid is None else rid + 1,
+                         round_no=rid,
                          tier_src=a.get("tier_src") or ""),
                      font=Theme.FONT, bg=P["surface"],
                      fg=P["text"]).pack(side=tk.LEFT)
