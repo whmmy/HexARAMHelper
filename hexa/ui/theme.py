@@ -80,14 +80,21 @@ CIRCLED = "①②③"
 LEDGER_CIRCLED = "①②③④⑤⑥⑦⑧⑨⑩"
 
 
-def ledger_line(index: int, name: str, tier: str = "") -> str:
+def ledger_line(index: int, name: str, tier: str = "", round_no=None,
+                tier_src: str = "") -> str:
     """台账行渲染（overlay 与主窗口同口径，20261013 免费事实批）：
     『① 贪欲束缚（棱彩）』——轮序 + 名字 + 品质；tier 缺省（空/None）
     省略括号；轮序超出带圈数字表回退 "11." 纯数字（防 IndexError）。
+    N1 20261019：round_no 传台账条目的 round_id（检测器界面轮次），
+    None 时回退列表下标+1（旧快照/直调兼容）；先验推定档位标「先验」
+    ——reroll 换卡后先验≠实抽，徽章不谎报。
     纯函数，离线断言。"""
-    num = (LEDGER_CIRCLED[index] if 0 <= index < len(LEDGER_CIRCLED)
-           else f"{index + 1}.")
+    no = index + 1 if round_no is None else int(round_no)
+    num = (LEDGER_CIRCLED[no - 1] if 1 <= no <= len(LEDGER_CIRCLED)
+           else f"{no}.")
     t = str(tier or "").strip()
+    if t and str(tier_src or "").strip() == "prior":
+        t = f"先验{t}"
     return f"{num} {name}" + (f"（{t}）" if t else "")
 
 # ══════════════════════════════════════════════════════════════

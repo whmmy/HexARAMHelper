@@ -2,7 +2,7 @@
 
 布局：AI 总开关 → System2/System1 两组槽位（模型下拉+自定义 / Key / base_url /
 温度 / max_tokens / 思考强度 / 价格 / 测试连接）→ 全局（预算 / 精修间隔）→ 触发器开关 →
-数据面板（DD 版本 / builds 版本与抓取日期，>7 天黄标）。
+数据面板（DD 版本 / builds 版本与抓取日期 / 英雄先验抓取日期，任一 >7 天黄标）。
 保存即写 settings.json 并回调 rebuild_engine（热切换规则/AI 模式）。
 
 2026-09-30 UI 重构（Quiet Dark v3）——**只换皮肤，骨架不动**：
@@ -383,18 +383,34 @@ class SettingsWindow(tk.Toplevel):
             pass
 
     def _render_data_panel(self):
+        """数据面板：版本/新鲜度常显，>7 天黄标。
+
+        N6 断链修复后英雄先验有了上游脚本，纳入与 builds 同款的当天监控
+        （此前只盯 builds 目录 mtime，hero_augments.csv 是全项目最旧资产
+        却无人报警）。任一资产缺文件/超 7 天 → 整卡黄标。
+        """
         kb = self.kb
         import datetime
-        try:
-            mtime = kb.data_dir.joinpath("builds").stat().st_mtime
-            date = datetime.date.fromtimestamp(mtime).isoformat()
-            age = (datetime.date.today() - datetime.date.fromtimestamp(mtime)).days
-            color = Palette["warning"] if age > 7 else Palette["text_dim"]
-        except OSError:
-            date, age, color = "未知", None, Palette["warning"]
+
+        def _fresh(rel: str):
+            """(日期串, 天数)；缺文件 → (None, None)"""
+            try:
+                mtime = kb.data_dir.joinpath(rel).stat().st_mtime
+                d = datetime.date.fromtimestamp(mtime)
+                return d.isoformat(), (datetime.date.today() - d).days
+            except OSError:
+                return None, None
+
+        builds_date, builds_age = _fresh("builds")
+        prior_date, prior_age = _fresh("hero_augments.csv")
+        stale = any(a is None or a > 7 for a in (builds_age, prior_age))
+        color = Palette["warning"] if stale else Palette["text_dim"]
+        prior_txt = ("未知" if prior_date is None
+                     else f"{prior_date}，{prior_age} 天前")
         self.lbl_data.config(text=(
             f"DD 装备库: {kb.dd_version or '-'}   OP.GG builds: "
-            f"{kb.builds_patch or '-'}（抓取 {kb.builds_fetched or date}）\n"
-            f"英雄先验: {len(kb.hero_augments)}   海克斯名单: {len(kb.augment_names)}"
-            f"   语义标签: {len(kb.augment_tags)}   装备: {len(kb.items)}"),
+            f"{kb.builds_patch or '-'}（抓取 {kb.builds_fetched or builds_date or '未知'}）\n"
+            f"英雄先验: {len(kb.hero_augments)} 名 / {len(kb.augment_names)} 海克斯"
+            f"（抓取 {prior_txt}）   语义标签: {len(kb.augment_tags)}"
+            f"   装备: {len(kb.items)}"),
             fg=color)

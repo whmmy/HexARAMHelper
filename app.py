@@ -101,7 +101,8 @@ def main():
     from hexa.core.ocr_engine import OcrEngine
     from hexa.core.rules_engine import RulesEngine
     from hexa.core.runes_probe import RunesProbe
-    from hexa.core.screen_detect import ScreenDetector, load_layout, point_in_rect
+    from hexa.core.screen_detect import (ScreenDetector, card_tier_from_crop,
+                                         load_layout, point_in_rect)
     from hexa.knowledge.kb import KnowledgeBase
     from hexa.ui.main_window import MainWindow
     from hexa.ui.overlay import Overlay
@@ -257,7 +258,12 @@ def main():
                           # 鼠标双通道统计窗随复盘 JSON 落盘（台账排障局级
                           # 证据）。ledger 在下方才构造——复盘写盘时刻必已
                           # 存在，此处晚绑定即可
-                          mouse_stats_fn=lambda: ledger.stats_history())
+                          mouse_stats_fn=lambda: ledger.stats_history(),
+                          # 终局结果获取（N4 复盘结果维度 20261019）：局终
+                          # 从 LCU eog-stats-block 拿胜负+官方 KDA（锁外
+                          # 调用；data_stall/秒退由 session 侧跳过；失败
+                          # 复盘该字段如实缺省）
+                          result_fetcher=lcu.get_eog_stats)
     live.on_snapshot = session.on_snapshot
 
     phase = PhaseMachine(lcu, callbacks={
@@ -536,16 +542,20 @@ def main():
         crop：点击定格帧的单卡裁剪——记账成功后后台 OCR 描述带入
         描述自举库（升级：无尽之刃案 20261014：快选时 on_cards 稳定
         门未及触发，该轮描述 OCR 从未跑过，已选海克斯从此只有名字
-        没有效果进 prompt）。"""
+        没有效果进 prompt）；同时供卡框色环阶级探针采样（N1
+        20261019：OCR 实测优先，查空回 KB 先验并标注 tier_src，
+        台账 43/43 条 tier 为空的断链就此接通）。"""
         if ev is None:
             ev = (time.time(), None, None, idx, "callback", None)
         t0, x, y, card, branch, img = ev
+        tier, tier_src = "", ""
 
         def _blackbox(result, n=None):
             session.log_click({"ts": t0, "x": x, "y": y,
                                "card": card + 1 if card is not None else None,
                                "branch": branch, "result": result,
-                               "name": n, "raw": raw, "image": img})
+                               "name": n, "raw": raw, "image": img,
+                               "tier": tier, "tier_src": tier_src})
 
         if not name or not kb.valid_augment(name):
             session._log("augment_unverified", f"卡{idx + 1} raw={raw}")
@@ -559,7 +569,19 @@ def main():
                                        "可能是知识库落后于游戏版本，"
                                        "请刷新 augments.json"))
             return
-        ok = session.record_augment(name, card_idx=idx, round_id=rid)
+        # 阶级双通道（N1 20261019）：先点击定格帧卡框色环实测（硬事实归
+        # 代码，card_tier_from_crop 毫秒级、不占 OCR 锁）；置信不足回
+        # KB 先验（hero×海克斯 榜档），来源入台账——reroll 换卡后先验
+        # ≠实抽，复盘据此区分推定与实测
+        ocr_tier = card_tier_from_crop(crop) if crop is not None else ""
+        if ocr_tier:
+            tier, tier_src = ocr_tier, "ocr"
+        else:
+            prior = kb.augment_tier(session.my_hero or "", name)
+            if prior:
+                tier, tier_src = prior, "prior"
+        ok = session.record_augment(name, tier=tier, tier_src=tier_src,
+                                    card_idx=idx, round_id=rid)
         _blackbox("recorded" if ok else "duplicate", name)
         if ok:
             detector.last_cards = None   # 残留卡名作废（选卡完成界面即关，
@@ -657,7 +679,10 @@ def main():
             _refresh_state["running"] = True
 
         scripts_dir = BASE_DIR / "scripts"
+        # N6 断链修复：英雄先验有了上游脚本，入链天级刷新；gen_champ_profile
+        # 从 hero_augments.csv 派生唯一名白名单，必须保持在其后执行
         jobs = [["fetch_opgg_builds.py", "--all"],
+                ["fetch_hero_augments.py"],
                 ["gen_champ_profile.py"]]
         if not scripts_dir.exists():
             with _refresh_mutex:

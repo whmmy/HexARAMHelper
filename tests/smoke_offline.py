@@ -49,6 +49,26 @@
     执行/重复 schedule 不叠加/退出 finally 与手动入口取消挂起，手动按
     钮行为不变）+ 起飞提示计数进 ui_state（触发 1/2→2/2 封顶→换局归
     零）+ 主窗口 AI 仪表区渲染接线
+21. 海克斯先验数据流水线（N6 断链修复案 20261020）：上游抓取脚本
+    纯逻辑离线断言（目录解析/rank 稠密自检/等级内序号/校验门槛/原子
+    写 BOM+CRLF）+ 刷新任务体入链且派生在其后 + 设置面板数据面板
+    纳入先验抓取日期黄标监控
+22. 海克斯阶级全链路（N1 20261019）：卡框色环 HSV 探针三档+垃圾画面
+    拒判（合成定标 fixture，阈值定标自真机 41 点击帧+48 激活整帧）/
+    记账链 tier_src 来源标注（ocr/prior）+round_id 入账/kb.augment_tier
+    直查查空稳/台账行先验标注+轮序号 round_id 直读/System1 上下文
+    「已选【棱彩】」数据直出（快照行+评级头行+引擎透传）/app 记账链接线
+23. 复盘结果维度+本局账本（N4 20261019）：eog 终局块双 schema 容错解析
+    （身份不命中/坏包 None）/KDA·召唤师名·累计金钱·装备变更时刻随快照
+    采集落盘（官方终局块优先）/拿不到结果复盘照常落盘且不落键（data_
+    stall·秒退跳过获取）/账本对账纯函数（出门装听劝/海克斯同轮基准+
+    精修合并/出装窗口采纳/分均经济）+旧文件缺新键占位不炸/主窗口
+    『上局账本』卡接线
+24. overlay/轮询工程债（N8 20261020）：内容签名涵盖全部可见面（漏加=
+    隐性冻结，逐字段敏感度断言）/ui_state 无关键不触发重绘/500ms 轮询
+    走签名跳过+keepalive 接线源级守卫/PhaseMachine 失败两路径（进程不
+    在·连着取不到 phase）共用指数退避梯且复位/LCU _io_lock 互斥（可重
+    入+并发 _request 串行化探针）
 
 运行: uv run python tests/smoke_offline.py   （全绿 exit 0）
 """
@@ -69,8 +89,8 @@ from hexa.core.mouse_ledger import CardLedger, MouseLedger
 from hexa.core.rules_engine import (RulesEngine, SwapCandidate, ThreatProfile,
                                     is_full_build)
 from hexa.core.screen_detect import (DEFAULT_LAYOUT_169, DetectorCore, Layout,
-                                     capture_region, is_fullscreen_cover,
-                                     point_in_rect)
+                                     card_tier_from_crop, capture_region,
+                                     is_fullscreen_cover, point_in_rect)
 from hexa.knowledge.kb import KnowledgeBase
 
 # 复盘日志隔离：GameSession 局终落盘按 BASE_DIR 定位 log/games/，
@@ -111,16 +131,23 @@ REAL_AUG = sorted(kb.augment_names)[0]
 
 
 def make_snap(my_hero_en="Annie", my_items=None, dead=False, enemy_items=None,
-              enemy_kda=(0, 0, 0), my_team="ORDER", my_gold=0):
+              enemy_kda=(0, 0, 0), my_team="ORDER", my_gold=0,
+              my_kda=None, summoner="", total_gold=0.0):
+    """my_kda/summoner/total_gold（N4 复盘结果维度 20261019）：快照侧
+    me 条目直出字段的测试注入口；缺省 (2,0,3)/""/0 与旧调用行为一致。"""
+    k0, d0, a0 = my_kda if my_kda is not None else (2, 0, 3)
     snap = LiveSnapshot(ts=time.time(), ok=True)
     snap.my_champion_en = my_hero_en
     snap.my_champion = kb.champion_cn(my_hero_en) or my_hero_en
     snap.my_is_dead = dead
     snap.my_current_gold = my_gold
+    snap.my_total_gold = total_gold
+    snap.my_kills, snap.my_deaths, snap.my_assists = k0, d0, a0
+    snap.my_summoner = summoner
     snap.my_items = [{"name": n, "count": 1} for n in (my_items or [])]
     snap.players.append(PlayerInfo(
         champion=snap.my_champion, champion_en=my_hero_en, team=my_team,
-        items=snap.my_items, kills=2, deaths=0, assists=3))
+        items=snap.my_items, kills=k0, deaths=d0, assists=a0))
     snap.players.append(PlayerInfo(
         champion="盲僧", champion_en="LeeSin", team="CHAOS",
         items=[{"name": n, "count": 1} for n in (enemy_items or [])],
@@ -162,8 +189,12 @@ def full_snap(my_hero_en, my_rows, foe_rows, my_items=None, my_gold=0):
 def test_kb():
     print("\n[1] KnowledgeBase")
     check("173 英雄先验", len(kb.hero_augments) == 173, f"got {len(kb.hero_augments)}")
-    check("海克斯名单（剔除 ？？？ 占位后 228）",
-          len(kb.augment_names) == 228 and "？？？" not in kb.augment_names,
+    # 数量随上游版本池走（20261020 N6 数据刷新案：上游 aramgg.com 16.20 池
+    # 每英雄 126 条、唯一名 211；旧资产 2026-09-25 为 228）。断言口径：
+    # 上量级 + 无占位名，不锚死具体数字。
+    check("海克斯名单（剔除 ？？？ 占位后 200+，N6 刷新案）",
+          len(kb.augment_names) >= 200 and len(kb.augment_names) < 300
+          and "？？？" not in kb.augment_names,
           f"got {len(kb.augment_names)}")
     check("装备库加载", len(kb.items) > 250, f"got {len(kb.items)}")
     check("DD 版本号", kb.dd_version.startswith("16."), kb.dd_version)
@@ -722,9 +753,10 @@ def test_engine_late_start_net():
         def __init__(self, inner):
             self._inner = inner
 
-        def start_game(self, hero, ally, enemy, game_map=""):
+        def start_game(self, hero, ally, enemy, game_map="", enemy_facts=None):
             calls.append((hero, tuple(ally), tuple(enemy), game_map))
-            self._inner.start_game(hero, ally, enemy, game_map=game_map)
+            self._inner.start_game(hero, ally, enemy, game_map=game_map,
+                                   enemy_facts=enemy_facts)
 
         def __getattr__(self, name):
             return getattr(self._inner, name)
@@ -778,9 +810,11 @@ def test_hero_anchor_conflict():
             def __init__(self, inner):
                 self._inner = inner
 
-            def start_game(self, hero, ally, enemy, game_map=""):
+            def start_game(self, hero, ally, enemy, game_map="",
+                           enemy_facts=None):
                 calls.append((hero, tuple(ally), tuple(enemy), game_map))
-                self._inner.start_game(hero, ally, enemy, game_map=game_map)
+                self._inner.start_game(hero, ally, enemy, game_map=game_map,
+                                       enemy_facts=enemy_facts)
 
             def __getattr__(self, name):
                 return getattr(self._inner, name)
@@ -951,6 +985,69 @@ def test_phase_machine():
     for _ in range(PhaseMachine.DISCONNECT_NEEDED):
         check_phase = pm2._poll_phase()
     check("断连事件", ("disconnect",) in events, str(events[-3:]))
+
+    # ── N8 工程债（20261020）：失败两路径共用指数退避梯子 ──────────
+    # 「进程不在」重连退避现状已有；新增「连着但连续取不到 phase」
+    # （客户端挂起/重启窗口期）同样爬梯——此前每 2s+3s 超时硬敲半死客户端
+    pm6 = PhaseMachine(FakeLCU(), callbacks={})   # phase_script 空 → 恒 None
+    check("健康轮询 = 常规间隔（不退避）",
+          pm6._loop_interval() == PhaseMachine.POLL_INTERVAL,
+          f"{pm6._loop_interval()}")
+    for _ in range(len(PhaseMachine.CONNECT_BACKOFF) + 2):
+        pm6._poll_phase()
+    check("连续取不到 phase 爬退避梯且封顶",
+          pm6._backoff_idx == len(PhaseMachine.CONNECT_BACKOFF) - 1
+          and pm6._loop_interval() == PhaseMachine.CONNECT_BACKOFF[-1],
+          f"idx={pm6._backoff_idx} interval={pm6._loop_interval()}")
+    pm7 = PhaseMachine(FakeLCU(), callbacks={})
+    pm7.lcu.phase_script = ["Lobby"]
+    pm7._backoff_idx = 3
+    pm7._poll_phase()   # 拿到 phase → 退避复位
+    check("取到 phase 退避复位回常规间隔",
+          pm7._backoff_idx == 0
+          and pm7._loop_interval() == PhaseMachine.POLL_INTERVAL,
+          f"idx={pm7._backoff_idx}")
+
+    # ── LCU 互斥（N8 20261020，竞品报告 §3.7 hex-helper 同思路）────
+    # PhaseMachine 线程（phase/teams/eog）与 LivePoller 线程（summoner_
+    # name 兜底）并发打同一 Session；可重入是必要属性——connect() 持锁
+    # 内走 _request 建英雄映射/缓存召唤师
+    from hexa.core.lcu import LCUConnector as _LCX
+    lcx = _LCX(kb)
+    ok_lock = isinstance(lcx._io_lock, type(threading.RLock()))
+    if ok_lock:
+        ok_lock = bool(lcx._io_lock.acquire()
+                       and lcx._io_lock.acquire(timeout=1))
+        lcx._io_lock.release()
+        lcx._io_lock.release()
+    check("LCU 互斥锁存在且可重入", ok_lock)
+    check("LCU 未配置连接 _request 直接 None（不碰锁不碰网）",
+          lcx._request('GET', '/x') is None)
+
+    class _SlowSession:
+        """假 Session：记录并发重叠峰值，验证 _io_lock 真串行化"""
+        def __init__(self):
+            self.cur = 0
+            self.peak = 0
+
+        def request(self, *a, **k):
+            self.cur += 1
+            self.peak = max(self.peak, self.cur)
+            time.sleep(0.03)
+            self.cur -= 1
+            return None
+
+    lcx2 = _LCX(kb)
+    lcx2.base_url, lcx2.auth_token = "https://127.0.0.1:0", "tok"
+    lcx2._sess = sess = _SlowSession()
+    threads = [threading.Thread(target=lcx2._request, args=('GET', '/x'))
+               for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    check("并发 _request 被 _io_lock 串行化（重叠峰值=1）",
+          sess.peak == 1, f"peak={sess.peak}")
 
 
 # ── 4.5 Live API 本地玩家定位（国服兜底） ────────────────────────
@@ -1217,10 +1314,14 @@ def test_runes_probe():
           f"err={(proc.stderr or '')[:200]}")
 
 
-# ── 4.7 Live 免费事实入上下文与 UI（等级/召唤师技能/队友出装/台账品质） ──
+# ── 4.7 Live 免费事实入上下文与 UI（等级/召唤师技能/队友出装/敌方实战
+#      事实/台账品质） ──
 # 案由（20261013）：Live API 已返回但没进 ui_state/模型上下文的四件免费事实。
 # 全部数据直出、不做代码侧预消化结论（判断归模型，AGENTS.md §1/§4）；
 # 解析一律防御式——真机无 fixtures 样本，字段缺失/脏值不许炸快照线程。
+# N5 敌方画像模型化（20261019）并入本节：敌方等级/KDA/装备/死亡实证
+# 直出 System1 全任务 prompt 与 System2 重派 prompt（断言看 FakeClient
+# 与提示词台账同源的全量 user 原文）。
 
 def test_live_facts_context():
     print("\n[4.7] Live 免费事实：等级/敌方召唤师技能/队友出装/台账品质")
@@ -1275,7 +1376,8 @@ def test_live_facts_context():
     check("我的等级：activeplayer 缺失回退 playerlist 匹配条",
           snap2.my_level == 7, str(snap2.my_level))
 
-    # ---- 快照进会话：ui_state.my_level + 引擎挂载（enemy_spells/ally_builds） ----
+    # ---- 快照进会话：ui_state.my_level + 引擎挂载（enemy_spells/
+    #      ally_builds/enemy_builds 敌方实战事实） ----
     session = GameSession(kb, rules)
     session.on_game_start({"ally": ["黑暗之女", "牛头酋长"],
                            "enemy": ["盲僧"],
@@ -1289,8 +1391,10 @@ def test_live_facts_context():
         PlayerInfo(champion="黑暗之女", champion_en="Annie", team="ORDER",
                    level=8, items=[{"name": "多兰之刃", "count": 1}]),
         PlayerInfo(champion="牛头酋长", team="ORDER", level=6),   # 无装备
+        # N5 20261019：敌方带 KDA 实证（deaths=2 不触发 enemy_kda 起飞告警，
+        # 防测试串味）
         PlayerInfo(champion="盲僧", team="CHAOS", level=9,
-                   spells=["闪现", "点燃"],
+                   spells=["闪现", "点燃"], kills=5, deaths=2, assists=8,
                    items=[{"name": "长剑", "count": 1}]),
         PlayerInfo(champion="放逐之刃", team="CHAOS", level=4),   # 无技能
     ]
@@ -1308,6 +1412,12 @@ def test_live_facts_context():
           "黑暗之女: 多兰之刃" in ally_rows, str(ally_rows))
     check("队友出装摘要：无装备标「无」不空串",
           "牛头酋长: 无" in ally_rows, str(ally_rows))
+    # N5 20261019 敌方画像模型化：敌方等级/KDA/装备实战事实挂载（快照直出）
+    eb = getattr(session.engine, "enemy_builds", {})
+    check("敌方实战事实挂载（等级/KDA/装备原样直出）",
+          eb.get("盲僧") == {"level": 9, "kda": (5, 2, 8), "items": ["长剑"]}
+          and eb.get("放逐之刃", {}).get("items") == [],
+          str(eb))
     # 会话重置清等级（UI 侧无数据即省略 Lv.，不得残留上一局数值）
     session.reset()
     check("会话重置清 my_level", session.ui_state()["my_level"] == 0,
@@ -1340,6 +1450,27 @@ def test_live_facts_context():
     det = eng._enemy_detail()
     check("engine 敌方明细带召唤师技能（displayName 原文直出）",
           det == ["黑暗之女(ap,Mage/Support) 召唤师技能:闪现+屏障"], str(det))
+    eng.enemy_builds = {"黑暗之女": {"level": 9, "kda": (5, 2, 8),
+                                     "items": ["莫雷洛秘典", "法穿鞋"]}}
+    det_f = eng._enemy_detail({"黑暗之女": 2})
+    check("engine 敌方明细带实战事实（等级/KDA/装备/击杀我，段序稳定）",
+          det_f == ["黑暗之女(ap,Mage/Support) Lv9 KDA 5/2/8 "
+                    "装备:莫雷洛秘典、法穿鞋 击杀我×2 召唤师技能:闪现+屏障"],
+          str(det_f))
+    # 挂载清空 → 装备/等级/KDA 段消失；死亡实证独立成段（threat 透传，
+    # 不依赖快照挂载）；无实据则整行退回 名单+画像+召唤师技能，不炸
+    eng.enemy_builds = {}
+    check("engine 敌方明细：挂载空时仅死亡实证成段（开局快照未回流的形态）",
+          eng._enemy_detail({"黑暗之女": 2})
+          == ["黑暗之女(ap,Mage/Support) 击杀我×2 召唤师技能:闪现+屏障"]
+          and eng._enemy_detail() == det,
+          str(eng._enemy_detail({"黑暗之女": 2})))
+    eng.enemy_builds = {"黑暗之女": {"level": "abc", "kda": None,
+                                     "items": [None, ""]}}
+    check("engine 敌方明细：脏字段归零省略（防御式）",
+          eng._enemy_detail() == det, str(det))
+    eng.enemy_builds = {"黑暗之女": {"level": 9, "kda": (5, 2, 8),
+                                     "items": ["莫雷洛秘典", "法穿鞋"]}}
     check("engine 队友摘要透传截断（≤5 行）",
           eng._ally_detail() == ["牛头酋长: 圣物之盾", "黑暗之女: 多兰之刃"],
           str(eng._ally_detail()))
@@ -1347,14 +1478,18 @@ def test_live_facts_context():
     eng_stale, _, _ = build_ai_engine()
     eng_stale.enemy_spells = {"旧敌": ["闪现"]}
     eng_stale.ally_builds = ["旧友: 旧装"]
+    eng_stale.enemy_builds = {"旧敌": {"level": 9, "kda": (5, 2, 8),
+                                       "items": ["长剑"]}}
     eng_stale.start_game("", [], [])
-    check("新局开局清空 Live 事实挂载（防跨局残留）",
-          eng_stale.enemy_spells == {} and eng_stale.ally_builds == [],
-          f"{eng_stale.enemy_spells} {eng_stale.ally_builds}")
+    check("新局开局清空 Live 事实挂载（防跨局残留，含敌方实战事实）",
+          eng_stale.enemy_spells == {} and eng_stale.ally_builds == []
+          and eng_stale.enemy_builds == {},
+          f"{eng_stale.enemy_spells} {eng_stale.ally_builds} "
+          f"{eng_stale.enemy_builds}")
 
-    # 下一件精修 prompt：队友摘要段 + 敌方召唤师技能行
+    # 下一件精修 prompt：队友摘要段 + 敌方召唤师技能行 + 敌方实战事实
     from hexa.ai.engine import KIND_NEXT as _KN
-    threat = ThreatProfile(ap_count=1)
+    threat = ThreatProfile(ap_count=1, killer_counts={"黑暗之女": 2})
     c1.script.append(_json.dumps({"picks": [
         {"name": pool[0], "reason": "r1"},
         {"name": pool[1] if len(pool) > 1 else "焚天", "reason": "r2"}]}))
@@ -1368,6 +1503,10 @@ def test_live_facts_context():
           and "牛头酋长: 圣物之盾" in c1.calls[-1], c1.calls[-1][:150])
     check("下一件 prompt 敌方行带召唤师技能",
           "召唤师技能:闪现+屏障" in c1.calls[-1], c1.calls[-1][:150])
+    check("下一件 prompt 敌方实战明细直出（KDA/装备/击杀我，N5 断言）",
+          "敌方实战明细" in c1.calls[-1] and "KDA 5/2/8" in c1.calls[-1]
+          and "装备:莫雷洛秘典" in c1.calls[-1]
+          and "击杀我×2" in c1.calls[-1], c1.calls[-1][:300])
 
     # 海克斯时刻评级 prompt：同吃队友摘要（参考 enemy 参数模式）
     from hexa.ai.engine import KIND_RANKS as _KR
@@ -1379,6 +1518,35 @@ def test_live_facts_context():
         time.sleep(0.02)
     check("评级 prompt 带队友出装摘要",
           "牛头酋长: 圣物之盾" in c1.calls[-1], c1.calls[-1][:150])
+    check("评级 prompt 带敌方实战事实（死亡实证随 threat 透传）",
+          "装备:莫雷洛秘典" in c1.calls[-1] and "击杀我×2" in c1.calls[-1],
+          c1.calls[-1][:300])
+
+    # ---- ③′ System2 敌方实战事实并入（N5 20261019）：改锚/中途启动重派。
+    # System2 一局一发，这些重派时点才有快照回流，实参直传（start_game
+    # 清挂载也不丢本帧数据）；常规开局派发彼时无快照，prompt 不带事实段
+    # （宁缺勿编造）
+    eng_f, _c1f, c2f = build_ai_engine(script_s2=[_json.dumps(ctx_json)])
+    eng_f.start_game(hero, [], ["黑暗之女"],
+                     enemy_facts={"黑暗之女": {"level": 9, "kda": (5, 2, 8),
+                                              "items": ["莫雷洛秘典",
+                                                        "法穿鞋"]}})
+    deadline = time.time() + 6
+    while not c2f.calls and time.time() < deadline:
+        time.sleep(0.02)
+    check("System2 prompt 带敌方快照事实（出装/KDA 直出，判断归模型）",
+          bool(c2f.calls) and "敌方快照" in c2f.calls[0]
+          and "KDA 5/2/8" in c2f.calls[0]
+          and "装备:莫雷洛秘典、法穿鞋" in c2f.calls[0],
+          c2f.calls[0][:220] if c2f.calls else "no call")
+    eng_n2, _c1n, c2n = build_ai_engine(script_s2=[_json.dumps(ctx_json)])
+    eng_n2.start_game(hero, [], ["黑暗之女"])
+    deadline = time.time() + 6
+    while not c2n.calls and time.time() < deadline:
+        time.sleep(0.02)
+    check("常规开局 System2 无快照事实段（无数据不编造）",
+          bool(c2n.calls) and "敌方快照" not in c2n.calls[0],
+          c2n.calls[0][:150] if c2n.calls else "no call")
 
     # ---- ④ 台账品质：ui_state 带 tier + ledger_line 渲染单源 ----
     s_tier = GameSession(kb, rules)
@@ -1386,9 +1554,13 @@ def test_live_facts_context():
     s_tier.record_augment(REAL_AUG, tier="棱彩")
     s_tier.record_augment(other)                       # 未带 tier（OCR 缺品质）
     entries = s_tier.ui_state()["augments"]
+    # N1 20261019：条目扩展 tier_src（ocr/prior 来源）+ round_id（检测器
+    # 轮次），缺省直出空串/None——UI 先验标「先验」、轮序号直读
     check("台账条目带品质（name+tier 直出）",
-          entries == [{"name": REAL_AUG, "tier": "棱彩"},
-                      {"name": other, "tier": ""}], str(entries))
+          entries == [{"name": REAL_AUG, "tier": "棱彩", "tier_src": "",
+                       "round_id": None},
+                      {"name": other, "tier": "", "tier_src": "",
+                       "round_id": None}], str(entries))
 
     from hexa.ui import theme as _theme
     check("台账行渲染：轮序+品质『① 贪欲束缚（棱彩）』",
@@ -2621,6 +2793,468 @@ def test_session_ai_serial():
               str(doc.get("mouse_stats"))[:100])
 
 
+# ── 6b+. 建议历史分桶（N2） + 结论指纹去重（N3） ─────────────────
+
+def test_history_buckets_and_fingerprint():
+    """N2 复盘分层 + N3 结论指纹去重（20261019 产品评估 §3.2/§3.3/§N2/§N3）。
+
+    ①history 按 kind 分桶：决策类（opening/card_ranks/swap_items/event_note）
+      全量保留；next_items 只存结论变化快照——旧平列表 + [-60:] 硬截被
+      高频刷新淹没，10 局真机 opening/card_ranks 全集为空（§3.2）。
+    ②KIND_OPENING 精修与 KIND_RANKS 档位真正进 history。
+    ③结论指纹 = 候选名集合 + 归一化理由 + 金币档：指纹不变则不落位
+      （overlay 内容不动）、不写史、不重派 AI；可买性跨档放行；事实位
+      变化（升级型海克斯入账）结论未变也重派。min_interval 本身不动
+      （§3.3：中位 44.5 次/局重复调用由事实层去重收敛）。
+    """
+    print("\n[6b+] 建议历史分桶 + 结论指纹去重")
+    import json as _json
+    from hexa.ai.engine import KIND_RANKS
+    from hexa.ai import system1 as _s1x
+    from hexa.config import BASE_DIR
+    from hexa.core.game_state import Suggestion, _norm_concl
+    from hexa.core.rules_engine import Candidate
+    from hexa.ui.review import format_review
+
+    # ---- 指纹纯函数：数字漂移 ≠ 新结论；跨档/换名/换理由/换序 = 新结论 ----
+    base = Suggestion("next_items",
+                      [Candidate("焚天", "版本答案", price=3300,
+                                 afford_note="还差600")],
+                      note="距焚天还差600，可攒")
+    drift = Suggestion("next_items",
+                       [Candidate("焚天", "版本答案", price=3300,
+                                  afford_note="还差550")],
+                       note="距焚天还差550，可攒")
+    check("纯金币数字漂移指纹不变（同一结论不重复问）",
+          base.fingerprint() == drift.fingerprint())
+    cross = Suggestion("next_items",
+                       [Candidate("焚天", "版本答案", price=3300,
+                                  afford_note="可购买")],
+                       note="")
+    check("可买性跨档指纹变化（金币跨档允许刷新）",
+          base.fingerprint() != cross.fingerprint())
+    renamed = Suggestion("next_items",
+                         [Candidate("星蚀", "版本答案", price=3300,
+                                    afford_note="还差600")],
+                         note="距焚天还差600，可攒")
+    reworded = Suggestion("next_items",
+                          [Candidate("焚天", "另一条理由", price=3300,
+                                     afford_note="还差600")],
+                          note="距焚天还差600，可攒")
+    check("候选名/理由变化指纹变化",
+          base.fingerprint() != renamed.fingerprint()
+          and base.fingerprint() != reworded.fingerprint())
+    check("顺序变化指纹变化（N2 口径：顺序变 = 结论变）",
+          Suggestion("next_items", [Candidate("甲", "x"),
+                                    Candidate("乙", "y")]).fingerprint()
+          != Suggestion("next_items", [Candidate("乙", "y"),
+                                       Candidate("甲", "x")]).fingerprint())
+    check("归一化只吞数字（可买性档位词原样保留）",
+          _norm_concl("还差650") == "还差N" and _norm_concl("可购买") == "可购买")
+    check("System1 三条理由各自成立（prompt 层引导，牛头酋长案 §3.3）",
+          "各自成立" in _s1x.PICKS_FORMAT
+          and "不得把同一条理由原样复制到多条" in _s1x.PICKS_FORMAT)
+
+    # ---- 规则模式会话流：分桶落位 + 写盘新结构 + 读取端双格式 ----
+    s = GameSession(kb, rules)
+    s.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                     "my_hero": "暗裔剑魔", "source": "test"})
+    s.on_in_progress()
+    s.record_augment(REAL_AUG, tier="棱彩")
+    check("出门装三选入决策桶",
+          s.suggestion.kind == "opening"
+          and any(k == "opening" for _, k, _ in s.history["decision"]))
+    s.on_hex_ui(True)
+    s.rank_augment_cards([REAL_AUG] * 3)
+    check("海克斯三选档位入决策桶（N2：此前完全不进 history）",
+          any(k == "card_ranks" for _, k, _ in s.history["decision"]))
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=500))
+    check("主线建议入刷新桶", len(s.history["refresh"]) == 1,
+          str(len(s.history["refresh"])))
+    sug0 = s.suggestion
+    # 500→760 跨 250G 签名档（periodic 会重算），但可买性同为「还差N」、
+    # 理由/附注归一化后不变 → 结论指纹相同，不落位不写史
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=760))
+    check("金币档内漂移不落位不写史（overlay 内容不动）",
+          s.suggestion is sug0 and len(s.history["refresh"]) == 1,
+          f"entries={len(s.history['refresh'])}")
+    p0 = s.suggestion.candidates[0].price
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=p0 + 500))
+    check("可买性跨档刷新入史",
+          len(s.history["refresh"]) == 2
+          and s.suggestion.candidates[0].afford_note == "可购买",
+          str([(c.name, c.afford_note) for c in s.suggestion.candidates[:1]]))
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=p0 + 500, enemy_items=["莫雷洛秘典"]))
+    check("event_note 入决策桶",
+          any(k == "event_note" for _, k, _ in s.history["decision"]))
+    games_dir_fp = BASE_DIR / "log" / "games"
+    s.on_end_of_game("EndOfGame")
+    newest = sorted(games_dir_fp.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    doc = (_json.loads(newest[-1].read_text(encoding="utf-8"))
+           if newest else {})
+    sug = doc.get("suggestions")
+    check("复盘按桶落盘（decision/refresh 双桶）",
+          isinstance(sug, dict) and set(sug) == {"decision", "refresh"},
+          str(type(sug)))
+    check("决策桶含 opening/card_ranks/event_note",
+          isinstance(sug, dict)
+          and {"opening", "card_ranks", "event_note"}
+          <= {e.get("kind") for e in sug["decision"]},
+          str(sorted({e.get("kind") for e in sug["decision"]}))
+          if isinstance(sug, dict) else "")
+    check("刷新桶只含 next_items 且只记结论变化（2 次）",
+          isinstance(sug, dict)
+          and {e.get("kind") for e in sug["refresh"]} <= {"next_items"}
+          and len(sug["refresh"]) == 2,
+          str(len(sug["refresh"])) if isinstance(sug, dict) else "")
+    lines = format_review(doc)
+    check("新格式读回（两桶合并计数）",
+          isinstance(sug, dict)
+          and lines[2].startswith(
+              f"建议 {len(sug['decision']) + len(sug['refresh'])} 次"),
+          lines[2])
+    check("旧平列表读回不崩（向后兼容）",
+          format_review({"suggestions": [
+              {"ts": 1.0, "kind": "next_items", "text": "旧"}]})[2]
+          == "建议 1 次（最近: 旧）")
+
+    # ---- AI 模式：同情形不重派；事实位变化重派；同结论回包不重写 ----
+    picks_opening = _json.dumps(
+        {"picks": [{"name": "红水晶", "reason": "出门防守"}]})
+    picks_v1 = _json.dumps({"picks": [
+        {"name": "焚天", "reason": "版本答案先成型"},
+        {"name": "星蚀", "reason": "穿甲次选"}]})
+    picks_v2 = _json.dumps({"picks": [
+        {"name": "星蚀", "reason": "升级目标先出"},
+        {"name": "焚天", "reason": "次选"}]})
+    eng, c1, _c2 = build_ai_engine(
+        script_s2=[_make_ctx_json("暗裔剑魔")],
+        script_s1=[picks_opening, picks_v1, picks_v2])
+    s2 = GameSession(kb, rules, engine=eng)
+    s2.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s2.on_in_progress()
+    deadline = time.time() + 5
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    s2.record_augment(REAL_AUG, tier="棱彩")
+    s2.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                             my_gold=500))
+    deadline = time.time() + 5
+    while (len(c1.calls) < 2 or s2.suggestion.source != "ai") \
+            and time.time() < deadline:
+        time.sleep(0.02)
+    check("AI 精修覆盖 + 精修结论入刷新桶",
+          s2.suggestion.source == "ai"
+          and s2.suggestion.candidates[0].name == "焚天"
+          and any("版本答案" in t
+                  for _, k, t in s2.history["refresh"]),
+          s2.suggestion.source)
+    n_calls, n_refresh = len(c1.calls), len(s2.history["refresh"])
+    s2._suggest_next_items(reason="event")   # 同情形事件帧（不受 min_interval）
+    time.sleep(0.2)
+    check("同情形不重派不重记（N3 同一事实不重复问）",
+          len(c1.calls) == n_calls and len(s2.history["refresh"]) == n_refresh
+          and s2.suggestion.source == "ai",
+          f"calls={len(c1.calls)}/{n_calls} "
+          f"refresh={len(s2.history['refresh'])}/{n_refresh}")
+    s2.record_augment("升级：中娅", round_id=90)
+    deadline = time.time() + 5
+    while len(c1.calls) < n_calls + 1 and time.time() < deadline:
+        time.sleep(0.02)
+    check("事实位变化（升级型海克斯入账）结论未变也重派",
+          len(c1.calls) == n_calls + 1, f"calls={len(c1.calls)}")
+
+    # ---- KIND_RANKS：档位入决策桶 + 同结论精修不重记 ----
+    s3 = GameSession(kb, rules)
+    s3.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s3.on_in_progress()
+    s3.on_hex_ui(True)
+    s3.rank_augment_cards([REAL_AUG] * 3)
+    check("规则基准档位入决策桶",
+          sum(1 for _, k, _ in s3.history["decision"]
+              if k == "card_ranks") == 1)
+    changed = [dict(r, grade=("A" if r["grade"] != "A" else "S"))
+               for r in s3.card_ranks]
+    s3._on_engine_result(KIND_RANKS, changed, s3._card_serial)
+    check("评级结论变化 → 覆盖 + 决策桶新增",
+          s3.card_ranks == changed
+          and sum(1 for _, k, _ in s3.history["decision"]
+                  if k == "card_ranks") == 2,
+          str([r["grade"] for r in s3.card_ranks]))
+    s3._on_engine_result(KIND_RANKS, [dict(r) for r in changed],
+                         s3._card_serial)
+    check("同结论评级回包不重记",
+          sum(1 for _, k, _ in s3.history["decision"]
+              if k == "card_ranks") == 2)
+
+
+# ── 6d. 复盘结果维度 + 本局账本（N4） ─────────────────────────────
+
+def test_review_ledger():
+    """N4 复盘结果维度 + 本局账本（20261019 产品评估 §3.5/§4-N4）。
+
+    ①eog 终局块解析容错：扁平/旧 statistics 数组双 schema、summonerId
+      或召唤师名匹配、身份不命中/坏包/未连接一律 None（结果采集绝不
+      拖垮终局链，复盘该字段如实缺省）；
+    ②快照采集落盘：KDA/召唤师名/累计金钱/装备变更时刻序列随快照更新、
+      局终随复盘落盘；官方终局块结果优先于快照末帧；
+    ③降级路径：拿不到结果数据（fetcher None / data_stall·秒退跳过名单）
+      复盘仍正常落盘，result/kda/item_events 不落键（不编造）；
+    ④账本对账纯函数：出门装听劝、海克斯轮次（同轮基准+精修双条按名
+      集合合并）、出装建议窗口采纳（next+swap 混序互斥切窗）、分均
+      经济；旧文件缺新键对应维度占位不炸。
+    """
+    print("\n[6d] 复盘结果维度 + 本局账本（N4）")
+    import json as _json
+    from hexa.config import BASE_DIR
+    from hexa.core.lcu import LCUConnector
+    from hexa.ui.review import compute_ledger, format_ledger
+
+    # ---- ① eog 终局块解析（注入假 _get_json，零网络） ----
+    lcx = LCUConnector(kb)
+    check("eog 未连接（无 base_url）直接 None",
+          lcx.get_eog_stats() is None)
+    lcx.base_url, lcx.auth_token = "https://127.0.0.1:0", "tok"
+    lcx._summoner_id, lcx._summoner_name = 42, "测试召唤师"
+    flat = {"allPlayers": [
+        {"summonerId": 7, "stats": {"WIN": True, "KILLS": 9}},
+        {"summonerId": 42, "stats": {"WIN": True, "KILLS": 5,
+                                     "DEATHS": 3, "ASSISTS": 12}},
+    ]}
+    lcx._get_json = lambda ep: flat
+    check("eog 扁平 schema：summonerId 命中，胜负+KDA 直读",
+          lcx.get_eog_stats(attempts=1) == {
+              "result": "win", "kills": 5, "deaths": 3, "assists": 12},
+          str(lcx.get_eog_stats(attempts=1)))
+    lcx._get_json = lambda ep: {"allPlayers": [{
+        "summonerName": "测试召唤师",
+        "stats": {"statistics": [
+            {"name": "WIN", "value": 0},
+            {"name": "CHAMPIONS_KILLED", "value": 2},
+            {"name": "NUM_DEATHS", "value": 8},
+            {"name": "ASSISTS", "value": 4}]}}]}
+    check("eog 旧 statistics 数组 schema：召唤师名命中，WIN=0 判负",
+          lcx.get_eog_stats(attempts=1) == {
+              "result": "loss", "kills": 2, "deaths": 8, "assists": 4},
+          str(lcx.get_eog_stats(attempts=1)))
+    lcx._get_json = lambda ep: {"allPlayers": [
+        {"summonerId": 7, "stats": {"WIN": True}}]}
+    check("eog 身份不命中 → None（宁缺毋滥）",
+          lcx.get_eog_stats(attempts=1) is None)
+    for bad in (None, {}, {"allPlayers": "oops"},
+                {"allPlayers": [None, "x", 3]}):
+        lcx._get_json = lambda ep, b=bad: b
+        check(f"eog 坏包 → None（{bad!r}）",
+              lcx.get_eog_stats(attempts=1) is None)
+
+    # ---- ② 快照采集 + 局终落盘（官方终局块结果优先） ----
+    def _fetch():
+        return {"result": "win", "kills": 6, "deaths": 2, "assists": 10}
+
+    s = GameSession(kb, rules, result_fetcher=_fetch)
+    s.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                     "my_hero": "暗裔剑魔", "source": "test"})
+    s.on_in_progress()
+    s.record_augment(REAL_AUG, tier="棱彩")
+    s.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
+                            my_gold=500, my_kda=(1, 0, 2),
+                            summoner="测试召唤师", total_gold=800))
+    check("装备变更序列按边沿记录（首帧购买）",
+          len(s.item_events) == 1
+          and s.item_events[0]["items"] == ["多兰之刃"],
+          str(s.item_events))
+    s.on_snapshot(make_snap(my_hero_en="Aatrox",
+                            my_items=["多兰之刃", "红水晶"], my_gold=900,
+                            my_kda=(1, 1, 2), summoner="测试召唤师",
+                            total_gold=1500))
+    check("装备变更序列第二帧（再买一件）+ KDA/金钱随帧更新",
+          len(s.item_events) == 2
+          and s.item_events[-1]["items"] == ["多兰之刃", "红水晶"]
+          and s.my_kda == (1, 1, 2) and s.total_gold == 1500.0
+          and s.summoner_name == "测试召唤师",
+          str((s.item_events, s.my_kda, s.total_gold, s.summoner_name)))
+    s.on_snapshot(make_snap(my_hero_en="Aatrox",
+                            my_items=["多兰之刃", "红水晶"], my_gold=1200))
+    check("装备不变的帧不重复记录（按变更边沿）",
+          len(s.item_events) == 2, str(len(s.item_events)))
+    games_dir_6d = BASE_DIR / "log" / "games"
+    s.on_end_of_game("EndOfGame")
+    newest = sorted(games_dir_6d.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    doc = (_json.loads(newest[-1].read_text(encoding="utf-8"))
+           if newest else {})
+    check("终局块结果落盘（result 胜负）", doc.get("result") == "win",
+          str(doc.get("result")))
+    check("官方终局 KDA 优先于快照末帧",
+          doc.get("kda") == {"kills": 6, "deaths": 2, "assists": 10},
+          str(doc.get("kda")))
+    check("召唤师名/累计金钱/装备变更时刻序列随复盘落盘",
+          doc.get("summoner_name") == "测试召唤师"
+          and doc.get("total_gold") == 1500.0
+          and len(doc.get("item_events") or []) == 2
+          and doc["item_events"][-1]["items"] == ["多兰之刃", "红水晶"],
+          str((doc.get("summoner_name"), doc.get("total_gold"),
+               doc.get("item_events"))))
+
+    # ---- ③ 降级路径：拿不到结果数据，复盘仍正常落盘且不编造 ----
+    s2 = GameSession(kb, rules, result_fetcher=lambda: None)
+    s2.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s2.on_in_progress()
+    s2.record_augment(REAL_AUG, tier="棱彩")   # 非零内容局才落盘
+    s2.on_end_of_game("EndOfGame")
+    newest = sorted(games_dir_6d.glob("*.json"), key=lambda p: p.stat().st_mtime)
+    doc2 = _json.loads(newest[-1].read_text(encoding="utf-8"))
+    check("拿不到结果：复盘照常落盘（hero 等字段在）",
+          doc2.get("hero") == "暗裔剑魔" and doc2.get("augments"),
+          str(doc2.get("hero")))
+    check("拿不到结果：result/kda/item_events/total_gold 不落键（如实缺省）",
+          all(k not in doc2 for k in
+              ("result", "kda", "item_events", "total_gold")),
+          str([k for k in ("result", "kda", "item_events", "total_gold")
+               if k in doc2]))
+    check("缺结果字段账本渲染不炸（全占位）",
+          format_ledger(doc2)[0].startswith("结果: -（未记录）"),
+          format_ledger(doc2)[0])
+    fetched = {"n": 0}
+
+    def _count():
+        fetched["n"] += 1
+        return {"result": "win", "kills": 1, "deaths": 1, "assists": 1}
+
+    s3 = GameSession(kb, rules, result_fetcher=_count)
+    s3.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s3.on_in_progress()
+    s3.record_augment(REAL_AUG, tier="棱彩")
+    s3.on_end_of_game("data_stall")
+    s3.on_game_start({"ally": ["暗裔剑魔"], "enemy": ["黑暗之女"],
+                      "my_hero": "暗裔剑魔", "source": "test"})
+    s3.on_in_progress()
+    s3.record_augment(REAL_AUG, tier="棱彩")
+    s3.on_end_of_game("dodge_requeue")
+    check("data_stall/秒退重开不取终局块（跳过名单）",
+          fetched["n"] == 0, str(fetched["n"]))
+
+    # ---- ④ 账本对账纯函数（时间对齐，无名单无阈值） ----
+    doc_led = {
+        "hero": "寒冰", "duration_s": 1200.0, "result": "win",
+        "kda": {"kills": 5, "deaths": 3, "assists": 12},
+        "total_gold": 12240.0, "summoner_name": "测试召唤师",
+        "augments": [
+            {"name": "贪欲束缚", "tier": "棱彩", "ts": 300.0},
+            {"name": "炼狱之刃", "tier": "黄金", "ts": 900.0}],
+        "item_events": [
+            {"ts": 310.0, "items": ["多兰之刃"]},
+            {"ts": 620.0, "items": ["多兰之刃", "焚天"]},
+            {"ts": 700.0, "items": ["多兰之刃", "焚天", "自然之力"]}],
+        "suggestions": {"decision": [
+            {"ts": 295.0, "kind": "card_ranks",
+             "text": "① 贪欲束缚（S）—— 主C\n② 铁婕的守护（A）—— 承伤\n"
+                     "③ 黑暗收割（B）—— 收割"},
+            {"ts": 298.0, "kind": "card_ranks",
+             "text": "① 贪欲束缚（S）—— 主C精修\n② 铁婕的守护（A）—— 承伤\n"
+                     "③ 黑暗收割（B）—— 收割"},
+            {"ts": 300.0, "kind": "opening",
+             "text": "[推荐1] 多兰之刃 —— 进攻\n[推荐2] 红水晶 —— 防守\n"
+                     "(首个海克斯【贪欲束缚】已联动)"},
+            {"ts": 890.0, "kind": "card_ranks",
+             "text": "① 炼狱之刃（A）—— 输出\n② 守护天使（S）—— 保命\n"
+                     "③ 黑暗收割（B）—— 收割"}],
+            "refresh": [
+                {"ts": 600.0, "kind": "next_items",
+                 "text": "出装主线（金币 500）\n① 焚天（3300G，还差2800）"
+                         "—— 版本答案\n② 星蚀（3200G，还差5800）—— 次选"},
+                {"ts": 690.0, "kind": "next_items",
+                 "text": "出装主线（金币 900）\n① 无尽之刃（3400G）—— 答案"},
+                {"ts": 695.0, "kind": "swap_items",
+                 "text": "满六神装 · 替换建议\n① 🔄 卖红水晶 → 买自然之力"
+                         "（差价800G，现金足够）—— 补魔抗"}]},
+    }
+    led = compute_ledger(doc_led)
+    check("账本：出门装推荐集与实买对上（同帧交集=听劝）",
+          led["opening"]["candidates"] == ["多兰之刃", "红水晶"]
+          and led["opening"]["bought"] == ["多兰之刃"]
+          and led["opening"]["adopted"] is True,
+          str(led["opening"]))
+    check("账本：海克斯同轮基准+精修双条合并（分母不虚增）",
+          len(led["hex_rounds"]) == 2, str(len(led["hex_rounds"])))
+    r1, r2 = led["hex_rounds"]
+    check("账本：第1轮窗口跨精修条目，选中卡+推荐位次正确",
+          r1["picked"] == "贪欲束缚" and r1["adopted"] is True
+          and r1["rank"] == 1
+          and [(o["name"], o["grade"]) for o in r1["options"]]
+          == [("贪欲束缚", "S"), ("铁婕的守护", "A"), ("黑暗收割", "B")],
+          str(r1))
+    check("账本：第2轮窗口（末轮到局终）选中与位次正确",
+          r2["picked"] == "炼狱之刃" and r2["adopted"] is True
+          and r2["rank"] == 1, str(r2))
+    check("账本：出装建议窗口采纳（next 命中/不命中 + swap 买件命中）",
+          led["items"] == {"suggested": 3, "adopted": 2, "has_buys": True},
+          str(led["items"]))
+    check("账本：结果直出 + 分均经济折算（12240G/20min=612）",
+          led["result"] == "win" and led["kda"]["kills"] == 5
+          and led["gpm"] == 612.0 and led["summoner_name"] == "测试召唤师",
+          str((led["result"], led["kda"], led["gpm"])))
+    rows = format_ledger(doc_led)
+    check("账本渲染：结果行 胜负·KDA·分均·召唤师名",
+          rows[0] == "结果: 胜 · KDA 5/3/12 · 分均 612G · 测试召唤师",
+          rows[0])
+    check("账本渲染：出门装听劝行",
+          rows[1] == "出门装: 推荐 多兰之刃/红水晶 → 实买 多兰之刃（✓听劝）",
+          rows[1])
+    check("账本渲染：海克斯汇总+逐轮行（含推荐位次）",
+          rows[2] == "海克斯: 2/2 轮选中推荐卡"
+          and "第1轮 ①贪欲束缚（S） ②铁婕的守护（A） ③黑暗收割（B）"
+              " → 选 贪欲束缚（推荐第1位）✓" in rows[3]
+          and "→ 选 炼狱之刃（推荐第1位）✓" in rows[4],
+          str(rows[2:5]))
+    check("账本渲染：出装采纳行",
+          rows[5] == "出装采纳: 建议 3 次 · 采纳 2 次", rows[5])
+
+    # 未听劝/选卡未记录/买序列缺失等如实呈现
+    doc_miss = {
+        "augments": [], "item_events": [{"ts": 100.0, "items": ["破败王者之刃"]}],
+        "suggestions": {"decision": [
+            {"ts": 50.0, "kind": "opening",
+             "text": "[推荐1] 多兰之刃 —— 进攻"}],
+            "refresh": [
+                {"ts": 60.0, "kind": "next_items",
+                 "text": "出装主线\n① 无尽之刃（3400G）—— 答案"}]}}
+    led_m = compute_ledger(doc_miss)
+    check("账本：未听劝（实买在推荐集外）+ 台账无选择（未判定）",
+          led_m["opening"]["adopted"] is False
+          and led_m["opening"]["bought"] == ["破败王者之刃"]
+          and led_m["hex_rounds"] == []
+          and led_m["items"]["adopted"] == 0,
+          str(led_m))
+    check("账本渲染：未听劝行如实标注",
+          "未听劝" in format_ledger(doc_miss)[1], format_ledger(doc_miss)[1])
+
+    # 旧文件（无新键）与空 dict：占位不炸
+    led_old = compute_ledger({"hero": "寒冰", "suggestions": [
+        {"ts": 1.0, "kind": "opening",
+         "text": "[推荐1] 红水晶 —— 旧格式"}]})
+    check("旧文件：opening 可对账但实买未记录（不编造）",
+          led_old["opening"]["candidates"] == ["红水晶"]
+          and led_old["opening"]["bought"] == []
+          and led_old["opening"]["adopted"] is None
+          and led_old["items"]["suggested"] == 0,
+          str(led_old))
+    rows_old = format_ledger({})
+    check("空 dict：账本全占位不炸",
+          rows_old[0] == "结果: -（未记录）"
+          and rows_old[1] == "出门装: -（无推荐记录）"
+          and rows_old[2] == "海克斯: -（无三选评级记录）"
+          and rows_old[3] == "出装采纳: -（无建议记录）",
+          str(rows_old))
+
+
 # ── 6c. 满六神装替换建议（v4.4：格满后改推"卖X换Y"） ────────────
 
 def test_swap_mode():
@@ -3001,8 +3635,8 @@ def test_coach_save_gap():
     check("出装方案进 prompt（当前路线方案置前）",
           "本局适配出装方案" in cap.user and "穿甲流（AD）" in cap.user
           and "poke 局先穿甲" in cap.user)
-    check("敌方明细进 prompt（死管道复活）",
-          "敌方明细" in cap.user and "黑暗之女(ap)" in cap.user)
+    check("敌方明细进 prompt（死管道复活；N5 起标签为实战明细）",
+          "敌方实战明细" in cap.user and "黑暗之女(ap)" in cap.user)
     cap2 = _Cap()
     system1.rank_augments(cap2, ctx_r, "暗裔剑魔", ["贪欲束缚"], [], [],
                           "威胁", [{"name": "贪欲束缚", "grade": "A",
@@ -3329,7 +3963,7 @@ def test_review_fixes():
           len(list(games_dir.glob("*.json"))) == n_logs)
     # 有内容 + hero 未定：不写（避免文件名被钉死为 unknown）
     sess.my_hero = None
-    sess.history.append((time.time(), "next_items", "测试建议"))
+    sess.history["refresh"].append((time.time(), "next_items", "测试建议"))
     sess._maybe_flush_review_draft()
     check("草稿：hero 未定不落盘",
           len(list(games_dir.glob("*.json"))) == n_logs)
@@ -3341,8 +3975,11 @@ def test_review_fixes():
           f"total={len(list(games_dir.glob('*.json')))} n_logs={n_logs}")
     check("草稿：不置幂等位", sess._review_flushed is False)
     doc = _json.loads(draft_path.read_text(encoding="utf-8"))
+    # N2 复盘分层案：suggestions 为 {decision, refresh} 双桶，合并断言
+    _sug_all = (doc["suggestions"]["decision"]
+                + doc["suggestions"]["refresh"])
     check("草稿：内容含建议历史", any("测试建议" in s["text"]
-                                      for s in doc["suggestions"]))
+                                      for s in _sug_all))
     last_draft_ts = sess._draft_ts
     sess._maybe_flush_review_draft()
     check("草稿：周期限频", sess._draft_ts == last_draft_ts)
@@ -4334,6 +4971,85 @@ def test_ui_design_system():
                    if __version__ in v],
           titles[:60])
 
+    # 8) N8 overlay 重绘签名去重（20261020）：签名涵盖全部可见面。
+    #    方向「宁多勿漏」——多含输入最多偶尔多画一帧，漏含字段 = 该字段
+    #    变化永不刷新（隐性冻结），故逐可见面做敏感度断言
+    import copy as _copy
+    from hexa.ui.overlay import overlay_content_signature as _ocs
+    base = {
+        "stage": "in_game", "my_hero": "暗裔剑魔", "my_level": 11,
+        "coach_latest": "敌方治疗多，留意重伤", "skill_order": "Q>E>W",
+        "augments": [{"name": REAL_AUG, "tier": "棱彩", "round_id": 0,
+                      "tier_src": "ocr"}],
+        "threat": "物伤×2 | 治疗:血港鬼影", "suggestion": "买多兰之刃",
+        "suggestion_kind": "next_items", "swap_forecast": "",
+        "engine": {"inflight": 0, "ctx_source": "ai"},
+        "card_ranks": [], "card_ranks_pending": False, "hex_active": False,
+        "hex_recognized": False, "hex_picked": None, "hex_last": "",
+    }
+    check("内容签名稳定：同一状态两次计算一致",
+          _ocs(base) == _ocs(_copy.deepcopy(base)))
+    check("内容签名不随无关键漂移（ui_state 新增字段不触发重绘）",
+          _ocs(base) == _ocs({**base, "future_key": 1}))
+    flips = {
+        "阶段": {"stage": "champ_select"},
+        "英雄": {"my_hero": "寒冰射手"},
+        "等级": {"my_level": 12},
+        "军师": {"coach_latest": "换句话"},
+        "加点": {"skill_order": "W>Q>E"},
+        "台账-名字": {"augments": [{"name": "别的海克斯", "tier": "棱彩",
+                                "round_id": 0, "tier_src": "ocr"}]},
+        "台账-品质": {"augments": [{"name": REAL_AUG, "tier": "黄金",
+                                "round_id": 0, "tier_src": "ocr"}]},
+        "台账-轮次": {"augments": [{"name": REAL_AUG, "tier": "棱彩",
+                                "round_id": 1, "tier_src": "ocr"}]},
+        "台账-来源": {"augments": [{"name": REAL_AUG, "tier": "棱彩",
+                                "round_id": 0, "tier_src": "prior"}]},
+        "威胁": {"threat": "法伤×3"},
+        "建议正文": {"suggestion": "买红水晶"},
+        "建议替换轨": {"suggestion_kind": "swap_items"},
+        "替换预告": {"swap_forecast": "六神了"},
+        "AI在途-inflight": {"engine": {"inflight": 1, "ctx_source": "ai"}},
+        "AI在途-生成中": {"engine": {"inflight": 0, "ctx_source": "生成中"}},
+        "档位行-卡名": {"card_ranks": [{"name": "另一张卡", "grade": "S",
+                                    "reason": "先手强"}]},
+        "档位行-评级": {"card_ranks": [{"name": REAL_AUG, "grade": "A",
+                                    "reason": "先手强"}]},
+        "档位行-理由": {"card_ranks": [{"name": REAL_AUG, "grade": "S",
+                                    "reason": "换句话"}]},
+        "识别等待": {"card_ranks_pending": True},
+        "界面在屏": {"hex_active": True},
+        "已识别": {"hex_recognized": True},
+        "上轮结果": {"hex_last": "✓ 已选 无尽之刃"},
+        "点选卡": {"hex_picked": [1, REAL_AUG]},
+    }
+    blind = [label for label, patch in flips.items()
+             if _ocs({**_copy.deepcopy(base), **patch}) == _ocs(base)]
+    check(f"签名敏感度：全部 {len(flips)} 个可见面变化都换签名（漏=冻结）",
+          not blind, str(blind))
+    # 签名去重的消费端接线：500ms 轮询签名一致整帧跳过（不 config 不量高）
+    check("overlay 500ms 轮询走签名去重（一致跳过 _refresh_once 全部重绘）",
+          "sig = overlay_content_signature(state)" in srcs["overlay.py"]
+          and "if sig == self._last_sig:" in srcs["overlay.py"]
+          and "self._last_sig = sig" in srcs["overlay.py"])
+
+    # 9) N8 topmost keepalive 接线（20261020）：每 1s SetWindowPos 重申
+    #    置顶，四轻标志（不动几何/不抢焦点/不重绘）+ finally 续约
+    ka = srcs["overlay.py"][srcs["overlay.py"].index("def _keep_topmost"):]
+    ka = ka[:ka.index("\n    def ") + 1]   # 只取本方法体做断言
+    check("keepalive 用 SetWindowPos 重申 HWND_TOPMOST（非一次性 -topmost）",
+          "SetWindowPos" in ka and "HWND_TOPMOST" in ka)
+    check("keepalive 轻：NOMOVE/NOSIZE/NOACTIVATE/NOREDRAW 四标志齐",
+          all(f in ka for f in ("SWP_NOMOVE", "SWP_NOSIZE",
+                                "SWP_NOACTIVATE", "SWP_NOREDRAW")))
+    check("keepalive 不重绘不重查询（方法体内无 update_idletasks/"
+          "winfo_reqheight/ui_state）",
+          not any(f in ka for f in ("update_idletasks", "winfo_reqheight",
+                                    "ui_state")))
+    check("keepalive 1s 续约在 finally（异常不掐链）+ 启动接线",
+          "finally:" in ka and "TOPMOST_KEEPALIVE_MS, self._keep_topmost"
+          in ka and "TOPMOST_KEEPALIVE_MS = 1000" in srcs["overlay.py"])
+
 
 # ── 17. P3 杂项：启动延迟刷新可取消 + 起飞提示计数可见（20261013） ──
 
@@ -4421,13 +5137,14 @@ def test_misc_p3_refresh_and_kda():
     st = sess.ui_state()
     check("起飞提示计数：二触发 2/2", st["kda_alerts_used"] == 2,
           st["kda_alerts_used"])
-    n_takeoff = sum(1 for _, _, txt in sess.history if "起飞" in txt)
+    n_takeoff = sum(1 for _, _, txt in sess.history_flat() if "起飞" in txt)
     sess.on_snapshot(make_snap(my_hero_en="Aatrox", my_items=["多兰之刃"],
                                enemy_kda=(6, 0, 4)))
     st = sess.ui_state()
     check("起飞提示计数：到上限不再发（仍 2/2）",
           st["kda_alerts_used"] == 2
-          and sum(1 for _, _, txt in sess.history if "起飞" in txt) == n_takeoff,
+          and sum(1 for _, _, txt in sess.history_flat()
+                  if "起飞" in txt) == n_takeoff,
           f"used={st['kda_alerts_used']} history={n_takeoff}")
     sess.reset()
     check("起飞提示计数：换局 reset 归零",
@@ -5140,7 +5857,9 @@ def test_review_panel():
     s.stage = "in_game"
     s.my_hero = "寒冰"
     s.augments.append({"name": "心之刚", "tier": "S", "ts": time.time()})
-    s.history.append((time.time(), "opening", "① 出门装 A\n② 出门装 B"))
+    # N2 复盘分层案：history 按 kind 分桶，opening 属决策桶（全量保留）
+    s.history["decision"].append(
+        (time.time(), "opening", "① 出门装 A\n② 出门装 B"))
     s.log_click({"x": 1, "y": 2, "card": 0, "branch": "direct",
                  "result": "recorded", "name": "心之刚"})
     games_dir = _SMOKE_BASE / "log" / "games"
@@ -5161,13 +5880,15 @@ def test_review_panel():
     root = Path(__file__).resolve().parent.parent
     mw_src = (root / "hexa" / "ui" / "main_window.py").read_text(
         encoding="utf-8")
-    check("主窗口『上局回顾』卡走 _card/card_frame 体系（不另立样式）",
-          '"上局回顾"' in mw_src and "self.card_review" in mw_src
-          and 'self._card(main, "上局回顾"' in mw_src)
+    # N4 本局账本案 20261019：复盘卡升级『上局账本』一屏（format_review
+    # 摘要 + format_ledger 采纳对账同卡渲染）
+    check("主窗口『上局账本』卡走 _card/card_frame 体系（不另立样式）",
+          '"上局账本"' in mw_src and "self.card_review" in mw_src
+          and 'self._card(main, "上局账本"' in mw_src)
     rv_seg = mw_src[mw_src.index("def _render_review"):]
-    check("主窗口渲染链：review 三函数接入 + strip_emoji 渲染边界",
+    check("主窗口渲染链：review 四函数接入 + strip_emoji 渲染边界",
           "latest_review_path(" in rv_seg and "load_review(" in rv_seg
-          and "format_review(" in rv_seg
+          and "format_review(" in rv_seg and "format_ledger(" in rv_seg
           and "strip_emoji(" in rv_seg)
     check("主窗口轮询接线：_poll_ui 调 _render_review",
           "self._render_review()" in mw_src)
@@ -5427,6 +6148,342 @@ def test_desc_consensus_and_ai_ledger():
         _ul.set_default(_default_saved)
 
 
+# ── 21. 海克斯先验数据流水线（N6 断链修复案 20261020） ────────────
+
+def test_fetch_hero_augments_pipeline():
+    """data/hero_augments.csv 上游断链修复（N6）：此前 31k 行先验资产
+    是 2026-09-25 手工导入、无生成脚本，设置面板也不监控它的新鲜度。
+    本组断言：①抓取脚本纯逻辑（目录解析 / rank 稠密自检 / 等级内序号 /
+    校验门槛 / 原子写 BOM+CRLF）——全部合成 fixture 不联网；②刷新任务体
+    入链且派生脚本排在其后（augment_names 白名单必须晚于 CSV 重生成）；
+    ③设置面板数据面板把先验抓取日期纳入 >7 天黄标监控。"""
+    print("\n[21] 海克斯先验数据流水线（N6 断链修复案）")
+    import csv as _csv
+    import importlib.util
+    import json as _json
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location(
+        "fetch_hero_augments", root / "scripts" / "fetch_hero_augments.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    # ---- ① 纯逻辑：目录解析（rarity 0白银/1黄金/2棱彩，站点原文） ----
+    catalog = mod.parse_catalog({
+        "2077": {"displayName": "贪欲束缚", "rarity": 1},
+        "2157": {"displayName": "升级：死亡之舞", "rarity": 0},
+        "1007": {"displayName": "渴血", "rarity": 0},
+        "bad":  {"displayName": "", "rarity": 1},      # 空名剔除
+        "bad2": {"displayName": "X", "rarity": 9},     # 非法 rarity 剔除
+    }, min_entries=3)
+    check("目录解析：rarity 映射 + 坏条目剔除",
+          catalog == {"2077": ("贪欲束缚", "黄金"),
+                      "2157": ("升级：死亡之舞", "白银"),
+                      "1007": ("渴血", "白银")}, str(catalog))
+    try:
+        mod.parse_catalog({})
+        ok = False
+    except ValueError:
+        ok = True
+    check("目录解析：空目录抛错（宁旧勿坏）", ok)
+    try:
+        mod.parse_catalog({"a": {"displayName": "名", "rarity": 0}}, min_entries=100)
+        ok = False
+    except ValueError:
+        ok = True
+    check("目录解析：规模下限默认 100（防改版半截目录）", ok)
+
+    def _detail(rank_of, total=None):
+        """合成 champion-details：entry=[id, json_str, patch, 日期]"""
+        total = total or len(rank_of)
+        augs = {aid: {"rank": str(r), "total": str(total)}
+                for aid, r in rank_of.items()}
+        return {"championAugments": [["266", _json.dumps({"augments": augs}),
+                                      "16.20", "2026-10-19"]]}
+
+    parsed = mod.parse_champion_detail(
+        _detail({"2077": 1, "2157": 2, "1007": 3}), catalog)
+    rows = mod.rows_for_champion("暗裔剑魔", "Aatrox", parsed)
+    check("行装配：总排名升序 + 等级内序号同稀有度内计数（与旧资产 t_rank 同义）",
+          rows == [["暗裔剑魔", "Aatrox", "黄金", 1, 1, "贪欲束缚"],
+                   ["暗裔剑魔", "Aatrox", "白银", 2, 1, "升级：死亡之舞"],
+                   ["暗裔剑魔", "Aatrox", "白银", 3, 2, "渴血"]], str(rows))
+    check("detail 元信息：patch/日期透出", mod.detail_meta(
+        _detail({"2077": 1})) == ("16.20", "2026-10-19"))
+    # rank 不稠密 = 半截数据，硬失败保旧文件
+    try:
+        mod.parse_champion_detail(_detail({"2077": 1, "2157": 3}), catalog)
+        ok = False
+    except ValueError:
+        ok = True
+    check("rank 稠密自检：跳号即抛错", ok)
+    # 目录缺名超 1% = catalog 与 detail 脱钩（catalog 只覆盖 100 个真 id）
+    many = {f"id{i}": i for i in range(1, 101)}
+    many["ghost1"] = 101
+    many["ghost2"] = 102
+    try:
+        mod.parse_champion_detail(_detail(many),
+                                  {f"id{i}": ("名", "白银") for i in range(1, 101)})
+        ok = False
+    except ValueError:
+        ok = True
+    check("目录缺名超 1% 抛错（防静默丢名）", ok)
+
+    # ---- ① 校验门槛：不过即抛，调用方不落盘 ----
+    def _big_rows(n_champs=170, per=100):
+        rows = []
+        for c in range(n_champs):
+            for r in range(1, per + 1):
+                rows.append(["英雄", f"H{c}", "棱彩" if r % 3 == 0
+                             else ("黄金" if r % 3 == 1 else "白银"),
+                             r, r, f"海克斯{c}-{r}"])
+        return rows
+
+    mod.validate_rows(_big_rows(), 170)
+    check("校验门槛：全量大表通过", True)
+    for name, rows_bad, champs in (
+            ("英雄覆盖不足", _big_rows(), 100),
+            ("行数过少", _big_rows(n_champs=170, per=50), 170),
+            ("等级值域混入非法档", _big_rows()[:1] + _big_rows()[1:], 170)):
+        bad = rows_bad
+        if name.startswith("等级值域"):
+            bad[0][2] = "铂金"
+        try:
+            mod.validate_rows(bad, champs)
+            ok = False
+        except ValueError:
+            ok = True
+        check(f"校验门槛：{name}抛错", ok)
+    bad = _big_rows()
+    bad[7][5] = "？？？"
+    try:
+        mod.validate_rows(bad, 170)
+        ok = False
+    except ValueError:
+        ok = True
+    check("校验门槛：占位名混入抛错（防 ？？？ 复发入库）", ok)
+
+    # ---- ① 原子写：BOM + CRLF + 表头，与既有资产字节风格一致 ----
+    out = _SMOKE_BASE / "n6_out" / "hero_augments.csv"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    mod.atomic_write_csv(rows, out)
+    raw = out.read_bytes()
+    back = list(_csv.reader(open(out, encoding="utf-8-sig")))
+    check("原子写：BOM+CRLF+表头+行内容（CSV 回读均字符串）",
+          raw[:3] == b"\xef\xbb\xbf" and b"\r\n" in raw
+          and back[0] == mod.HEADER
+          and back[1] == [str(c) for c in rows[0]], str(back[:2]))
+
+    # ---- ② 刷新任务体入链（fetch → gen 派生次序不可倒） ----
+    app_src = (root / "app.py").read_text(encoding="utf-8")
+    body = app_src[app_src.index("def _run_data_refresh")
+                   :app_src.index("def _start_data_refresh")]
+    check("刷新链入链 fetch_hero_augments（天级刷新）",
+          "fetch_hero_augments" in body, body[:120])
+    jobs_block = body[body.index("jobs = ["):]
+    jobs_block = jobs_block[:jobs_block.index("]]") + 2]
+    check("刷新链次序：CSV 重抓在 gen_champ_profile 派生之前（白名单随新 CSV 重生成）",
+          jobs_block.index("fetch_hero_augments")
+          < jobs_block.index("gen_champ_profile"), jobs_block)
+
+    # ---- ③ 设置面板：先验新鲜度纳入监控（>7 天黄标） ----
+    sw_src = (root / "hexa" / "ui" / "settings_window.py").read_text(encoding="utf-8")
+    panel = sw_src[sw_src.index("def _render_data_panel"):]
+    check("数据面板：hero_augments.csv mtime 纳入监控",
+          "hero_augments.csv" in panel and "> 7" in panel, panel[:200])
+
+
+def test_n1_tier_probe():
+    """海克斯阶级全链路（N1 20261019，台账 43/43 条 tier 为空断链接通）：
+    卡框色环 HSV 探针（合成定标 fixture 三档 + 垃圾画面拒判）/记账链
+    tier_src 来源标注 + round_id 入账/kb.augment_tier 直查查空稳/
+    台账行先验标注 + 轮序号 round_id 直读/System1 上下文「已选【棱彩】」
+    数据直出/app 记账链接线。阈值定标自 20261012~15 真机 41 张点击定格
+    帧 + 48 张激活整帧（experiments/repro_n1_tier_probe.py 可复跑）。"""
+    import numpy as _np
+    import cv2 as _cv2
+    import json as _json
+    from hexa.ui.theme import ledger_line
+
+    print("\n[22] 海克斯阶级全链路（N1 色环探针 + 台账 tier 来源 + 模型上下文）")
+
+    def _hsv_bgr(h, s, v):
+        return _cv2.cvtColor(
+            _np.uint8([[[h, s, v]]]), _cv2.COLOR_HSV2BGR)[0, 0]
+
+    def _synth(h, s, v, band_h, band_s, band_v, band_px=24, size=(704, 424)):
+        """合成单卡定格帧：底色 (h,s,v) + 四边 band_px 厚 (band_h,band_s,
+        band_v) 色带——近似真机卡框（无彩底 + 有彩框沿）的色环结构。"""
+        img = _np.full((size[0], size[1], 3), _hsv_bgr(h, s, v), _np.uint8)
+        if band_px:
+            band = _hsv_bgr(band_h, band_s, band_v)
+            img[:band_px, :] = band
+            img[-band_px:, :] = band
+            img[:, :band_px] = band
+            img[:, -band_px:] = band
+        return img
+
+    # ---- ① 色环探针：三档阶级 + 置信不足留空（不硬猜） ----
+    # 定标真值（真机簇）：白银 框沿无彩亮灰(S≈2,V≈237)；黄金 冰蓝框
+    # (H≈108,S≈170 色带)；棱彩 粉紫虹彩(H≈170,S≈150 色带+暖白底)
+    check("探针：白银（无彩亮框）",
+          card_tier_from_crop(_synth(60, 2, 237, 60, 2, 237, band_px=0))
+          == "白银")
+    check("探针：黄金（冰蓝框沿）",
+          card_tier_from_crop(_synth(108, 31, 250, 108, 170, 225))
+          == "黄金")
+    check("探针：棱彩（粉紫框沿）",
+          card_tier_from_crop(_synth(170, 25, 245, 170, 150, 230))
+          == "棱彩")
+    check("探针：暗画面拒判（误路由地图/商店，留空走先验）",
+          card_tier_from_crop(_synth(21, 207, 35, 21, 207, 35, band_px=0))
+          == "")
+    check("探针：暗无彩拒判（V 守卫，不把黑图判白银）",
+          card_tier_from_crop(_synth(60, 5, 80, 60, 5, 80, band_px=0))
+          == "")
+    check("探针：中饱和亮图拒判（死区不硬猜）",
+          card_tier_from_crop(_synth(108, 45, 250, 108, 45, 250, band_px=0))
+          == "")
+    check("探针：None/过小 crop 安全返回空",
+          card_tier_from_crop(None) == ""
+          and card_tier_from_crop(_np.zeros((10, 10, 3), _np.uint8)) == "")
+
+    # ---- ② 记账链：tier_src 来源标注 + round_id 入账 ----
+    s = GameSession(kb, rules)
+    s.stage = "in_game"
+    hero_prior = next(h for h, aug in sorted(kb.hero_augments.items())
+                      if REAL_AUG in aug)   # 动态取含 REAL_AUG 先验的英雄
+    s.my_hero = hero_prior
+    check("前置：先验英雄含 REAL_AUG", kb.augment_tier(hero_prior,
+                                                       REAL_AUG) != "")
+    s.record_augment(REAL_AUG, tier="棱彩", tier_src="ocr", card_idx=0,
+                     round_id=3)
+    e0 = s.ui_state()["augments"][0]
+    check("台账条目带 tier_src=ocr + round_id 直出",
+          e0["tier"] == "棱彩" and e0["tier_src"] == "ocr"
+          and e0["round_id"] == 3, str(e0))
+    # 先验兜底链（app._record_click 等效）：OCR 查空回 kb.augment_tier
+    prior_tier = kb.augment_tier(hero_prior, REAL_AUG)
+    s.record_augment(sorted(kb.augment_names)[2], tier=prior_tier,
+                     tier_src="prior", round_id=4)
+    e1 = s.ui_state()["augments"][1]
+    check("台账条目带 tier_src=prior（先验≠实抽，复盘可辨）",
+          e1["tier_src"] == "prior" and e1["round_id"] == 4, str(e1))
+    check("成功记账登记轮次（round_recorded 闸门语义不变）",
+          s.round_recorded(3) and s.round_recorded(4))
+    check("kb.augment_tier：查空（无此英雄/无此海克斯）稳返回空串",
+          kb.augment_tier("不存在的英雄", REAL_AUG) == ""
+          and kb.augment_tier("暗裔剑魔", "不存在的海克斯") == "")
+    # 升级型记账军师带实测阶级（N1）：「已选【棱彩】升级：X」事实直出，
+    # 棱彩额外收益值不值得调整路线归模型判断
+    up = next(n for n in sorted(kb.augment_names)
+              if kb.augment_is_upgrade(n))
+    s_up = GameSession(kb, rules)
+    s_up.stage = "in_game"
+    s_up.record_augment(up, tier="棱彩", tier_src="ocr", round_id=7)
+    coach = {c["key"]: c["text"] for c in s_up.coach_notes}
+    check("升级型记账军师带【棱彩】（System1 可见事实提示）",
+          coach.get(f"upgrade:{up}")
+          == f"已选【棱彩】升级型海克斯 {up}：基础效果强化", str(coach))
+
+    # ---- ③ 台账行：轮序号 round_id+1 + 先验标注（theme 单源） ----
+    check("ledger_line：round_no 直读『③ 名字（棱彩）』",
+          ledger_line(0, REAL_AUG, "棱彩", round_no=3)
+          == f"③ {REAL_AUG}（棱彩）",
+          ledger_line(0, REAL_AUG, "棱彩", round_no=3))
+    check("ledger_line：round_no=None 回退下标（旧快照兼容）",
+          ledger_line(1, "x", "", round_no=None) == "② x")
+    check("ledger_line：先验档位标『先验』",
+          ledger_line(0, REAL_AUG, "黄金", round_no=4, tier_src="prior")
+          == f"④ {REAL_AUG}（先验黄金）",
+          ledger_line(0, REAL_AUG, "黄金", round_no=4, tier_src="prior"))
+    check("ledger_line：ocr 来源不加先验标",
+          ledger_line(0, REAL_AUG, "黄金", round_no=4, tier_src="ocr")
+          == f"④ {REAL_AUG}（黄金）")
+    check("ledger_line：超带圈数字表回退 N.（round_no 路径同口径）",
+          ledger_line(0, "x", "", round_no=11) == "11. x")
+
+    # ---- ④ System1 上下文：「已选【棱彩】升级：XXX」数据直出 ----
+    from hexa.ai import system1 as _s1
+    snap = _s1._fmt_snapshot(["多兰之刃"], 300, "ad", "敌方威胁", [REAL_AUG],
+                             [], augment_tiers={REAL_AUG: "棱彩"})
+    check("快照行带【棱彩】前缀（模型自判是否调整路线）",
+          f"我英雄已选海克斯：【棱彩】{REAL_AUG}" in snap, snap.splitlines()[0])
+    snap2 = _s1._fmt_snapshot([], 0, "", "", [REAL_AUG], [],
+                              augment_tiers={})
+    check("快照行：查不到阶级原样列出不编造",
+          f"我英雄已选海克斯：{REAL_AUG}" in snap2,
+          snap2.splitlines()[0])
+    # 评级 prompt 头行（FakeClient，不联网）
+    top = kb.top_augments("暗裔剑魔", 3)
+    from types import SimpleNamespace as _NS
+    fctx = _NS(augment_affinity=[{"name": top[0], "bias": "ad", "note": "t"}],
+               briefing="")
+    fc = FakeClient(['{"grades": []}'])
+    ranks = _s1.rank_augments(fc, fctx, "暗裔剑魔", top[:2], [REAL_AUG], [],
+                              "威胁", [{"name": top[0], "grade": "A",
+                                        "reason": "r"}],
+                              augment_tiers={REAL_AUG: "黄金"})
+    check("评级 prompt 头行带【黄金】已拿海克斯",
+          f"已拿海克斯：【黄金】{REAL_AUG}" in fc.calls[-1]
+          and ranks and ranks[0]["grade"] == "A", fc.calls[-1][:120])
+
+    # ---- ⑤ 引擎透传（next_candidates augments 条目 → prompt） ----
+    from hexa.ai.engine import KIND_NEXT as _KN2
+    hero = "暗裔剑魔"
+    top8 = kb.top_augments(hero, 8)
+    pool = kb.core_item_pool(hero) or ["长剑"]
+    ctx_json = {
+        "augment_affinity": [{"name": n, "bias": "ad", "note": "t"}
+                             for n in top8],
+        "opening_items": [{"combo": pool[:1], "when": "标准"},
+                          {"combo": ["多兰之刃"], "when": "进攻"},
+                          {"combo": ["红水晶"], "when": "防守"}],
+        "builds": [{"name": "爆杀流", "path": "ad", "items": pool[:3],
+                    "note": "主线"}],
+        "skill_order": "主Q副E",
+        "augment_item_links": []}
+    eng, c1, _c2 = build_ai_engine(script_s2=[_json.dumps(ctx_json)])
+    results = []
+    eng.bind(lambda kind, payload, serial: results.append((kind, payload,
+                                                           serial)))
+    eng.start_game(hero, [], ["黑暗之女"])
+    deadline = time.time() + 6
+    while eng.cache.get() is None and time.time() < deadline:
+        time.sleep(0.02)
+    check("测试前置：ctx 就绪", eng.cache.get() is not None)
+    threat = ThreatProfile(ap_count=1)
+    c1.script.append(_json.dumps({"picks": [
+        {"name": pool[0], "reason": "r1"},
+        {"name": pool[1] if len(pool) > 1 else "焚天", "reason": "r2"}]}))
+    eng.next_candidates(["多兰之刃"], 0, "ad", threat, serial=41,
+                        reason="event",
+                        augments=[{"name": REAL_AUG, "tier": "棱彩",
+                                   "tier_src": "ocr", "round_id": 1,
+                                   "ts": 1.0}])
+    deadline = time.time() + 6
+    while not any(k == _KN2 for k, _p, _s in results) and time.time() < deadline:
+        time.sleep(0.02)
+    check("下一件 prompt 带已选【棱彩】事实（数据直出）",
+          f"我英雄已选海克斯：【棱彩】{REAL_AUG}" in c1.calls[-1],
+          c1.calls[-1][:150])
+
+    # ---- ⑥ app 记账链接线（源码断言：真机链路离线不可跑） ----
+    app_src = (Path(__file__).resolve().parent.parent / "app.py").read_text(
+        encoding="utf-8")
+    seg_rec = app_src[app_src.index("def _record_click")
+                      :app_src.index("def _on_reroll")]
+    check("app 记账链：色环探针优先 + 查空回 kb.augment_tier 先验",
+          "card_tier_from_crop(crop)" in seg_rec
+          and "kb.augment_tier(" in seg_rec and 'tier_src' in seg_rec,
+          seg_rec[:80])
+    check("app 记账链：tier/tier_src 进 record_augment 与 clicks 黑匣子",
+          "session.record_augment(name, tier=tier, tier_src=tier_src" in seg_rec
+          and '"tier": tier, "tier_src": tier_src' in seg_rec)
+    check("screen_detect 导出名挂载（app import 探针函数）",
+          "card_tier_from_crop" in app_src.split("def _open_settings")[0])
+
+
 if __name__ == "__main__":
     test_kb()
     test_rules()
@@ -5451,6 +6508,8 @@ if __name__ == "__main__":
     test_input_instrument_kit()
     test_auto_elevation()
     test_session_ai_serial()
+    test_history_buckets_and_fingerprint()
+    test_review_ledger()
     test_swap_mode()
     test_coach_save_gap()
     test_build_progress()
@@ -5465,6 +6524,8 @@ if __name__ == "__main__":
     test_prompt_copy()
     test_review_panel()
     test_desc_consensus_and_ai_ledger()
+    test_fetch_hero_augments_pipeline()
+    test_n1_tier_probe()
     print(f"\n{'='*40}\n通过 {len(PASS)} / 失败 {len(FAIL)}")
     if FAIL:
         print("失败项:", FAIL)

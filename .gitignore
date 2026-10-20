@@ -63,3 +63,6 @@ ChromeDriver*
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# ── 数据抓取当日缓存（fetch_hero_augments 等，可重建） ──
+data/cache/

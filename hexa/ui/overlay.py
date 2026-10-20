@@ -17,6 +17,12 @@ fork 参考项目 main.py OverlayApp 的穿透技术，信息架构按计划 §7
   引擎里用于选候选与复盘，只是不再显示
 - 信息条目、显示顺序、数据源与 `ui_state()` 消费方式一字未改
 
+20261020 工程债批（N8，产品评估 §3.7——纯工程，不碰语义）：
+- topmost keepalive：每 1s SetWindowPos 重申 HWND_TOPMOST（创建时一次
+  性 `-topmost` 会被无边框全屏游戏压下去），轻到不动几何/不抢焦点/不重绘
+- 重绘签名去重：500ms 轮询先算内容签名，与上一帧一致整帧跳过
+  （`overlay_content_signature` 纯函数，涵盖全部可见面）
+
 紧凑化按 2560x1440 基准设计，按屏幕高度等比缩放（限制 0.7~1.3）。
 穿透为完整三标志：WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
 （点击与悬停全部落到游戏，且永不抢焦点），在窗口 realize 之后对
@@ -25,6 +31,7 @@ GA_ROOT 顶层 HWND 设置（winfo_id 只是 Tk 内层窗口，realize 前的
 """
 import ctypes
 import queue
+import time
 import tkinter as tk
 
 from hexa.ui.theme import (CIRCLED, DETECT_TEXT, GRADES, Metrics,
@@ -41,6 +48,16 @@ WS_EX_LAYERED = 0x00080000           # 分层窗口（配合 -alpha）
 WS_EX_NOACTIVATE = 0x08000000        # 永不抢焦点
 GA_ROOT = 2
 CLICK_THROUGH_MASK = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE
+
+# topmost keepalive（N8 工程债 20261020）：SetWindowPos 只重申 z 序，
+# 四标志保证轻——不动几何（NOMOVE|NOSIZE）、不抢焦点（NOACTIVATE）、
+# 不触发重绘（NOREDRAW；本窗是 layered 窗口，遮挡修复由 DWM 合成负责）
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOREDRAW = 0x0008
+SWP_NOACTIVATE = 0x0010
+TOPMOST_KEEPALIVE_MS = 1000
 
 # ── 紧凑尺寸（2560x1440 基准，原 300 宽 / 760 高上限） ─────────
 DESIGN_H = 1440
@@ -85,6 +102,50 @@ def fit_height(want: int, floor: int, screen_h: int, cur: int) -> int:
     return target
 
 
+def overlay_content_signature(state: dict) -> tuple:
+    """信息条内容签名（N8 工程债 20261020）：500ms 轮询先算签名，与上
+    一帧一致就整帧跳过——不 config 控件、不量高度（update_idletasks 是
+    重绘闪烁与空耗的主源）。纯函数，可离线断言。
+
+    与第一批的结论指纹去重分工：那边管「推不推」（game_state 不重派 AI
+    不写史），这里管「画不画」（同一内容不再动 Tk 控件）。
+
+    涵盖 _refresh_once 会写的全部可见面：英雄行（名+等级+阶段）、军师、
+    加点、台账行（名/品质/轮次/来源）、威胁、建议（正文+替换琥珀轨）、
+    替换预告、AI 在途标识、海克斯时刻块（标题/点色/正文/三行档位/点选
+    标记/显隐）。方向取「宁多勿漏」：多含一个输入最多偶尔多画一帧，
+    漏含一个字段 = 该字段变化永不刷新（隐性冻结）——新增可见字段时
+    必须同步加进这里。
+    """
+    engine = state.get("engine") or {}
+    picked = state.get("hex_picked")
+    return (
+        # 英雄行 + 阶段（fg 色由两者派生）
+        state.get("stage"), state.get("my_hero"), state.get("my_level") or 0,
+        strip_emoji(state.get("coach_latest") or ""),
+        state.get("skill_order") or "",
+        # 台账行：名/品质/轮次/来源（行序 = 列表序）
+        tuple((a.get("name"), a.get("tier") or "", a.get("round_id"),
+               a.get("tier_src") or "")
+              for a in state.get("augments") or []),
+        strip_emoji(state.get("threat") or ""),
+        # 建议正文 + 左轨琥珀色（suggestion_kind == "swap_items"）
+        state.get("suggestion_kind") or "",
+        strip_emoji(state.get("suggestion") or ""),
+        strip_emoji(state.get("swap_forecast") or ""),
+        # AI 在途标识（同 _render_ai_busy 的判定：在途或生成中）
+        int(engine.get("inflight") or 0) > 0
+        or engine.get("ctx_source") == "生成中",
+        # 海克斯时刻块：显隐/标题/点色/正文 + 三行档位 + 点选标记
+        state.get("card_ranks_pending"), state.get("hex_active"),
+        state.get("hex_recognized"),
+        strip_emoji(state.get("hex_last") or ""),
+        picked[1] if picked and len(picked) > 1 else "",
+        tuple((r.get("grade"), r.get("name"), r.get("reason"))
+              for r in state.get("card_ranks") or []),
+    )
+
+
 class Overlay:
     def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue, visible: bool = True):
         self.session = session
@@ -95,6 +156,7 @@ class Overlay:
         self._forecast_shown = False
         self._last_err = None         # 刷新异常签名（60s 限频去重）
         self._last_err_ts = 0.0
+        self._last_sig = None         # 内容签名（重绘去重，见 _refresh_once）
         self.win = tk.Toplevel(root)
         self.win.withdraw()
         self._setup_window()
@@ -105,6 +167,7 @@ class Overlay:
             self.win.update_idletasks()   # 强制 realize，顶层 HWND 稳定后再设穿透
         self._apply_click_through()
         self.win.after(800, self._apply_click_through)   # 兜底重申（防映射期句柄重建）
+        self.win.after(TOPMOST_KEEPALIVE_MS, self._keep_topmost)
         self.win.after(500, self._refresh)
 
     # ── 窗口技术（fork：无边框+置顶+完整穿透） ─────────────────────
@@ -166,6 +229,27 @@ class Overlay:
         except Exception as e:
             print(f"[WARN] overlay 穿透设置失败: {e}")
             return False
+
+    def _keep_topmost(self):
+        """每 1s 重申置顶（N8 工程债 20261020，竞品报告 §3.7）：无边框
+        全屏游戏可能把本窗压到 topmost 链之下（创建时的一次性 `-topmost`
+        会失效），周期性 SetWindowPos 重申 HWND_TOPMOST 防被盖住。
+
+        刻意轻（keepalive 不许变成第二套刷新链）：只动 z 序——NOMOVE|
+        NOSIZE 不碰几何、NOACTIVATE 不抢焦点、NOREDRAW 不触发重绘；
+        _top_hwnd 走 winfo_id 缓存句柄解析（非几何查询）。与 500ms 内容
+        轮询完全独立，不读 session、不碰任何控件。after 在 finally 续约，
+        异常不掐链（同 _refresh 的教训）。"""
+        try:
+            hwnd = self._top_hwnd()
+            if hwnd:
+                ctypes.windll.user32.SetWindowPos(
+                    hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW)
+        except Exception:
+            pass
+        finally:
+            self.win.after(TOPMOST_KEEPALIVE_MS, self._keep_topmost)
 
     # ── 构建（控件一次性建好，500ms 轮询只 config 不重建） ──────────
 
@@ -316,8 +400,16 @@ class Overlay:
             self.win.after(500, self._refresh)
 
     def _refresh_once(self):
-        P = Palette
+        # 重绘签名去重（N8 20261020）：轮询的大多数帧内容没变，逐 label
+        # config 同值也会标脏触发整窗重绘（「同一句话一直在闪」的视觉主
+        # 源）；签名一致直接返回——不 config、不 update_idletasks 量高。
+        # 分工：结论指纹（game_state）管「推不推」，这里管「画不画」。
         state = self.session.ui_state()
+        sig = overlay_content_signature(state)
+        if sig == self._last_sig:
+            return
+        self._last_sig = sig
+        P = Palette
         stage = state["stage"]
         hero = state["my_hero"]
         # 等级直出（快照免费事实）：英雄名后缀 Lv.N，无数据（0）省略
@@ -333,10 +425,15 @@ class Overlay:
                                   fg=stage_color(stage))
         self._render_coach(state.get("coach_latest") or "")
         self.lbl_skill.config(text=f"加点: {state.get('skill_order') or '-'}")
-        # 台账带品质：『① 贪欲束缚（棱彩）』，tier 缺省省略括号
+        # 台账带品质：『① 贪欲束缚（棱彩）』，tier 缺省省略括号；
+        # 轮序号用 round_id+1（检测器界面轮次 0 起，N1 20261019），
+        # 先验推定档位 ledger_line 内标「先验」防误读成实抽
         self.lbl_augments.config(
             text="\n".join(
-                ledger_line(i, a.get("name", "?"), a.get("tier") or "")
+                ledger_line(i, a.get("name", "?"), a.get("tier") or "",
+                            round_no=(None if a.get("round_id") is None
+                                      else a.get("round_id") + 1),
+                            tier_src=a.get("tier_src") or "")
                 for i, a in enumerate(state["augments"])) or "-")
         self.lbl_threat.config(text=strip_emoji(state["threat"]) or "-")
         # 满六神装替换建议：左轨转琥珀（正文恒为主文本，多行琥珀字可读性差）

@@ -53,6 +53,89 @@ def desc_healthy(text) -> bool:
     cjk = sum(1 for ch in text if "\u4e00" <= ch <= "\u9fff")
     return cjk / len(text) >= 0.6
 
+# ── 海克斯阶级色环探针（N1 20261019，竞品报告 §5-P0-2 思路） ─────────
+# 卡框颜色编码阶级，是硬事实、归代码（理念 1）。阈值定标自 20261012~15
+# 真机 41 张点击定格帧（log/captures/，以 game JSON 台账 × hero_augments.csv
+# 先验交叉标注）+ 48 张激活整帧：卡框外沿 7% 色环内「饱和且明亮」像素的
+# 占比与色相分布三簇分离干净——
+#   白银：色环几乎无彩（frac≈0，中位 S≤2 / V≈240，暗灰卡框）
+#   黄金：冰蓝亮框（frac≈0.15，色相 80~115 占比 ≥0.95——注意本模式黄金
+#         框不是金黄色，是冰蓝玻璃框+金色角饰，勿凭直觉改成黄色区间）
+#   棱彩：粉紫虹彩（frac 0.03~0.21，色相 130~180 + 红端 0~20 合计占比
+#         0.3~0.8，同一张卡上多色相并存是虹彩的指纹）
+# 置信不足（死区/无主导色相/画面过暗）返回 ""，调用方回 KB 先验兜底，
+# 不硬猜——错徽章比没徽章更伤台账可信度。
+_TIER_RING_MARGIN = 0.07    # 色环厚度：卡框外沿 7%（424x704 crop ≈ 30~49px）
+_TIER_BAND_H = 0.045        # 卡顶条带（白银确认用）：0~4.5%H、10~90%W——
+_TIER_BAND_W = (0.10, 0.90)   # 定标同色环（真机 41 帧的中位 S/V 测量带）
+_TIER_SAT_MIN = 60          # 「有彩」像素饱和度下限（白银框 S 中位 ≈1~2）
+_TIER_VAL_MIN = 100         # 「有彩」像素明度下限（排除卡面暗底纹理）
+_TIER_FRAC_SILVER = 0.02    # 低于此占比 → 无彩框（白银候选，需亮顶条确认）
+_TIER_FRAC_COLOR = 0.05     # 彩框确认线（黄金簇实测 0.148 起）
+_TIER_BLUE_SHARE = 0.60     # 蓝相占比主导线（黄金簇 0.82~1.0）
+_TIER_WARMPINK_SHARE = 0.30 # 粉+红暖占比主导线（棱彩簇 0.32~0.84）
+
+
+def card_tier_from_crop(crop) -> str:
+    """单卡定格帧 → 阶级（"棱彩"/"黄金"/"白银"），置信不足返回 ""。
+
+    采样卡框外沿色环（非卡顶条独占——棱彩虹彩在顶条常被白色高光冲淡，
+    真机实测 亮出你的剑案：顶条中位 S≈15 完全埋没，色环四边合计才留住
+    粉相像素）。纯 cv2/numpy 毫秒级，点击记账线程直调不占 OCR 锁；
+    crop 缺失/形状异常按 "" 处理（上游回先验）。悬停蓝光（鼠标压卡
+    ~1.5s 蓝辉 S≈100+）与黄金冰蓝同相，属已知盲区——点击即抓帧的
+    正常路径光斑未及累积，真机 41 帧零误判，长压场景留给真机再验。"""
+    if crop is None or not hasattr(crop, "shape") or crop.ndim != 3:
+        return ""
+    h, w = crop.shape[:2]
+    if h < 40 or w < 40:
+        return ""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:    # cv2 缺失同 _grab 口径：识别链降级不崩
+        return ""
+    mh = max(1, int(h * _TIER_RING_MARGIN))
+    mw = max(1, int(w * _TIER_RING_MARGIN))
+    ring = np.zeros((h, w), bool)
+    ring[:mh, :] = True
+    ring[-mh:, :] = True
+    ring[:, :mw] = True
+    ring[:, -mw:] = True
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    sat = hsv[:, :, 1].astype(np.float32)
+    val = hsv[:, :, 2].astype(np.float32)
+    hue = hsv[:, :, 0].astype(np.float32)
+    mask = ring & (sat >= _TIER_SAT_MIN) & (val >= _TIER_VAL_MIN)
+    frac = float(mask.sum()) / mask.size
+    if frac < _TIER_FRAC_SILVER:
+        # 无彩框 → 白银候选，用卡顶条带中位确认：真银卡框亮灰
+        # （S 中位 1~2 / V 237+，真机 13 帧全部命中）；暗色/浓彩顶条是
+        # 误路由画面（商店面板/地图地面，OCR 撞名兜进来的极端 case）
+        # 不判白银，留 "" 走先验
+        bh, bw0, bw1 = (int(h * _TIER_BAND_H), int(w * _TIER_BAND_W[0]),
+                        int(w * _TIER_BAND_W[1]))
+        band = hsv[0:bh, bw0:bw1]
+        if band.size:
+            bs = band[:, :, 1].astype(np.float32)
+            bv = band[:, :, 2].astype(np.float32)
+            if (float(np.median(bs)) <= 8 and float(np.median(bv)) >= 200):
+                return "白银"
+        return ""
+    hues = hue[mask]
+    # 18 bin 直方图（OpenCV H∈[0,180)）：暖红 0~20 / 蓝 80~115 / 粉紫 130~180
+    hist, _ = np.histogram(hues, bins=18, range=(0, 180))
+    hist = hist / max(1.0, hist.sum())
+    warm = float(hist[0:2].sum())
+    blue = float(hist[8:11].sum())
+    pink = float(hist[13:18].sum())
+    if frac >= _TIER_FRAC_COLOR and blue >= _TIER_BLUE_SHARE and blue > pink:
+        return "黄金"
+    if (pink + warm) >= _TIER_WARMPINK_SHARE and pink > blue:
+        return "棱彩"    # 死区低占比但粉相主导也判（亮出你的剑案 frac=0.031）
+    return ""
+
+
 # ── 默认布局（16:9 比例；2026-09-25 由 2560x1440 真机海克斯界面整帧
 # OCR + 金框扫描线实测，10 个录像关键帧几何一致，见 media/analysis/） ──
 # title_bands: 三个卡名文本带 (x, y, w, h)；cards: 三张卡片全框（OCR 区 +

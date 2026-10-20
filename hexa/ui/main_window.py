@@ -19,13 +19,18 @@ ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度�
 - 卡片/段落顺序、轮询频率、`ui_state()` 消费方式一字未改
 - 20261013 增『上局回顾』卡：只读渲染 log/games/ 最近一份复盘 JSON
   （落盘早已存在但玩家看不到；数据准备纯函数在 review.py，见冒烟 [16]）
+- 20261019 N4 复盘结果维度案：复盘卡升级『上局账本』一屏——format_review
+  摘要 + format_ledger 采纳对账（出门装听劝/海克斯轮次/出装采纳/胜负
+  KDA+分均，纯事实对账）同卡渲染；落盘侧新增 result/kda/summoner_name/
+  item_events/total_gold 由 game_state/live_api/lcu 采集
 """
 import queue
 import time
 import tkinter as tk
 from tkinter import ttk
 
-from hexa.ui.review import format_review, latest_review_path, load_review
+from hexa.ui.review import (format_ledger, format_review,
+                            latest_review_path, load_review)
 from hexa.ui.theme import (GRADES, Metrics, PENDING_WAIT, Palette, Theme, Type,
                            card_frame, grade_badge, ledger_line, retint_badge,
                            stage_color, strip_emoji, version_label)
@@ -171,14 +176,17 @@ class MainWindow:
         self.ledger_box = tk.Frame(ledger, bg=P["surface"])
         self.ledger_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
 
-        # 上局回顾（20261013 回顾面板案）：复盘 JSON 局终落盘早已存在
-        # （game_state._write_review_log → log/games/），此前玩家看不到。
-        # 只读渲染最近一份；缺文件/缺字段一律占位不炸（渲染链断链会让
-        # 全部卡片冻结，见 _poll_ui 注释）。内容静态：目录扫描 15s 限频、
-        # (路径, mtime) 变化才重建（台账同款缓存惯例）。
-        self.card_review = self._card(main, "上局回顾", note="log/games 最近一份")
+        # 上局账本（20261013 回顾面板案；N4 20261019 升级本局账本一屏）：
+        # 复盘 JSON 局终落盘早已存在（game_state._write_review_log →
+        # log/games/），此前玩家看不到。只读渲染最近一份：format_review
+        # 摘要 + format_ledger 采纳对账（出门装听劝/海克斯轮次/出装采纳/
+        # 胜负 KDA，纯事实对账）。缺文件/缺字段一律占位不炸（渲染链断链
+        # 会让全部卡片冻结，见 _poll_ui 注释）。内容静态：目录扫描 15s
+        # 限频、(路径, mtime) 变化才重建（台账同款缓存惯例）。
+        self.card_review = self._card(main, "上局账本",
+                                      note="log/games 最近一份 · 采纳对账")
         self.card_review.config(
-            text="-（完成一局后自动显示：英雄/时长/海克斯台账/建议/终局出装）",
+            text="-（完成一局后自动显示：结果/听劝/采纳/海克斯台账/终局出装）",
             fg=P["text_mute"])
 
         self._build_ranks_card(main)
@@ -351,10 +359,14 @@ class MainWindow:
     def _render_ledger(self, augments):
         """台账纠错：点名字撤销（列表变化才重建，防每 500ms 重建闪烁）。
 
-        条目为 ui_state 直出的 {"name","tier"}；行文与 overlay 同口径走
-        theme.ledger_line——『① 贪欲束缚（棱彩）』，tier 缺省省略括号。"""
+        条目为 ui_state 直出的 {"name","tier","tier_src","round_id"}；行文
+        与 overlay 同口径走 theme.ledger_line——『① 贪欲束缚（棱彩）』，
+        tier 缺省省略括号；轮序号用 round_id+1、先验档位标「先验」
+        （N1 20261019），旧快照缺字段回退下标。"""
         P = Palette
-        key = tuple((a.get("name", ""), a.get("tier", "")) for a in augments)
+        key = tuple((a.get("name", ""), a.get("tier", ""),
+                     a.get("tier_src", ""), a.get("round_id"))
+                    for a in augments)
         if key == self._ledger_cache:
             return
         self._ledger_cache = key
@@ -367,9 +379,13 @@ class MainWindow:
             return
         for i, a in enumerate(augments):
             name = a.get("name", "?")
+            rid = a.get("round_id")
             row = tk.Frame(self.ledger_box, bg=P["surface"])
             row.pack(anchor=tk.W, fill=tk.X, pady=2)
-            tk.Label(row, text=ledger_line(i, name, a.get("tier") or ""),
+            tk.Label(row, text=ledger_line(
+                         i, name, a.get("tier") or "",
+                         round_no=None if rid is None else rid + 1,
+                         tier_src=a.get("tier_src") or ""),
                      font=Theme.FONT, bg=P["surface"],
                      fg=P["text"]).pack(side=tk.LEFT)
             ttk.Button(row, text="撤销", width=5,
@@ -483,7 +499,8 @@ class MainWindow:
         self.lbl_engine.config(text=txt, fg=color)
 
     def _render_review(self):
-        """上局回顾：最近一份复盘 JSON 只读渲染（format_review 纯映射）。
+        """上局账本：最近一份复盘 JSON 只读渲染（format_review 摘要 +
+        format_ledger 采纳对账，N4 本局账本一屏）。
 
         目录扫描 15s 限频（500ms 轮询里 glob 太重）；(路径, mtime) 未
         变化不重建（台账同款缓存惯例）。读失败/缺字段一律占位行不冒泡
@@ -505,7 +522,7 @@ class MainWindow:
         if path is None:
             # 复盘文件消失（清理/换目录）：回占位，不留上一份的残影
             self.card_review.config(
-                text="-（完成一局后自动显示：英雄/时长/海克斯台账/建议/终局出装）",
+                text="-（完成一局后自动显示：结果/听劝/采纳/海克斯台账/终局出装）",
                 fg=Palette["text_mute"])
             return
         doc = load_review(path)
@@ -515,7 +532,8 @@ class MainWindow:
                 fg=Palette["warning"])
             return
         self.card_review.config(
-            text=strip_emoji("\n".join(format_review(doc))),
+            text=strip_emoji("\n".join([*format_review(doc),
+                                        *format_ledger(doc)])),
             fg=Palette["text"])
 
     def _render_freshness(self, state):

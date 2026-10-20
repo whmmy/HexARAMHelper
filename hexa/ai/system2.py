@@ -1,6 +1,7 @@
 """System 2：加载期 ChampionContext 生成（计划 §2，每局 1 次）
 
-输入：英雄 + 双方阵容（含敌方伤害构成）+ OP.GG builds + 海克斯先验 top20
+输入：英雄 + 双方阵容（含敌方伤害构成）+ 敌方实战事实（有快照回流时：
+    等级/KDA/实际装备原样直出）+ OP.GG builds + 海克斯先验 top20
   （逐条带 KB 语义标签：path_bias/tags/升级型——新模式海克斯基座模型多无
   先验，喂事实把"评亲和"从考幻觉变成按事实+阵容做语境排序）
 输出：ChampionContext（海克斯亲和/出门装方案/多流派出装方案/海克斯→出装联动）
@@ -105,6 +106,46 @@ def _fmt_enemy_comp(kb, enemy: list) -> str:
         role = "/".join(tags) if tags else "?"
         bits.append(f"{name}({dmg or '?'},{role})")
     return "敌方构成：" + "；".join(bits) if bits else ""
+
+
+def _fmt_enemy_facts(enemy_facts: dict, enemy: list) -> str:
+    """敌方实战事实段（N5 敌方画像模型化 20261019，Live 快照直出）。
+
+    每敌一行「名 [Lvn] [KDA k/d/a] [装备:a、b]」原文拼接，仅在派发时刻
+    有快照回流时非空（中途启动/改锚重派——system2 一局一发，重派正是
+    唯一能把局内实证带进 ctx 的时机）；选人期预生成与常规开局派发彼时
+    敌方尚无出装/KDA 可言，空串不占位（名单与画像已由 _fmt_teams/
+    _fmt_enemy_comp 覆盖，不重复）。原文直出不预消化：莫雷洛=重伤、
+    沙漏=海克斯之类结论一律模型自己下（无"装备=含义"名单）。
+    防御式取值：快照字段脏值/缺键归零省略，绝不炸生成线程。
+    """
+    if not isinstance(enemy_facts, dict):
+        return ""
+    rows = []
+    for name in (enemy or [])[:5]:
+        fact = enemy_facts.get(name)
+        if not isinstance(fact, dict):
+            continue
+        try:
+            lv = int(fact.get("level") or 0)
+            k, d, a = (int(x) for x in (fact.get("kda") or (0, 0, 0)))
+        except (TypeError, ValueError):
+            lv, k, d, a = 0, 0, 0, 0
+        items = [str(n) for n in (fact.get("items") or []) if n]
+        if not (lv or k or d or a or items):
+            continue
+        bits = [name]
+        if lv:
+            bits.append(f"Lv{lv}")
+        if k or d or a:
+            bits.append(f"KDA {k}/{d}/{a}")
+        if items:
+            bits.append("装备:" + "、".join(items))
+        rows.append(" ".join(bits))
+    if not rows:
+        return ""
+    return ("敌方快照（Live 直出；出装组合/等级/KDA 暗示什么威胁、可能拿了"
+            "什么海克斯，由你判断）：" + "；".join(rows))
 
 
 class ChampionContext:
@@ -357,10 +398,13 @@ def _rule_briefing(kb, rules, hero: str, ally: list, enemy: list) -> str:
 # ── 生成入口 ─────────────────────────────────────────────────────────
 
 def generate(kb, rules, client, hero: str, ally: list, enemy: list,
-             data_version: str = "") -> ChampionContext:
+             data_version: str = "", enemy_facts: dict = None) -> ChampionContext:
     """System2 一次调用生成 ChampionContext；失败重试 1 次；再失败降级规则版。
 
     重试时附上次校验失败原因（原样重发等于再掷一次同样的骰子）。
+    enemy_facts: 敌方实战事实 {英雄名: {"level","kda","items"}}（N5
+    20261019，本帧 Live 快照直出，仅改锚/中途启动重派时非空）——原样
+    并入 prompt，不新增调用。
     返回的 ChampionContext.source 标明 'ai' 或 'rule'（UI 据此显示模式）。
     """
     last_err = None
@@ -374,6 +418,9 @@ def generate(kb, rules, client, hero: str, ally: list, enemy: list,
             head = f"英雄：{hero}\n{_fmt_teams(ally, enemy)}"
             if comp:
                 head += f"\n{comp}"
+            facts = _fmt_enemy_facts(enemy_facts, enemy)
+            if facts:
+                head += f"\n{facts}"
             user = "\n\n".join([
                 head,
                 f"《OP.GG 数据》\n{_fmt_builds(kb, hero)}",

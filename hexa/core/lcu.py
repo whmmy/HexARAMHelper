@@ -53,18 +53,26 @@ class LCUConnector:
         self._summoner_name = ""
         self.id_to_cn = {}
         self._sess = requests.Session()  # 复用连接，省去每请求 TLS 握手
+        # 互斥（N8 工程债 20261020，竞品报告 §3.7 hex-helper lcu-service.js
+        # 同思路）：PhaseMachine 线程（phase/teams/eog）与 LivePoller 线程
+        # （summoner_name 兜底重试 → _cache_summoner_id）并发打同一个
+        # Session——HTTP 请求与重连探测全部串行化。用 RLock：connect()
+        # 持锁期间要走 _request 建英雄映射/缓存召唤师（同线程重入不自锁）；
+        # get_eog_stats 的重试 sleep 在锁外，不会长时间占锁饿死别的线程
+        self._io_lock = threading.RLock()
 
     # ── 连接 ──────────────────────────────────────────────────────
 
     def connect(self) -> bool:
-        if self._connect_via_process() or self._connect_via_lockfile():
-            self._connected = True
-            self._build_champion_id_map()
-            self._cache_summoner_id()
-            print(f"[OK] LCU connected (port: {self.port})")
-            return True
-        self._connected = False
-        return False
+        with self._io_lock:   # 互斥：进程扫描/lockfile 探测不许双线程并发
+            if self._connect_via_process() or self._connect_via_lockfile():
+                self._connected = True
+                self._build_champion_id_map()
+                self._cache_summoner_id()
+                print(f"[OK] LCU connected (port: {self.port})")
+                return True
+            self._connected = False
+            return False
 
     def _connect_via_process(self):
         """两段式扫描（性能关键）：先只取 pid+name（psutil 缓存，便宜），
@@ -116,10 +124,11 @@ class LCUConnector:
         if not self.base_url or not self.auth_token:
             return None
         try:
-            return self._sess.request(
-                method, f"{self.base_url}{endpoint}",
-                auth=('riot', self.auth_token),
-                verify=False, timeout=self.LCU_TIMEOUT, **kwargs)
+            with self._io_lock:   # 互斥：跨线程共享 Session 串行化
+                return self._sess.request(
+                    method, f"{self.base_url}{endpoint}",
+                    auth=('riot', self.auth_token),
+                    verify=False, timeout=self.LCU_TIMEOUT, **kwargs)
         except requests.exceptions.ConnectionError:
             self._connected = False
             return None
@@ -162,6 +171,84 @@ class LCUConnector:
         if not self._summoner_name and self._connected:
             self._cache_summoner_id()
         return self._summoner_name
+
+    # ── 终局统计（N4 复盘结果维度 20261019：胜负 + 我的 KDA） ─────
+
+    @staticmethod
+    def _eog_stat(stats: dict, *names):
+        """eog stats 值防御式读取：直接键（如 "WIN"）与 statistics 数组
+        （[{"name":..., "value":...}]，旧版风格）两种 schema 都认。"""
+        if not isinstance(stats, dict):
+            return None
+        for n in names:
+            if n in stats:
+                return stats[n]
+        arr = stats.get("statistics")
+        if isinstance(arr, list):
+            for row in arr:
+                if isinstance(row, dict) and row.get("name") in names:
+                    return row.get("value")
+        return None
+
+    def _parse_eog_player(self, p: dict):
+        """eog-stats-block 我方条目 → {"result","kills","deaths","assists"}。
+
+        schema 按公开文档编写并全程容错（同 live_api P0 声明：以真机
+        fixtures dump 实测为准）：WIN=true/false 或 statistics WIN=1 判
+        胜负，拿不到的键如实缺省（None 不编造 0）。"""
+        stats = p.get("stats")
+        win = self._eog_stat(stats, "WIN", "win")
+        if win is None:
+            result = ""
+        elif win is True or win == 1 or str(win).lower() in ("true", "1"):
+            result = "win"
+        else:
+            result = "loss"
+        def _int(v):
+            try:
+                return int(v)
+            except (TypeError, ValueError):
+                return None
+        return {
+            "result": result,
+            "kills": _int(self._eog_stat(stats, "KILLS", "CHAMPIONS_KILLED",
+                                         "kills")),
+            "deaths": _int(self._eog_stat(stats, "DEATHS", "NUM_DEATHS",
+                                          "deaths")),
+            "assists": _int(self._eog_stat(stats, "ASSISTS", "assists")),
+        }
+
+    def get_eog_stats(self, attempts: int = 3, interval: float = 1.5):
+        """终局统计块 → 我方条目 dict；拿不到返回 None（复盘如实缺省）。
+
+        端点 /lol-end-of-game/v1/eog-stats-block 仅收尾相位可用
+        （PreEndOfGame 早段可能尚未就绪 404）→ 短间隔重试；LCU 未连接/
+        请求失败/statistics 缺失一律 None，绝不抛（终局链不能因结果
+        采集炸掉：on_end_of_game 的落盘/清场在它之后）。在 PhaseMachine
+        线程同步调用（GameSession.on_end_of_game 锁外），attempts×
+        LCU_TIMEOUT 最坏阻塞十几秒——局已终，无实时性要求。"""
+        if not self.base_url or not self.auth_token:
+            return None
+        for i in range(max(1, attempts)):
+            data = self._get_json('/lol-end-of-game/v1/eog-stats-block')
+            players = (data or {}).get("allPlayers")
+            if isinstance(players, list):
+                for p in players:
+                    if not isinstance(p, dict):
+                        continue
+                    sid = p.get("summonerId")
+                    if (self._summoner_id is not None
+                            and sid == self._summoner_id) or (
+                            self._summoner_name
+                            and str(p.get("summonerName") or "")
+                            == self._summoner_name):
+                        out = self._parse_eog_player(p)
+                        # 只有身份命中才算拿到（result/kda 全缺也如实
+                        # 返回——JSON 侧按缺省处理）
+                        return out
+            if i < attempts - 1:
+                time.sleep(interval)
+        return None
 
     # ── 阶段与英雄（fork 参考项目，接口保持一致） ──────────────────
 
@@ -360,7 +447,9 @@ class PhaseMachine(threading.Thread):
 
     POLL_INTERVAL = 2.0
     DISCONNECT_NEEDED = 3  # 连续 N 次获取不到 phase 视为断连
-    # 客户端不在时重连退避（秒）——避免每 2s 全量进程扫描的高频尖峰
+    # 失败退避梯子（秒）：「进程不在」的重连探测与「连着但取不到 phase」
+    # 的挂起态轮询共用（见 _loop_interval，N8 20261020）——避免每 2s 全量
+    # 进程扫描 / 3s 超时请求的高频尖峰
     CONNECT_BACKOFF = [2, 4, 8, 15, 30, 60]
 
     def __init__(self, lcu: LCUConnector, callbacks: dict = None):
@@ -381,10 +470,20 @@ class PhaseMachine(threading.Thread):
             phase = self._poll_phase()
             self._handle(phase)
             self._check_stall()
-            if self.lcu.is_connected():
-                time.sleep(self.POLL_INTERVAL)
-            else:
-                time.sleep(self.CONNECT_BACKOFF[self._backoff_idx])
+            time.sleep(self._loop_interval())
+
+    def _loop_interval(self) -> float:
+        """本轮休眠：健康连接 = 常规轮询间隔；连不上（进程不在）或连着
+        但连续取不到 phase（客户端挂起/重启窗口期）= 指数退避梯子。
+
+        N8 工程债 20261020：此前只有「进程不在」路径退避，「连着但取不
+        到 phase」仍每 2s+3s 超时硬敲半死客户端——现两条失败路径共用
+        同一条梯子（竞品报告 §3.7 hex-helper lcu-service.js 指数退避同
+        思路）。代价注记：梯子深处 _check_stall 间隔同步变长——「UX 已
+        关」场景现状本就退避，挂起场景（罕见）等价放宽，可接受。"""
+        if self._backoff_idx:
+            return self.CONNECT_BACKOFF[self._backoff_idx]
+        return self.POLL_INTERVAL
 
     def _check_stall(self):
         """数据流停摆兜底：phase 查询成败都查（终局收尾不依赖 LCU，
@@ -405,6 +504,9 @@ class PhaseMachine(threading.Thread):
         phase = self.lcu.get_gameflow_phase()
         if phase is None:
             self._fail()
+            # 连着但取不到 phase 也爬梯（防挂起态高频硬敲，见 _loop_interval）
+            self._backoff_idx = min(self._backoff_idx + 1,
+                                    len(self.CONNECT_BACKOFF) - 1)
         else:
             self._fail_count = 0
             self._backoff_idx = 0

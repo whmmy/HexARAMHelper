@@ -6,10 +6,13 @@
 承载：双方阵容 / 我的装备与死亡态 / 海克斯台账 / current_path / 时间线 /
      出门装两分支状态机（v4.1 §2）/ 触发器评估（死亡·敌方关键装·KDA）/
      DecisionEngine 编排（同步规则底线 + AI 异步精修，serial 防旧覆新）/
-     建议历史与复盘日志（P3）/ 己方阵容缺口 gap + 军师提示滚动列表
+     建议历史与复盘日志（P3；N2 按 kind 分桶：决策类全量、刷新类只存
+     结论变化；N3 结论指纹去重：同结论不落位不写史不重派 AI）/
+     己方阵容缺口 gap + 军师提示滚动列表
      （v4.5：阵容缺口/敌方缺口反向/顺逆风/攒钱与替换提醒，去重节流）。
 """
 import json
+import re
 import threading
 import time
 from dataclasses import dataclass, field
@@ -27,6 +30,43 @@ WIND_EDGE = 6.0                # 顺/逆风判定分界（动量差 + 权重×�
 WIND_ITEM_WEIGHT = 4.0         # 装备成型度差权重：一件传说件差 ≈ 4 分动量差
 KDA_ALERT_LIMIT = 2            # 敌方 KDA 起飞提示每局限触发次数（P3 杂项：暴露 ui_state 供仪表区展示）
 
+# ── 建议历史分桶（N2 复盘分层案 20261019）与结论指纹（N3）口径 ──
+# 决策类全量保留（低频高价值，复盘主体）；刷新类只存结论变化快照。
+# 10 局真机实证：单一流水线 + [-60:] 硬截下 history 的 kind 全集只剩
+# {next_items, swap_items, event_note}——出门装三选与海克斯三选档位
+# 一条不剩（产品评估 §3.2）。
+DECISION_KINDS = ("opening", "card_ranks", "swap_items", "event_note")
+# 落盘封顶：决策桶全量语义下仍防异常刷屏失控；刷新桶沿旧 [-60:] 量级
+HISTORY_DECISION_CAP = 200
+HISTORY_REFRESH_CAP = 60
+
+
+def _norm_concl(text) -> str:
+    """结论文本归一化：数字串 → N。
+
+    金币/差价数字随收入漂移（250G 档推进、「还差N金」），不是结论的
+    一部分——「还差600」与「还差550」是同一结论；「可购买」「现金足够」
+    等可买性档位词不含数字、原样保留（跨档即新结论，允许刷新）。
+    """
+    return re.sub(r"\d+", "N", str(text or "")).strip()
+
+
+def _render_card_ranks(ranks: list) -> str:
+    """海克斯三选档位 → 复盘历史文本（与 overlay 档位行同构：
+    ①②③ 名（档）—— 理由）。"""
+    rows = []
+    for i, r in enumerate((ranks or [])[:3]):
+        rows.append(f"{'①②③'[i]} {r.get('name', '?')}"
+                    f"（{r.get('grade', '?')}）—— {r.get('reason', '')}")
+    return "\n".join(rows)
+
+
+def card_ranks_fingerprint(ranks: list) -> tuple:
+    """评级结论指纹：按序 [(名, 档, 归一化理由)]——AI 精修前后比对用，
+    同结论的精修回包不重写不重记（N3）。"""
+    return tuple((r.get("name"), r.get("grade"), _norm_concl(r.get("reason")))
+                 for r in (ranks or []))
+
 
 @dataclass
 class Suggestion:
@@ -37,6 +77,51 @@ class Suggestion:
     source: str = "rule"         # rule / ai（AI 精修覆盖后标记）
     serial: int = 0              # 建议序号（AI 精修防旧覆新）
     ts: float = field(default_factory=time.time)
+    # 事实位（N3）：生成本建议时的模型输入侧事实键（海克斯台账/路线/威胁
+    # 摘要）——结论未变但事实变了（如升级型海克斯入账）时仍须重派 AI
+    facts: tuple = ()
+
+    # ── N3 结论指纹（20261019 建议重复案）─────────────────────────
+    # 真机实证（产品评估 §3.3）：中位 44.5 次/局的 AI 调用里 60 条建议
+    # 54~60 条是同一段出装主线反复刷新，只金币数变。指纹 = 候选名集合
+    # + 归一化理由 + 金币档，纯金币数字漂移不构成新结论。
+
+    def _cand_fp(self, c) -> tuple:
+        """单候选结论指纹（按序参与整体指纹）。（名, 归一化理由, 金币档）；
+        替换对另带卖件名与净差档位。"""
+        if isinstance(c, SwapCandidate):
+            if c.net_cost is None:
+                aff = ""
+            else:
+                aff = "现金足够" if c.net_cost <= 0 else f"还差{c.net_cost}金"
+            return (c.sell, c.buy, _norm_concl(c.reason), _norm_concl(aff))
+        return (c.name, _norm_concl(c.reason),
+                _norm_concl(getattr(c, "afford_note", "") or ""))
+
+    def fingerprint(self) -> tuple:
+        """结论指纹：kind + 归一化附注 + 候选(名,归一化理由,金币档)按序。
+
+        候选集合/顺序/理由/可买性跨档任一变化 = 新结论；纯金币数字漂移
+        被归一化吸收（§N3：同一事实不重复呈现/不重复问）。"""
+        return (self.kind, _norm_concl(self.note),
+                tuple(self._cand_fp(c) for c in self.candidates[:3]))
+
+    def _cand_key(self, c) -> tuple:
+        """单候选事实位键：名字 + 金币档（理由措辞不参与）。"""
+        if isinstance(c, SwapCandidate):
+            aff = "" if c.net_cost is None else (
+                "现金足够" if c.net_cost <= 0 else "还差")
+            return (c.buy, c.sell, aff)
+        aff = _norm_concl(getattr(c, "afford_note", "") or "")
+        return (c.name, "可购买" if aff == "可购买" else ("还差" if aff else ""))
+
+    def situation_key(self) -> tuple:
+        """事实位键（无序）：kind + 事实键 + 候选(名,金币档)集合。
+
+        「在屏建议是否已回答过本情形」的判定键——理由措辞与顺序不参与：
+        规则底线与 AI 精修对同一情形各说各话不算情形变化。"""
+        return (self.kind, self.facts,
+                tuple(sorted(self._cand_key(c) for c in self.candidates[:3])))
 
     def render(self) -> str:
         if not self.candidates:
@@ -95,12 +180,17 @@ class GameSession:
     STALL_TIMEOUT = 300.0
 
     def __init__(self, kb, rules, settings=None, fixture_dumper=None,
-                 live_poller=None, engine=None, mouse_stats_fn=None):
+                 live_poller=None, engine=None, mouse_stats_fn=None,
+                 result_fetcher=None):
         self.kb = kb
         self.rules = rules
         self.settings = settings
         self.dumper = fixture_dumper
         self.live = live_poller
+        # 终局结果获取器（N4 复盘结果维度 20261019）：app 注入
+        # lcu.get_eog_stats，on_end_of_game 锁外调用拿胜负 + 官方终局
+        # KDA；拿不到（data_stall/秒退/LCU 不可用）复盘如实缺省
+        self.result_fetcher = result_fetcher
         self.engine = engine or engine_mod.RuleDecisionEngine(kb, rules)
         self.mouse_stats_fn = mouse_stats_fn   # fn() -> [统计窗dict]（复盘用）
         self.engine.bind(self._on_engine_result)
@@ -128,6 +218,15 @@ class GameSession:
             self.my_level = 0             # 我的英雄等级（快照直出，UI 英雄行）
             self._prev_my_items = []
             self._prev_dead = False
+            # 结果维度（N4 复盘结果维度 20261019）：快照侧持续更新，
+            # 末帧≈终局；game_result 由 result_fetcher 局终注入
+            self.game_result = None       # {"result","kills","deaths","assists"} | None
+            self.my_kda = (0, 0, 0)       # 快照侧 KDA（官方终局块拿不到时的兜底）
+            self.summoner_name = ""       # 召唤师名（快照 me 条目 riotId 直出）
+            self.total_gold = 0.0         # 累计金钱（goldTotal，分均经济折算）
+            # 装备变更时刻序列（N4：此前只有终态 final_items，无从回放
+            # "什么时候买了什么"——采纳对账的时间对齐数据源）
+            self.item_events = []         # [{"ts","items":[名,...]}]
             self._enemy_items_seen = set()
             self._kda_alerts = 0
             self.current_path = ""
@@ -155,7 +254,11 @@ class GameSession:
             self.hex_recognized = False   # 本轮三卡已稳定识别（on_cards 已发射）
             self.hex_picked = None        # 本轮点击选中的卡 (idx, name)
             self.hex_last = ""            # 上一轮识别结果（界面关闭后保留展示）
-            self.history = []             # 建议历史（复盘日志）
+            # 建议历史（复盘日志；N2 复盘分层案 20261019 分桶：决策类
+            # opening/card_ranks/swap_items/event_note 全量保留、刷新类
+            # next_items 只存结论变化快照——旧平列表被高频刷新淹没，
+            # [-60:] 硬截把出门装三选与海克斯档位全部挤出复盘）
+            self.history = {"decision": [], "refresh": []}
             self._review_flushed = False  # 本局复盘已落盘标记（双兜底防丢）
             self._engine_started = False  # 引擎本局已 start_game（快照兜底判据）
             self.clicks = []              # 点击链黑匣子（台账排障，见 log_click）
@@ -279,11 +382,25 @@ class GameSession:
                         print(f"[WARN] runes 探针 new_game 异常: {e}")
 
     def on_end_of_game(self, reason):
+        # 结果获取在锁外（N4）：LCU REST 重试最坏十几秒，绝不持锁等 IO
+        # （同引擎派发"锁外起线程"规矩）。跳过名单：data_stall（快照断流
+        # 兜底，LCU 大概率同死）、dodge_requeue（秒退重开，本局无终局块）。
+        result = None
+        if reason not in ("data_stall", "dodge_requeue") \
+                and self.result_fetcher:
+            try:
+                result = self.result_fetcher()
+            except Exception as e:  # noqa: BLE001 —— 结果采集不拖垮收尾
+                print(f"[WARN] 终局结果获取异常（复盘该字段缺省）: {e}")
         with self._lock:
             # 幂等门：会话已收尾（data_stall 兜底先触发过/重复终局事件）
             # 就不拿空会话再写一份零内容文件、不重置已清场的新局状态
             if self.stage not in ("game_start", "in_game"):
                 return
+            # 拿到才存（dict 或 None）：落盘侧按"非空才写键"如实缺省
+            self.game_result = result if isinstance(result, dict) else None
+            if result:
+                self._log("game_result", str(result.get("result") or "?"))
             self._log("end_of_game", reason)
             self._write_review_log()
             if self.live:
@@ -336,6 +453,23 @@ class GameSession:
             # 我的等级（Live 免费事实直出；activeplayer 缺失时已由 poller
             # 用 playerlist 匹配条兜底，无数据保持 0，UI 省略 Lv.）
             self.my_level = int(getattr(snap, "my_level", 0) or 0)
+            # 结果维度持续采集（N4 复盘结果维度 20261019）：KDA/召唤师名
+            # 末帧≈终局（官方终局块拿不到时的兜底事实源）；累计金钱取
+            # max 防单帧脏值回退；装备变更按边沿记录（变更时刻 + 变更后
+            # 全集，采纳对账侧再 diff 出购买——本条也天然涵盖卖出）
+            self.my_kda = (int(getattr(snap, "my_kills", 0) or 0),
+                           int(getattr(snap, "my_deaths", 0) or 0),
+                           int(getattr(snap, "my_assists", 0) or 0))
+            if getattr(snap, "my_summoner", "") and not self.summoner_name:
+                self.summoner_name = str(snap.my_summoner)
+            self.total_gold = max(self.total_gold,
+                                  float(snap.my_total_gold or 0))
+            if tuple(self.my_items) != tuple(self._prev_my_items):
+                self._prev_my_items = list(self.my_items)
+                self.item_events.append({"ts": float(snap.ts or time.time()),
+                                         "items": list(self.my_items)})
+                if len(self.item_events) > 200:   # 正常一局 <40 帧，防异常刷屏
+                    del self.item_events[:len(self.item_events) - 200]
             enemies = snap.enemies()
             # ── Live 免费事实喂模型（20261013：API 已返回但没进上下文的
             #    三件直出）——全部原文直出、不做代码侧预消化结论 ──
@@ -352,6 +486,21 @@ class GameSession:
                 + ("、".join(it["name"] for it in p.items if it.get("name"))
                    or "无")
                 for p in snap.allies() if (p.champion or p.champion_en)]
+            # ④敌方实战事实（N5 敌方画像模型化 20261019）：英雄名 → 等级/
+            #   KDA/实际装备原样直出——敌方海克斯 API 读不到（15,760 玩家·
+            #   帧实证）且屏幕外 OCR 物理不可行，出装组合是仅存的间接情报；
+            #   "这套出装暗示什么威胁/可能拿了什么海克斯"由模型判断，代码
+            #   不做预消化（KEY_ENEMY_ITEMS 硬表只服务规则兜底不进 AI 链）。
+            #   整引用赋值原子（轮询线程写 / AI 线程读，同 ①）
+            enemy_facts = {
+                (p.champion or p.champion_en): {
+                    "level": int(p.level or 0),
+                    "kda": (int(p.kills or 0), int(p.deaths or 0),
+                            int(p.assists or 0)),
+                    "items": [it["name"] for it in p.items if it.get("name")],
+                }
+                for p in enemies if (p.champion or p.champion_en)}
+            self.engine.enemy_builds = enemy_facts
             # LCU 阵容缺失兜底（国服偶发/中途启动）：快照名单直接回填，
             # 否则威胁画像按空名单计算恒为"暂无数据"
             if not self.enemy and enemies:
@@ -406,7 +555,13 @@ class GameSession:
         # 锁外补 start_game（同 on_game_start 规矩：不持锁起线程）
         if late_start:
             engine, hero, ally, enemy, game_map = late_start
-            engine.start_game(hero, ally, enemy, game_map=game_map)
+            # 敌方实战事实随帧直传（N5 20261019）：start_game 会清引擎挂载
+            # （宁缺勿错局），挂载里的本帧数据随之蒸发，而 System2 一局只
+            # 发一次——改锚/中途启动重派时靠这个实参把出装/KDA 带进 ctx
+            # 生成。数据来自本帧快照（上面刚构建），绝非上一局残留；
+            # 常规开局派发（on_game_start）彼时无快照，缺省 None 不编造
+            engine.start_game(hero, ally, enemy, game_map=game_map,
+                              enemy_facts=enemy_facts)
 
     def _build_progress_rows(self, players: list) -> list:
         """一组玩家的成型度行：传说件计数（x/6）+ 装备总价值（DD gold）。
@@ -484,13 +639,17 @@ class GameSession:
                 del self.clicks[:len(self.clicks) - 300]
 
     def record_augment(self, name: str, tier: str = "", card_idx=None,
-                       round_id=None):
+                       round_id=None, tier_src: str = ""):
         """记账入口。card_idx：点击的卡片序号（0-2），供 overlay"✓已选"标记。
         round_id：点击时刻的检测器界面轮次（20261012 赏金猎人案）——成功
         记账即登记本轮已选：选卡完成游戏内界面立即关闭，同轮之后命中卡
         矩形的点击都是商店推荐面板/移动等游玩点击，但检测器消失迟滞
         （5~9s）+ 10s 证据窗内残留卡名仍有效，真机一局被幻影多记 2 条；
-        app 按 round_recorded() 把同轮后续点击闸在台账外。
+        app 按 round_recorded() 把同轮后续点击闸在台账外。轮次随条目入账
+        （N1 20261019）：overlay 台账轮序号 ①②③ 与复盘"哪一轮抽的"直读，
+        不再按列表下标推算。
+        tier_src：tier 来源（"ocr"=卡框色环实测 / "prior"=KB 先验推定 /
+        ""=未知）——reroll 换卡后先验不等于实抽，复盘/UI 据此区分。
 
         同名防重复记账：拒绝时不动 hex_picked——被拒的点击不是一条新
         台账（同名已在档），把"✓已选"挪到新卡会让浮窗谎报已选而台账
@@ -501,7 +660,9 @@ class GameSession:
         升级型海克斯联动（升级联动案 20261013）：记账成功且为升级型
         （kb.augment_is_upgrade，事实层判定）→ ①军师推一条纯事实提示
         （不带出装结论，方案适配是模型的判断工作；先于刷新派发，
-        _suggest_next_items 的 _set_coach_context 会把它喂给 System1）；
+        _suggest_next_items 的 _set_coach_context 会把它喂给 System1；
+        N1 20261019 起带实测/先验阶级——「已选【棱彩】升级：无尽之刃」
+        数据直出，棱彩额外收益值不值得为它改路线归模型判断）；
         ②事件式触发一次建议刷新——与死亡边沿同类派发（reason="event"，
         引擎侧不受 periodic 20s min_interval 守门），同一轮次
         （round_id）防重复触发，撤销后同轮重记不再刷（换轮照常）；
@@ -521,7 +682,9 @@ class GameSession:
                 return False
             if card_idx is not None:
                 self.hex_picked = (card_idx, name)
-            self.augments.append({"name": name, "tier": tier, "ts": time.time()})
+            self.augments.append({"name": name, "tier": tier,
+                                  "tier_src": tier_src,
+                                  "round_id": round_id, "ts": time.time()})
             if round_id is not None:
                 self.hex_recorded_rounds.add(round_id)
             self._log("augment_recorded", f"{tier} {name}")
@@ -530,8 +693,10 @@ class GameSession:
             self._recompute_path()
             fired_by_opening = self._decide_opening_or_next()
             if self.kb.augment_is_upgrade(name):
+                tier_tag = f"【{tier}】" if tier else ""
                 self._push_coach(f"upgrade:{name}",
-                                 f"已选升级型海克斯 {name}：基础效果强化")
+                                 f"已选{tier_tag}升级型海克斯 {name}："
+                                 "基础效果强化")
                 if (round_id is None
                         or round_id not in self._upgrade_fired_rounds):
                     if round_id is not None:
@@ -633,15 +798,24 @@ class GameSession:
             serial = self._card_serial
             hero = self.my_hero or ""
             taken = [a["name"] for a in self.augments]
+            # 已选阶级随行（N1 20261019）：评级语境事实「已拿【棱彩】XX」
+            # 数据直出——三选与新卡同为棱彩时升不升值是模型的判断
+            tiers = {a["name"]: (a.get("tier") or "")
+                     for a in self.augments if a.get("tier")}
             items = list(self.my_items)
             threat = self.threat
         ranks, ai_pending = self.engine.rank_cards(hero, card_names, taken,
                                                    items, threat, serial,
-                                                   desc_fetcher=desc_fetcher)
+                                                   desc_fetcher=desc_fetcher,
+                                                   augment_tiers=tiers)
         with self._lock:
             if serial == self._card_serial:
                 self.card_ranks = ranks
                 self.card_ranks_pending = ai_pending
+                # N2 复盘分层案 20261019：规则基准即刻入决策桶（KIND_RANKS
+                # 精修结论有变时再记一条）——每轮"给了什么档位"此前完全不
+                # 进 history，10 局复盘 card_ranks 全集为空
+                self._append_history("card_ranks", _render_card_ranks(ranks))
                 # 能到这里的调用方（detector on_cards）已保证 ≥2 张有效库名
                 self.hex_active = True
                 self.hex_recognized = True
@@ -698,10 +872,16 @@ class GameSession:
         serial = self._new_serial()
         threat = self.threat
         first = self.first_augment
-        cands = self.engine.opening_candidates(first, threat, serial)
+        # 首海克斯阶级随行（N1 20261019）：出门装 prompt 的「已选海克斯」
+        # 行同样数据直出【棱彩】事实，模型自行权衡开局路线
+        first_tier = {a["name"]: a.get("tier") for a in self.augments
+                      if a.get("tier")}
+        cands = self.engine.opening_candidates(first, threat, serial,
+                                               augment_tiers=first_tier)
         note = f"首个海克斯【{first}】已联动"
-        self._set_suggestion(Suggestion("opening", cands, note=note,
-                                        serial=serial))
+        self._set_suggestion(Suggestion(
+            "opening", cands, note=note, serial=serial,
+            facts=(first, threat.summary() if threat else "")))
         self._log("opening_offered", first)
         return False
 
@@ -715,8 +895,16 @@ class GameSession:
         反了模型永远看不到它本该"修正"的那条。UI/日志推送行为不变，仅
         时序提前。规则底线取自引擎的规则实现（同一 delegate 同一组实参，
         与派发内部重算确定性一致）。
+        N3 结论指纹去重（20261019）：结论未变的帧不落位、不入史、不派发
+        （事实位未变且在屏已是 AI 精修时），中位 44.5 次/局的重复调用
+        （§3.3）由事实层去重收敛；min_interval 本身不动。
         """
         threat = self.threat or self.rules.threat_profile(self.enemy)
+        # 事实位（N3）：模型输入侧事实快照——结论相同但事实变了（升级型
+        # 海克斯入账、威胁画像更新）时仍须重派 AI，去重不吞新事实
+        facts = (tuple(a["name"] for a in self.augments),
+                 self.current_path,
+                 threat.summary() if threat else "")
         serial = self._new_serial()
         # 规则底线预演：与引擎派发走同一规则实现，序列确定性一致；
         # pool 同源自引擎（AI 适配方案池，ctx 未就绪为 None 回 OP.GG）
@@ -789,29 +977,39 @@ class GameSession:
         # 未满装行为完全不变（build_sequence 内按占格装备数分流）
         if full_build:
             if not seq:
-                self._set_suggestion(Suggestion(
-                    "swap_items", [], note="六神装成型，暂无更优替换（保持现装）",
-                    gold=self._my_gold, serial=serial))
-                self._log("swap_mode", "满装无替换候选")
+                sugg = Suggestion("swap_items", [],
+                                  note="六神装成型，暂无更优替换（保持现装）",
+                                  gold=self._my_gold, serial=serial,
+                                  facts=facts)
+                if self._set_suggestion(sugg):
+                    self._log("swap_mode", "满装无替换候选")
             else:
-                self._suggest_swap(seq, serial, reason)
+                sugg = self._suggest_swap(seq, serial, reason, facts)
         else:
             # 金币感知：序列定型后按顺序累计（先组装再算，避免插入项漏标）
             self._apply_afford(seq)
-            self._set_suggestion(Suggestion("next_items", seq, note=save_note,
-                                            gold=self._my_gold, serial=serial))
+            sugg = Suggestion("next_items", seq, note=save_note,
+                              gold=self._my_gold, serial=serial, facts=facts)
+            self._set_suggestion(sugg)
         # 精修派发必须在建议落位之后：AI 回包按 serial 认领"当前建议"——
         # 派发先于落位时，瞬时回包会写进即将被 _set_suggestion 整体替换的
         # 旧建议对象，AI 精修无声丢失（升级联动案 20261013 冒烟实测命中：
         # _suggest_next_items 经升级联动/ctx 刷新存在锁外调用路径，回包
         # 可在落位前插入）。军师上下文仍先于派发写入（后台线程组装
         # prompt 时读取）；内部重算的规则底线与上方预演同源同参。
-        self._set_coach_context()
-        if self.engine.mode != "rule":
-            self.engine.next_candidates(self.my_items, self._my_gold,
-                                        self.current_path, threat, serial,
-                                        reason=reason,
-                                        augments=list(self.augments))
+        # N3 去重：落位被跳过（同结论）时只在「在屏不是本情形 AI 精修版」
+        # 才补派——覆盖"结论未变、模型输入多了新事实"的事件帧（升级型
+        # 海克斯入账：账面多一条，模型该重答）；纯金币档漂移两头都不触发。
+        # 此处读 self.suggestion 不持锁（GIL 下整引用读原子）：判错的最坏
+        # 后果是多派一次，仍受 min_interval/预算守门；on_snapshot 主路径
+        # 本就在会话锁内（RLock 重入）。
+        if self.suggestion is sugg or not self._ai_covered(sugg):
+            self._set_coach_context()
+            if self.engine.mode != "rule":
+                self.engine.next_candidates(self.my_items, self._my_gold,
+                                            self.current_path, threat, serial,
+                                            reason=reason,
+                                            augments=list(self.augments))
 
     # ── 满六神装替换建议（v4.4） ─────────────────────────────────
 
@@ -821,7 +1019,8 @@ class GameSession:
         单独构成满装——2026-09-28 真机 3 传说+2 组件+鞋误判案）。"""
         return is_full_build(self.kb, self.my_items)
 
-    def _suggest_swap(self, swaps: list, serial: int, reason: str = "event"):
+    def _suggest_swap(self, swaps: list, serial: int, reason: str = "event",
+                      facts: tuple = ()) -> Suggestion:
         """替换建议落位：补记金币净差 + 台账联动重排。
 
         引擎接口不透传 gold/augments（规则层 net_cost 先按价差计），
@@ -829,6 +1028,9 @@ class GameSession:
         买件名映射不受影响）。满装但身上还有小件时，合成不占格、比
         卖装更优先，作为 note 附在替换建议下。满装替换军师提醒改在
         _suggest_next_items 军师先行段推送（先于 prompt 组装，模型可见）。
+        N3：结论未变不落位不入史（_set_suggestion 返回 False），swap_mode
+        时间线日志随跳过一并省掉。返回构建的建议对象（无论是否落位），
+        供调用方做派发判定。
         """
         for sw in swaps:
             # 金币未知（0）不按 0 计净差：置 None 不标注，与 _apply_afford
@@ -844,18 +1046,75 @@ class GameSession:
             threat=self.threat)
         if target:
             note = f"先合成：{cnote}"
-        self._set_suggestion(Suggestion("swap_items", swaps, note=note,
-                                        gold=self._my_gold, serial=serial))
-        self._log("swap_mode",
-                  f"{len(swaps)} 对（{reason}）"
-                  f"{'; '.join(f'卖{c.sell}换{c.buy}' for c in swaps[:3])}")
+        sugg = Suggestion("swap_items", swaps, note=note,
+                          gold=self._my_gold, serial=serial, facts=facts)
+        if self._set_suggestion(sugg):
+            self._log("swap_mode",
+                      f"{len(swaps)} 对（{reason}）"
+                      f"{'; '.join(f'卖{c.sell}换{c.buy}' for c in swaps[:3])}")
+        return sugg
 
-    # ── 建议落位（serial 管理 + 历史） ─────────────────────────────
+    # ── 建议落位（serial 管理 + N2 分桶历史 + N3 结论指纹去重） ────
 
     def _new_serial(self) -> int:
         with self._lock:
             self._sug_serial += 1
             return self._sug_serial
+
+    def _append_history(self, kind: str, text: str):
+        """建议历史入桶（N2 复盘分层案 20261019）：决策类全量保留，
+        next_items 入刷新桶——调用方须先过结论指纹判定（_set_suggestion /
+        _on_engine_result 精修分支），同结论不落桶。"""
+        bucket = "decision" if kind in DECISION_KINDS else "refresh"
+        self.history[bucket].append((time.time(), kind, text))
+
+    def _has_history(self) -> bool:
+        """两桶是否非空（零内容局不落盘的判据，N2 后 history 非标量）。"""
+        return any(self.history.values())
+
+    def history_flat(self) -> list:
+        """两桶合并视图（ts 升序 [(ts, kind, text)]）：离线断言/统计用；
+        落盘面仍按桶分列（N2），读取端做新旧双格式兼容。"""
+        out = [*self.history["decision"], *self.history["refresh"]]
+        out.sort(key=lambda e: e[0])
+        return out
+
+    def _sugg_fresh(self, sugg: Suggestion) -> bool:
+        """落位判定（N3 结论指纹去重案 20261019）：False = 结论未变，
+        不落位、不写史。当前无建议 / kind 不同 / 结论指纹不同 → 落位；
+        特例：在屏是本情形（事实位一致）的 AI 精修版时，规则底线换措辞
+        不算新结论、不回落覆盖——否则 20s 例行帧把 AI 文案打回规则版、
+        精修回包再覆盖回来，overlay 循环闪烁、history 被措辞差灌满。"""
+        cur = self.suggestion
+        if cur is None or cur.kind != sugg.kind:
+            return True
+        if (cur.source == "ai" and sugg.source == "rule"
+                and cur.situation_key() == sugg.situation_key()):
+            return False
+        return cur.fingerprint() != sugg.fingerprint()
+
+    def _ai_covered(self, sugg: Suggestion) -> bool:
+        """派发判定（N3 不重派）：在屏建议已是同一情形（事实位一致）的
+        AI 精修版 → 模型已回答过本情形，不再重问。纯事实层去重（事实位
+        含海克斯台账/路线/威胁/候选金币档），不碰 min_interval 本身。"""
+        cur = self.suggestion
+        return (cur is not None and cur.kind == sugg.kind
+                and cur.source == "ai"
+                and cur.situation_key() == sugg.situation_key())
+
+    def _set_suggestion(self, sugg: Suggestion, serial: int = None) -> bool:
+        """建议落位：与当前建议结论指纹一致时整体跳过（overlay 内容不动、
+        history 不追加），返回 False 让调用方把 AI 精修派发一并省掉——
+        同一事实不重复呈现、不重复问（N3）。serial 只在真落位时赋值；
+        被去重跳过的帧不占展示位（序号已由调用方预消费，在途旧回包按
+        原 serial 认领语义不变）。"""
+        with self._lock:
+            if not self._sugg_fresh(sugg):
+                return False
+            sugg.serial = serial if serial is not None else self._sug_serial
+            self.suggestion = sugg
+            self._append_history(sugg.kind, sugg.render())
+            return True
 
     def _apply_afford(self, seq):
         """金币按序累计填 afford_note；身上组件能合成该件时按价抵扣
@@ -882,12 +1141,6 @@ class GameSession:
                 remaining = max(0.0, remaining + discount - c.price)
             else:
                 c.afford_note = f"还差{c.price - remaining - discount:.0f}"
-
-    def _set_suggestion(self, sugg: Suggestion, serial: int = None):
-        with self._lock:
-            sugg.serial = serial if serial is not None else self._sug_serial
-            self.suggestion = sugg
-            self.history.append((time.time(), sugg.kind, sugg.render()))
 
     # ── AI 精修结果（引擎后台线程回调） ────────────────────────────
 
@@ -919,31 +1172,54 @@ class GameSession:
                                    and not self._is_full_build())
             elif kind == KIND_RANKS:
                 if serial == self._card_serial:
-                    if payload:
+                    if payload and card_ranks_fingerprint(payload) != \
+                            card_ranks_fingerprint(self.card_ranks):
+                        # 结论有变才覆盖入史（N3 同结论精修不重写；N2 三选
+                        # 档位进决策桶——每轮"给了什么档位"此前一条不留）
                         self.card_ranks = payload
+                        self._append_history("card_ranks",
+                                             _render_card_ranks(payload))
                         self._log("card_ranks_ai", str(len(payload)))
                     # None（精修失败/空结果信号）同样清等待态：规则基准
                     # 即为最终展示，"AI 评级中"不能永久滞留
                     self.card_ranks_pending = False
             elif serial == self._sug_serial and self.suggestion is not None:
-                # opening / next_items：serial 匹配当前建议且类型一致才覆盖
+                # opening / next_items：serial 匹配当前建议且类型一致才覆盖。
+                # N3（20261019）：同结论的精修回包不重写——模型把规则底线
+                # 原样背回来时，overlay 不闪、history 不重记（source 保持
+                # rule，内容本就一字不差）；模块态 coach 由下一次派发的
+                # _set_last_coach 覆盖，无陈值回读窗口。
                 cur = self.suggestion
                 if kind == KIND_OPENING and cur.kind == "opening":
                     if payload:
-                        cur.candidates = payload
-                        cur.source = "ai"
-                        cur.ts = time.time()
-                        self._log("opening_ai", f"{len(payload)} 项")
+                        new_fp = Suggestion("opening", payload,
+                                            note=cur.note).fingerprint()
+                        if new_fp != cur.fingerprint():
+                            cur.candidates = payload
+                            cur.source = "ai"
+                            cur.ts = time.time()
+                            # N2：出门装三选进决策桶（此前原地改写不入史，
+                            # 10 局复盘 opening 全集为空——玩家无从回看
+                            # "当时推荐了哪三件"）
+                            self._append_history("opening", cur.render())
+                            self._log("opening_ai", f"{len(payload)} 项")
                 elif kind == KIND_NEXT and cur.kind == "next_items":
                     if payload:
-                        cur.candidates = payload
-                        cur.source = "ai"
-                        cur.ts = time.time()
-                        # AI 重排后需按当前金币重算可买性（保序累计）
-                        self._apply_afford(cur.candidates)
-                        # System1 可选 coach 字段 → 覆盖最新一条军师文案
-                        self._apply_ai_coach()
-                        self._log("next_items_ai", f"{len(payload)} 项")
+                        # AI 重排后需按当前金币重算可买性（保序累计）——
+                        # 可买性档位是指纹的一部分，先算再比对
+                        self._apply_afford(payload)
+                        new_fp = Suggestion("next_items", payload,
+                                            note=cur.note,
+                                            gold=cur.gold).fingerprint()
+                        if new_fp != cur.fingerprint():
+                            cur.candidates = payload
+                            cur.source = "ai"
+                            cur.ts = time.time()
+                            # 精修改写了理由/顺序 → 是一条新结论，入刷新桶
+                            self._append_history("next_items", cur.render())
+                            # System1 可选 coach 字段 → 覆盖最新一条军师文案
+                            self._apply_ai_coach()
+                            self._log("next_items_ai", f"{len(payload)} 项")
                 elif kind == KIND_NEXT and cur.kind == "swap_items":
                     # 替换模式 AI 精修：payload 是 Candidate(买件名, AI理由)，
                     # 映射回当前替换对（按 buy 名，集合内），重排 + 换理由；
@@ -961,10 +1237,15 @@ class GameSession:
                                 seen.add(m.buy)
                         merged += [m for b, m in by_buy.items()
                                    if b not in seen]
-                        if merged:
+                        if merged and Suggestion(
+                                "swap_items", merged[:3], note=cur.note,
+                                gold=cur.gold).fingerprint() \
+                                != cur.fingerprint():
                             cur.candidates = merged[:3]
                             cur.source = "ai"
                             cur.ts = time.time()
+                            # 满装替换属决策类（N2），理由重写即入史
+                            self._append_history("swap_items", cur.render())
                             # System1 可选 coach 字段 → 覆盖最新一条军师文案
                             self._apply_ai_coach()
                             self._log("swap_ai", f"{len(merged)} 对")
@@ -996,8 +1277,8 @@ class GameSession:
                     note = KEY_ENEMY_ITEMS[item]
                     self.suggestion = Suggestion(
                         "event_note", [Candidate(f"敌方 {champ} 出了 {item}", note)])
-                    self.history.append(
-                        (time.time(), "event_note", self.suggestion.render()))
+                    self._append_history("event_note",
+                                         self.suggestion.render())
                     # 克制提示同步入军师滚动列表（军师格式，v4.5）
                     self._push_coach(f"ekey:{champ}:{item}",
                                      f"敌方{champ}出了{item}：{note}")
@@ -1015,8 +1296,8 @@ class GameSession:
                         "event_note",
                         [Candidate(f"{p.champion} 已起飞 {p.kills}/{p.deaths}/{p.assists}",
                                    "考虑针对性装备（抗性/重伤/金身类）")])
-                    self.history.append(
-                        (time.time(), "event_note", self.suggestion.render()))
+                    self._append_history("event_note",
+                                         self.suggestion.render())
                     # 敌方威胁变化入军师（v4.5）
                     self._push_coach(f"kda:{p.champion}",
                                      f"敌方{p.champion}已起飞"
@@ -1226,9 +1507,18 @@ class GameSession:
                 "current_path": self.current_path,
                 "threat": self.threat.summary() if self.threat else "",
                 "engine": stats,
-                "suggestions": [
-                    {"ts": round(t, 1), "kind": k, "text": x}
-                    for t, k, x in self.history[-60:]],
+                # N2 复盘分层案 20261019：按桶落盘——决策类全量保留
+                #（封顶防异常刷屏失控），刷新类只含结论变化快照（纯金币
+                # 数字漂移不入史）。读取端 hexa/ui/review.py 做新旧双格式
+                # 兼容（旧文件平列表照读）。
+                "suggestions": {
+                    "decision": [
+                        {"ts": round(t, 1), "kind": k, "text": x}
+                        for t, k, x in self.history["decision"][-HISTORY_DECISION_CAP:]],
+                    "refresh": [
+                        {"ts": round(t, 1), "kind": k, "text": x}
+                        for t, k, x in self.history["refresh"][-HISTORY_REFRESH_CAP:]],
+                },
                 "timeline": [
                     {"ts": round(t, 1), "event": e, "detail": d}
                     for t, e, d in self.timeline[-200:]],
@@ -1241,6 +1531,29 @@ class GameSession:
                 "mouse_stats": list(self.mouse_stats_fn())
                                if self.mouse_stats_fn else [],
             }
+            # N4 复盘结果维度（20261019 产品评估 §3.5）：胜负/KDA/召唤师名/
+            # 装备变更时刻——拿得到才落键，拿不到如实缺省（不写键、不编造）；
+            # 消费端 hexa/ui/review.py 全容错，旧文件/缺键一律占位。
+            # KDA 以官方终局块（result_fetcher）优先，快照侧末帧兜底。
+            kda = None
+            if self.game_result:
+                kda = {k: self.game_result[k]
+                       for k in ("kills", "deaths", "assists")
+                       if isinstance(self.game_result.get(k), int)}
+            elif any(self.my_kda):
+                kda = dict(zip(("kills", "deaths", "assists"), self.my_kda))
+            if (self.game_result or {}).get("result"):
+                doc["result"] = str(self.game_result["result"])
+            if kda:
+                doc["kda"] = kda
+            if self.summoner_name:
+                doc["summoner_name"] = self.summoner_name
+            if self.total_gold > 0:
+                doc["total_gold"] = round(self.total_gold, 1)
+            if self.item_events:
+                doc["item_events"] = [
+                    {"ts": round(e["ts"], 1), "items": list(e["items"])}
+                    for e in self.item_events[-200:]]
             path = out_dir / self._review_path
             path.write_text(json.dumps(doc, ensure_ascii=False, indent=1),
                             encoding="utf-8")
@@ -1269,7 +1582,7 @@ class GameSession:
             return
         has_unverified = any(e[1] == "augment_unverified"
                              for e in self.timeline)
-        if not (self.augments or self.history or has_unverified
+        if not (self.augments or self._has_history() or has_unverified
                 or self.clicks):
             return
         if not self.my_hero:
@@ -1322,7 +1635,7 @@ class GameSession:
                                  for e in self.timeline)
             # 纯点击留痕局（点击全被丢/全 unverified，台账建议双空）也要
             # 落盘——clicks 黑匣子正是这类局的唯一现场（2026-09-29 台账案）
-            if not (self.augments or self.history or has_unverified
+            if not (self.augments or self._has_history() or has_unverified
                     or self.clicks):
                 return
             self._log("review_flush", "终局事件丢失，兜底补写复盘日志")
@@ -1361,8 +1674,12 @@ class GameSession:
                 "my_level": self.my_level,
                 "ally": list(self.ally),
                 "enemy": list(self.enemy),
-                # 台账带品质（tier 快照缺省为空串，UI 省略括号）
-                "augments": [{"name": a["name"], "tier": a.get("tier") or ""}
+                # 台账带品质（tier 快照缺省为空串，UI 省略括号）；轮次与
+                # 来源随 N1 20261019 直出——轮序号 ①②③ 用 round_id 不按
+                # 下标推算，先验推定档位 UI 标「先验」防误读成实抽
+                "augments": [{"name": a["name"], "tier": a.get("tier") or "",
+                              "tier_src": a.get("tier_src") or "",
+                              "round_id": a.get("round_id")}
                              for a in self.augments],
                 "my_items": list(self.my_items),
                 "current_path": self.current_path,

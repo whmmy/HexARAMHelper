@@ -417,6 +417,22 @@ class KnowledgeBase:
             return None
         return tier, t_rank
 
+    def augment_tier(self, hero_cn: str, augment_name: str) -> str:
+        """该英雄×海克斯的先验阶级直查（"棱彩"/"黄金"/"白银"），查空返回 ""。
+
+        N1 阶级兜底（20261019）：OCR 色环探针置信不足时的第二通道——
+        复用 augment_info 的同一份 hero_augments 档（勿在此重建 CSV 解析），
+        只看 tier 不看位次（augment_prior_rank 会因 t_rank=999 占位连 tier
+        一起丢，阶级兜底只要档位）。调用方（app 记账链）必须带来源标注
+        （tier_src="prior"）：同一名单在不同英雄榜档位不同，且 reroll 换卡
+        后先验≠实抽，复盘据此区分推定与实测。"""
+        info = self.augment_info(hero_cn, augment_name)
+        if not info:
+            return ""
+        tier = info.get("tier") or ""
+        # 枚举值守卫（事实域，非语义表）：上游脏值/占位符不外泄
+        return tier if tier in ("棱彩", "黄金", "白银") else ""
+
     # ── 装备查询（rules_engine / 幻觉校验用） ──────────────────────
 
     def item_path_bias(self, item_name: str):

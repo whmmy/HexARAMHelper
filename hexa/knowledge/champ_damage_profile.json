@@ -1,6 +1,6 @@
 {
  "version": "16.19.1",
- "generated_at": "2026-10-15",
+ "generated_at": "2026-10-20",
  "note": "P0 启发式粗分类（DD tags 推断）+ 23 条人工特例覆盖（双修/无 Mage 标签 AP 等）",
  "champions": {
   "暗裔剑魔": {

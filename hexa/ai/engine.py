@@ -47,6 +47,9 @@ class DecisionEngine(ABC):
     # 数据均为 Live API 原文直出（判断归模型，代码不做预消化结论）。
     enemy_spells: dict = {}   # 敌方英雄名 → [召唤师技能 displayName]
     ally_builds: list = []    # 队友出装摘要行 "英雄: 装备1、装备2"
+    enemy_builds: dict = {}   # 敌方英雄名 → {"level","kda","items"}（N5
+                              # 敌方画像模型化 20261019：实战事实直出，
+                              # "出装组合暗示什么威胁/海克斯"归模型判断）
 
     def bind(self, on_result):
         """on_result(kind, payload, serial) —— AI 结果回调（UI/会话线程安全由调用方保证）"""
@@ -54,10 +57,13 @@ class DecisionEngine(ABC):
 
     @abstractmethod
     def start_game(self, hero: str, ally: list, enemy: list,
-                   game_map: str = ""):
+                   game_map: str = "", enemy_facts: dict = None):
         """新局开始：重置预算/缓存；AI 实现此后台生成 ChampionContext。
 
         game_map: "11"=召唤师峡谷 / "12"=极地大乱斗（装备按图可买性过滤）
+        enemy_facts: 敌方实战事实 {英雄名: {"level","kda","items"}}（N5
+        20261019，本帧 Live 快照直出）——仅中途启动/改锚重派时非空，
+        随 System2 派发并入 ctx 生成；常规开局派发彼时无快照，None 不编造。
         """
 
     def prepare_game(self, hero: str, ally: list, enemy: list):
@@ -79,14 +85,16 @@ class DecisionEngine(ABC):
 
     @abstractmethod
     def rank_cards(self, hero, card_names, taken, my_items, threat,
-                   serial: int, desc_fetcher=None) -> tuple:
+                   serial: int, desc_fetcher=None, augment_tiers=None) -> tuple:
         """海克斯三卡片评级，返回 (基准评级, AI精修是否在途)。
 
         基准评级 [{name, grade, reason}] 同步可立即上屏；AI 在途=True 时
         UI 先显示卡名等评级（"先显卡名后放评级"），精修结果经
         on_result(KIND_RANKS) 回调覆盖（失败也回调 None 通知清等待态，
         规则基准成为最终展示）。desc_fetcher：卡面原文描述获取器
-        （20261013 描述自举）——AI 精修线程内调用，None=无描述可用。"""
+        （20261013 描述自举）——AI 精修线程内调用，None=无描述可用。
+        augment_tiers：{已选海克斯名: 阶级}（N1 20261019，OCR 实测/KB
+        先验直出；规则实现不消费）。"""
 
     @abstractmethod
     def skill_order(self, hero: str) -> str:
@@ -115,11 +123,13 @@ class RuleDecisionEngine(DecisionEngine):
         self._hero = ""  # start_game 前（如中途启动）快照回调仍会读取
         self.game_map = ""  # 当前对局地图（"11"/"12"），按图过滤可买装备
 
-    def start_game(self, hero, ally, enemy, game_map=""):
+    def start_game(self, hero, ally, enemy, game_map="", enemy_facts=None):
         self._hero = hero
         self.game_map = game_map or ""
+        # 规则引擎无 prompt，enemy_facts 不消费（N5 数据只进 AI 链路）
 
-    def opening_candidates(self, first_augment, threat, serial):
+    def opening_candidates(self, first_augment, threat, serial,
+                           augment_tiers=None):
         return self.rules.opening_candidates(self._hero, first_augment,
                                              threat, game_map=self.game_map)
 
@@ -130,7 +140,7 @@ class RuleDecisionEngine(DecisionEngine):
                                          game_map=self.game_map, pool=pool)
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial,
-                   desc_fetcher=None):
+                   desc_fetcher=None, augment_tiers=None):
         return self.rules.rank_augments(hero, card_names, taken), False
 
     def skill_order(self, hero):
@@ -246,24 +256,50 @@ class AIDecisionEngine(DecisionEngine):
 
     # ── 生命周期 ──────────────────────────────────────────────────
 
-    def _enemy_detail(self) -> list:
-        """敌方明细行 ["名(伤害,Role)[ 召唤师技能:X+Y]"]：start_game 名单 +
-        champ_damage_profile + 快照召唤师技能（Live 免费事实直出，缺数据
-        的英雄不带技能段）。
+    def _enemy_detail(self, killer_counts=None) -> list:
+        """敌方明细行 ["名(伤害,Role)[ Lv][ KDA k/d/a][ 装备:…][ 击杀我×N][
+        召唤师技能:X+Y]"]：start_game 名单 + champ_damage_profile + 快照
+        实战事实挂载（enemy_builds：等级/KDA/实际装备）+ 死亡实证
+        （threat.killer_counts，谁在杀我）。
 
         _fmt_snapshot 的 enemy 管道此前恒为空（死参数），威胁只有计数摘要；
         补上名字+画像后 System1 才能做"全 AD 局早护甲"级别的语境判断。
+        N5 敌方画像模型化（20261019）：敌方海克斯 API 读不到（15,760
+        玩家·帧实证）且敌方海克斯界面在屏幕外 OCR 物理不可行——出装组合
+        是仅存的间接情报，原样喂给模型让"这套出装暗示什么威胁/可能拿了
+        什么海克斯/对我意味着什么"由模型自己判断；代码侧不写任何
+        "装备=含义"名单（KEY_ENEMY_ITEMS 硬表只服务规则兜底）。
         Role 标签（Tank/Support/Mage…）数据直出，治疗系/坦克识别交给模型；
-        召唤师技能同样只给事实（displayName 原文），"这人是 XX 流"的结论
-        由模型自己下。
+        召唤师技能同样只给事实（displayName 原文）。各段缺数据即省略
+        （开局快照未回流时自然退化回 名单+画像+技能，宁缺勿错）。
         """
         out = []
+        kills = killer_counts or {}
         for name in self._enemy[:5]:
             prof = self.delegate.kb.champ_profile.get(name, {})
             dmg = prof.get("damage") or "?"
             tags = prof.get("tags") or []
             role = "/".join(tags[:2]) if tags else ""
             line = f"{name}({dmg}" + (f",{role})" if role else ")")
+            fact = (self.enemy_builds or {}).get(name) or {}
+            try:
+                lv = int(fact.get("level") or 0)
+                k, d, a = (int(x) for x in (fact.get("kda") or (0, 0, 0)))
+            except (TypeError, ValueError):
+                lv, k, d, a = 0, 0, 0, 0
+            if lv:
+                line += f" Lv{lv}"
+            if k or d or a:
+                line += f" KDA {k}/{d}/{a}"
+            items = [str(n) for n in (fact.get("items") or []) if n]
+            if items:
+                line += " 装备:" + "、".join(items)
+            try:
+                mine = int(kills.get(name) or 0)
+            except (TypeError, ValueError):
+                mine = 0
+            if mine:
+                line += f" 击杀我×{mine}"
             spells = (self.enemy_spells or {}).get(name) or []
             if spells:
                 line += f" 召唤师技能:{'+'.join(str(s) for s in spells)}"
@@ -278,14 +314,17 @@ class AIDecisionEngine(DecisionEngine):
         return [str(x) for x in (self.ally_builds or [])][:5]
 
     def _spawn_system2(self, hero: str, ally: list, enemy: list,
-                       stale_check, tag: str):
+                       stale_check, tag: str, enemy_facts: dict = None):
         """后台生成 ChampionContext → cache.set(键控) → KIND_CTX 回调。
 
         stale_check 在结果落位前于锁内求值：开局路径按游戏代际（旧局结果
         整包丢弃）、选人期路径按阵容键（骰子换人/阵容变化即弃）。生成/
         解析异常在此兜底回调 KIND_CTX(source=error)，防线程静默死亡、
         pending 永挂（system2.generate 内部已兜 LLM/解析层，此处兜 kb 等
-        意外异常）。"""
+        意外异常）。
+        enemy_facts：敌方实战事实直传（N5 20261019，start_game 实参，
+        本帧快照数据）——改锚/中途启动重派 System2 时把敌方出装/KDA 并入
+        ctx 生成 prompt；选人期预生成与常规开局为 None，不占位不编造。"""
         kb = self.delegate.kb
         rules = self.delegate.rules
 
@@ -294,7 +333,8 @@ class AIDecisionEngine(DecisionEngine):
                 self._inflight += 1
             try:
                 ctx = self.s2.generate(kb, rules, self.client_s2, hero, ally,
-                                       enemy, data_version=kb.builds_patch)
+                                       enemy, data_version=kb.builds_patch,
+                                       enemy_facts=enemy_facts)
                 with self._lock:
                     stale = bool(stale_check())
                 if stale:
@@ -374,7 +414,7 @@ class AIDecisionEngine(DecisionEngine):
             hero, list(ally or []), list(enemy or []),
             stale_check=lambda: self._prepare_key != key, tag="选人期")
 
-    def start_game(self, hero, ally, enemy, game_map=""):
+    def start_game(self, hero, ally, enemy, game_map="", enemy_facts=None):
         self._hero = hero
         self._enemy = [str(x) for x in (enemy or [])]
         self.game_map = game_map or ""
@@ -382,6 +422,7 @@ class AIDecisionEngine(DecisionEngine):
         # 空窗期 _enemy_detail 不带技能段/队友行为空——宁缺勿错局）
         self.enemy_spells = {}
         self.ally_builds = []
+        self.enemy_builds = {}
         self.delegate._hero = hero
         self.delegate.game_map = self.game_map
         self._last_refine = {"opening": 0.0, "next_items": 0.0,
@@ -449,7 +490,7 @@ class AIDecisionEngine(DecisionEngine):
             return
         self._spawn_system2(hero, list(ally or []), list(enemy or []),
                             stale_check=lambda: epoch != self._epoch,
-                            tag="开局")
+                            tag="开局", enemy_facts=enemy_facts)
 
     # ── AI 适配出装池（System2 产物 → 规则底线/System1 白名单） ────
 
@@ -502,7 +543,8 @@ class AIDecisionEngine(DecisionEngine):
                   "（本轮无方案池/跨流派适配）")
         return False
 
-    def opening_candidates(self, first_augment, threat, serial):
+    def opening_candidates(self, first_augment, threat, serial,
+                           augment_tiers=None):
         base = self.delegate.opening_candidates(first_augment, threat, serial)
         if not (self._ctx_ready() and self._try_reserve()):
             return base
@@ -515,8 +557,10 @@ class AIDecisionEngine(DecisionEngine):
         def fn():
             picks = self.s1.suggest_opening(
                 self.client_s1, ctx, self._hero, first_augment, summary, base,
-                enemy=self._enemy_detail(),
-                augment_descs=_augment_descs(kb, taken))
+                enemy=self._enemy_detail(
+                    getattr(threat, "killer_counts", None)),
+                augment_descs=_augment_descs(kb, taken),
+                augment_tiers=augment_tiers)
             out = []
             for p in picks:
                 if not kb.item_available(p["name"], gm):
@@ -547,14 +591,21 @@ class AIDecisionEngine(DecisionEngine):
         gm = self.game_map
         summary = threat.summary() if threat else ""
         taken = [a["name"] for a in (augments or [])]
+        # 已选阶级直出（N1 20261019）：augments 条目带 tier（OCR 实测/
+        # KB 先验），prompt 语境「已选【棱彩】升级：无尽之刃」由模型
+        # 自行判断棱彩级收益是否值得调整路线——代码不做语义加工
+        tiers = {a["name"]: (a.get("tier") or "") for a in (augments or [])
+                 if isinstance(a, dict) and a.get("tier")}
 
         def fn():
             picks = self.s1.suggest_next(
                 self.client_s1, ctx, my_items, gold, current_path, summary,
-                taken, base, enemy=self._enemy_detail(),
+                taken, base, enemy=self._enemy_detail(
+                    getattr(threat, "killer_counts", None)),
                 allies=self._ally_detail(),
                 extra_allowed=self._extra_allowed(),
                 augment_descs=_augment_descs(kb, taken),
+                augment_tiers=tiers,
                 allow_nomination=True)
             owned = {str(n) for n in (my_items or [])}
             out = []
@@ -578,7 +629,7 @@ class AIDecisionEngine(DecisionEngine):
         return base
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial,
-                   desc_fetcher=None):
+                   desc_fetcher=None, augment_tiers=None):
         base = self.delegate.rank_cards(hero, card_names, taken, my_items,
                                         threat, serial)[0]
         if not (self._ctx_ready() and self._try_reserve()):
@@ -597,8 +648,10 @@ class AIDecisionEngine(DecisionEngine):
                     print(f"[WARN] 卡面描述获取失败，评级退回无描述: {e}")
             return self.s1.rank_augments(
                 self.client_s1, ctx, hero, card_names, taken or [], my_items,
-                summary, base, enemy=self._enemy_detail(),
-                allies=self._ally_detail(), descriptions=descs)
+                summary, base, enemy=self._enemy_detail(
+                    getattr(threat, "killer_counts", None)),
+                allies=self._ally_detail(), descriptions=descs,
+                augment_tiers=augment_tiers)
         self._submit(KIND_RANKS, serial, fn)
         return base, True
 
@@ -652,13 +705,15 @@ class JevEngine(DecisionEngine):
         self.on_result = None
         self.game_map = ""
 
-    def start_game(self, hero, ally, enemy, game_map=""):
+    def start_game(self, hero, ally, enemy, game_map="", enemy_facts=None):
         print("[Jev] 占位后端：行为等同规则模式（P3 接入）")
         self.game_map = game_map or ""
         self.delegate.start_game(hero, ally, enemy, game_map)
 
-    def opening_candidates(self, first_augment, threat, serial):
-        return self.delegate.opening_candidates(first_augment, threat, serial)
+    def opening_candidates(self, first_augment, threat, serial,
+                           augment_tiers=None):
+        return self.delegate.opening_candidates(first_augment, threat, serial,
+                                                augment_tiers=augment_tiers)
 
     def next_candidates(self, my_items, gold, current_path, threat,
                         serial, reason="event", augments=None, pool=None):
@@ -667,9 +722,11 @@ class JevEngine(DecisionEngine):
                                              pool=pool)
 
     def rank_cards(self, hero, card_names, taken, my_items, threat, serial,
-                   desc_fetcher=None):
+                   desc_fetcher=None, augment_tiers=None):
         return self.delegate.rank_cards(hero, card_names, taken, my_items,
-                                        threat, serial, desc_fetcher)
+                                        threat, serial,
+                                        desc_fetcher=desc_fetcher,
+                                        augment_tiers=augment_tiers)
 
     def skill_order(self, hero):
         return self.delegate.skill_order(hero)

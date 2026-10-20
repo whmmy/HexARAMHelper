@@ -53,6 +53,12 @@ class LiveSnapshot:
     my_is_dead: bool = False
     my_respawn_timer: float = 0.0
     my_items: list = field(default_factory=list)
+    # 我的 KDA + 召唤师名（N4 复盘结果维度 20261019：playerlist 匹配条
+    # scores/riotId 直出，me 未定位到时保持 0/""——复盘如实缺省不编造）
+    my_kills: int = 0
+    my_deaths: int = 0
+    my_assists: int = 0
+    my_summoner: str = ""
     # 全场 10 人
     players: list = field(default_factory=list)  # [PlayerInfo]
     # 原始响应（fixtures dump 用）
@@ -361,6 +367,13 @@ class LivePoller(threading.Thread):
                 snap.my_is_dead = info.is_dead
                 snap.my_respawn_timer = info.respawn_timer
                 snap.my_items = info.items
+                # KDA/召唤师名（N4）：me 匹配条 scores/riotId 原样直出，
+                # 供复盘终态落盘（局内持续更新，末帧≈终局）
+                snap.my_kills = info.kills
+                snap.my_deaths = info.deaths
+                snap.my_assists = info.assists
+                snap.my_summoner = (info.riot_id
+                                    or str(p.get("summonerName") or ""))
                 # 等级兜底：activeplayer 缺 level（国服字段缺失同 championName）
                 # 时取 playerlist 匹配条的 level；两者都有以 activeplayer 为准
                 if not snap.my_level:
