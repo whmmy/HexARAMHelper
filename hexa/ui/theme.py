@@ -282,6 +282,15 @@ class Theme:
                         lightcolor=P["bg"], darkcolor=P["bg"],
                         arrowcolor=P["line"], arrowsize=10, borderwidth=0)
         style.map("TScrollbar", background=[("active", P["line"])])
+        # 细滚动条（主窗画布槽位专用，20261021 双栏案）：无箭头按钮的 10px
+        # 细槽，藏在固定宽度的右侧槽里按需显隐（显隐不改画布宽度）
+        style.configure("Slim.Vertical.TScrollbar",
+                        background=P["scroll_thumb"], troughcolor=P["bg"],
+                        bordercolor=P["bg"], lightcolor=P["bg"],
+                        darkcolor=P["bg"], arrowcolor=P["bg"],
+                        arrowsize=0, width=10, borderwidth=0)
+        style.map("Slim.Vertical.TScrollbar",
+                  background=[("active", P["line"])])
 
         # 进度条：4px 细条（成型度对比；配置从 main_window 就地样式上收）
         style.configure("BP.Horizontal.TProgressbar", background=P["success"],
@@ -405,6 +414,30 @@ def left_rail_box(parent, color, bg=None, pad=(6, 5)):
                      padx=pad[0], pady=pad[1])
     inner.pack(fill=tk.BOTH, expand=True, padx=(Metrics["rail_w"], 0))
     return outer, inner
+
+
+def framed_panel(parent, bg=None, pad=8, border="line", pack=None):
+    """整块描边面板：1px 发丝边（外层底=line、内容内缩 1px → 四周露边）
+    + 表面底色，**返回内容容器**（把子控件加到返回值上）。
+
+    与 `card_frame` 的区别：card_frame 的"边框"只在右下露出（靠底色差当
+    阴影用），framed_panel 四周等宽露边——浮窗要的就是后者：整条信息条
+    压在一块**描边玻璃面板**上，而不是一整片页面底色糊在游戏画面上
+    （20261021 浮窗美化案）。
+
+    **必须由本函数自己 pack 外层、只返回内层**：Tk 里 widget 的父容器是
+    创建时固定的（`frame .a` 之后没法改成 .b），`pack` 永远作用于它的
+    父容器——调用方再 pack 内层只会把它在原父容器里重排一遍，整块面板
+    不会被挂到窗口上，渲染出来只剩窗底色（20261021 出图时踩到：
+    浮窗抓图整块同色无内容）。
+    """
+    P = Palette
+    outer = tk.Frame(parent, bg=P[border])
+    inner = tk.Frame(outer, bg=bg or P["surface"], padx=pad, pady=pad)
+    inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+    if pack:
+        outer.pack(**pack)
+    return inner
 
 
 

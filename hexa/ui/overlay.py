@@ -28,6 +28,15 @@ fork 参考项目 main.py OverlayApp 的穿透技术，信息架构按计划 §7
 （点击与悬停全部落到游戏，且永不抢焦点），在窗口 realize 之后对
 GA_ROOT 顶层 HWND 设置（winfo_id 只是 Tk 内层窗口，realize 前的
 顶层句柄可能在首次映射时重建导致样式丢失）。
+
+20261021 浮窗美化案（用户口径「悬浮窗也可以再优化美观点」）：
+- 整条信息条从「一整片页面底色糊在游戏画面上」（像贴了块黑胶片）改成
+  **描边面板**：1px 发丝边 + 表面底色（theme.framed_panel），层次与
+  游戏画面分得开；窗底色改为描边色，四边无缝不露底
+- 头部独立成块：英雄名（强调左轨）+ 等级（分色）+ 右侧阶段 chip，
+  视线第一落点在英雄名而不是标题行
+- 军师 / 加点改**两段式**（前缀三级 + 值正文），与主窗口卡片标题同语言
+- 信息条目、显示顺序、数据源与 ui_state() 消费方式一字未改
 """
 import ctypes
 import queue
@@ -36,9 +45,9 @@ import tkinter as tk
 
 from hexa.ui.theme import (CIRCLED, DETECT_TEXT, GRADES, Metrics,
                            PENDING_TEXT, PENDING_WAIT, PICKED_MARK,
-                           Palette, UNRECOGNIZED_HINT, Type, grade_badge,
-                           ledger_line, left_rail_box, ov_font, retint_badge,
-                           rule_row, stage_color, strip_emoji)
+                           Palette, UNRECOGNIZED_HINT, Type, framed_panel,
+                           grade_badge, ledger_line, left_rail_box, ov_font,
+                           retint_badge, rule_row, stage_color, strip_emoji)
 
 # ── Win32 扩展样式 ────────────────────────────────────────────
 GWL_EXSTYLE = -20
@@ -147,9 +156,11 @@ def overlay_content_signature(state: dict) -> tuple:
 
 
 class Overlay:
-    def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue, visible: bool = True):
+    def __init__(self, root: tk.Tk, session, ui_queue: queue.Queue, visible: bool = True,
+                 plain: bool = False):
         self.session = session
         self.ui_queue = ui_queue
+        self.plain = plain           # 出图模式：见 _setup_window 注释（运行期恒 False）
         self._moment_shown = False
         self._coach_shown = False
         self._ai_shown = False
@@ -165,8 +176,9 @@ class Overlay:
         if visible:
             self.win.deiconify()
             self.win.update_idletasks()   # 强制 realize，顶层 HWND 稳定后再设穿透
-        self._apply_click_through()
-        self.win.after(800, self._apply_click_through)   # 兜底重申（防映射期句柄重建）
+        if not self.plain:
+            self._apply_click_through()
+            self.win.after(800, self._apply_click_through)   # 兜底重申（防映射期句柄重建）
         self.win.after(TOPMOST_KEEPALIVE_MS, self._keep_topmost)
         self.win.after(500, self._refresh)
 
@@ -178,20 +190,27 @@ class Overlay:
         P = Palette
         self.w = max(160, round(BASE_WIDTH * scale))
         self.pad_x = max(6, round(8 * scale))
-        self.pad_y = max(1, round(2 * scale))
-        self.wrap = self.w - 2 * self.pad_x
+        self.gap = max(4, round(7 * scale))     # 小节之间的竖向节奏
+        # 面板内可用宽 = 窗宽 - 两侧内距 - 两侧 1px 描边（framed_panel）
+        self.wrap = self.w - 2 * self.pad_x - 2
         self.wrap_badge = self.wrap - (Metrics["badge"] + BADGE_GAP)
 
         self.win.title("HexaOverlay")
         self.win.overrideredirect(True)
         self.win.attributes("-topmost", True)
-        self.win.config(bg=P["bg"])
+        # 窗底色 = 描边色：面板铺满窗口时四边无缝（不会露出一圈页面底色）
+        self.win.config(bg=P["line"])
         # 半透明卡片感：整体 alpha 0.88（用户口径「画面优先」——少占屏靠
         # 贴内容而非降 alpha，降 alpha 只会牺牲正文可读性）
-        try:
-            self.win.attributes("-alpha", 0.88)
-        except Exception:
-            pass
+        #
+        # plain=True 是**出图模式**：不设 alpha、不加穿透样式——分层窗口
+        # (WS_EX_LAYERED) 用 PrintWindow 只能抓出全黑（20261021 实测），
+        # 出图需要一个普通窗口。运行期恒为 plain=False。
+        if not self.plain:
+            try:
+                self.win.attributes("-alpha", 0.88)
+            except Exception:
+                pass
         # 右侧居中贴边（高度按内容自适应，见 _fit_height；此处为初始/下限值）
         self.win.update_idletasks()
         screen_w = self.win.winfo_screenwidth()
@@ -256,72 +275,79 @@ class Overlay:
     def _build(self):
         P = Palette
         s = self.scale
-        pad = {"padx": self.pad_x, "pady": self.pad_y, "anchor": "w"}
 
-        # ① 英雄行：名字（主文本）+ 阶段后缀（三级文本），不再整行强调蓝
-        hero = tk.Frame(self.win, bg=P["bg"])
-        hero.pack(**pad)
-        self.lbl_hero = tk.Label(hero, text="待机中…", font=ov_font("ov_hero", True, s),
-                                 bg=P["bg"], fg=P["accent"])
+        # 整块描边面板（20261021 浮窗美化案）：1px 发丝边 + 表面底色。
+        # 旧版整条信息条是"一整片页面底色糊在游戏画面上"（像贴了块黑
+        # 胶片），现在是**一块描边玻璃卡**——层次与游戏画面分得开，
+        # 内容区的分隔靠标题轨与留白，不靠大片深色。
+        self.panel = framed_panel(self.win, bg=P["surface"], pad=self.pad_x,
+                                  pack=dict(fill=tk.BOTH, expand=True))
+
+        # ① 头部：英雄名（强调左轨）+ 等级 + 阶段角标（右侧 chip）
+        head = tk.Frame(self.panel, bg=P["surface"])
+        head.pack(anchor=tk.W, fill=tk.X)
+        tk.Frame(head, bg=P["accent"], width=Metrics["rail_w"]).pack(
+            side=tk.LEFT, fill=tk.Y, padx=(0, 6))
+        self.lbl_hero = tk.Label(head, text="待机中…",
+                                 font=ov_font("ov_hero", True, s),
+                                 bg=P["surface"], fg=P["accent"])
         self.lbl_hero.pack(side=tk.LEFT)
-        self.lbl_stage = tk.Label(hero, text="", font=ov_font("ov_body", False, s),
-                                  bg=P["bg"], fg=P["text_mute"])
-        self.lbl_stage.pack(side=tk.LEFT, padx=(4, 0))
-
-        # ② 军师（条件）：三级前缀 + 正文；显示时插在英雄行与加点行之间
-        coach = tk.Frame(self.win, bg=P["bg"])
-        tk.Label(coach, text=COACH_PREFIX, font=ov_font("ov_meta", False, s),
-                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
-        self.lbl_coach = tk.Label(coach, text="", font=ov_font("ov_body", False, s),
-                                  bg=P["bg"], fg=P["text"], justify=tk.LEFT,
-                                  wraplength=self.wrap)
-        self.lbl_coach.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        self._coach = coach
-
-        # ③ 加点顺序
-        self.lbl_skill = tk.Label(self.win, text="加点: -",
+        self.lbl_level = tk.Label(head, text="",
                                   font=ov_font("ov_meta", False, s),
-                                  bg=P["bg"], fg=P["text_mute"], justify=tk.LEFT,
-                                  wraplength=self.wrap)
-        self.lbl_skill.pack(**pad)
+                                  bg=P["surface"], fg=P["text_mute"])
+        self.lbl_level.pack(side=tk.LEFT, padx=(4, 0))
+        self.lbl_stage = tk.Label(head, text="",
+                                  font=ov_font("ov_meta", False, s),
+                                  bg=P["surface_inset"], fg=P["text_mute"],
+                                  padx=5, pady=1)
+        self.lbl_stage.pack(side=tk.RIGHT)
+
+        # ② 军师（条件显示，插在头部与加点行之间）+ ③ 加点
+        # 两段式：前缀（三级）+ 值（正文）——比"加点: Q>E>W"整条同色更
+        # 有层次，也和主窗口的卡片标题同语言。
+        self._coach, self.lbl_coach = self._meta_row(COACH_PREFIX)
+        self._coach.pack(anchor=tk.W, fill=tk.X, pady=(self.gap, 0))
+        self._coach.pack_forget()     # 空内容不占位（首次刷新有词才显示）
+        self._skill, self.lbl_skill = self._meta_row("加点")
+        self._skill.pack(anchor=tk.W, fill=tk.X, pady=(max(2, self.gap - 3), 0))
 
         # ④ 中段容器：海克斯时刻 + AI 在途标识（固定容器 → 两者相对顺序不翻面）
-        self._mid = tk.Frame(self.win, bg=P["bg"])
-        self._mid.pack(**pad)
+        self._mid = tk.Frame(self.panel, bg=P["surface"])
+        self._mid.pack(anchor=tk.W, fill=tk.X, pady=(self.gap, 0))
         self._mid.grid_columnconfigure(0, weight=1)
 
         # 海克斯时刻：状态点 + 标题 + 提示 + 三行档位（徽章/卡名/理由）
-        moment = tk.Frame(self._mid, bg=P["bg"])
+        moment = tk.Frame(self._mid, bg=P["surface"])
         moment.grid(row=0, column=0, sticky="ew")
         self._moment = moment
-        self._moment_title = rule_row(moment, "海克斯时刻", bg=P["bg"],
+        self._moment_title = rule_row(moment, "海克斯时刻", bg=P["surface"],
                                       size=Type["ov_meta"], dot=P["warning"])
         self._moment_title.grid(row=0, column=0, sticky="ew")
         self._moment_body = tk.Label(moment, text="", font=ov_font("ov_body", False, s),
-                                     bg=P["bg"], fg=P["text_dim"], justify=tk.LEFT,
+                                     bg=P["surface"], fg=P["text_dim"], justify=tk.LEFT,
                                      wraplength=self.wrap)
         self._moment_body.grid(row=1, column=0, sticky="ew", pady=(2, 0))
         self._grade_rows = []
         for i in range(3):
-            row = tk.Frame(moment, bg=P["bg"])
+            row = tk.Frame(moment, bg=P["surface"])
             badge = grade_badge(row, "")
             badge.pack(side=tk.LEFT, pady=(2, 0))
-            col = tk.Frame(row, bg=P["bg"])
+            col = tk.Frame(row, bg=P["surface"])
             col.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(BADGE_GAP, 0))
-            top = tk.Frame(col, bg=P["bg"])
+            top = tk.Frame(col, bg=P["surface"])
             top.pack(anchor=tk.W, fill=tk.X)
             num = tk.Label(top, text="", font=ov_font("ov_body", True, s),
-                           bg=P["bg"], fg=P["text_mute"])
+                           bg=P["surface"], fg=P["text_mute"])
             num.pack(side=tk.LEFT, padx=(0, 3))
             name = tk.Label(top, text="", font=ov_font("ov_body", True, s),
-                            bg=P["bg"], fg=P["text"], justify=tk.LEFT,
-                            wraplength=self.wrap_badge)
+                            bg=P["surface"], fg=P["text"], justify=tk.LEFT,
+                            anchor=tk.W, wraplength=self.wrap_badge)
             name.pack(side=tk.LEFT, fill=tk.X, expand=True)
             pick = tk.Label(top, text="", font=ov_font("ov_meta", False, s),
-                            bg=P["bg"], fg=P["success"])
+                            bg=P["surface"], fg=P["success"])
             pick.pack(side=tk.RIGHT, padx=(4, 0))
             reason = tk.Label(col, text="", font=ov_font("ov_meta", False, s),
-                              bg=P["bg"], fg=P["text_mute"], justify=tk.LEFT,
+                              bg=P["surface"], fg=P["text_mute"], justify=tk.LEFT,
                               wraplength=self.wrap_badge)
             reason.pack(anchor=tk.W, fill=tk.X)
             row.grid(row=2 + i, column=0, sticky="ew", pady=(3, 0))
@@ -331,20 +357,20 @@ class Overlay:
         self._moment_shown = False
 
         # AI 在途标识（模型在途时显示，完成即消失）
-        ai = tk.Frame(self._mid, bg=P["bg"])
+        ai = tk.Frame(self._mid, bg=P["surface"])
         ai.grid(row=1, column=0, sticky="ew", pady=(3, 0))
         tk.Frame(ai, width=5, height=5, bg=P["warning"]).pack(
             side=tk.LEFT, padx=(0, 6), pady=4)
         tk.Label(ai, text=AI_BUSY_TEXT, font=ov_font("ov_meta", False, s),
-                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
+                 bg=P["surface"], fg=P["text_mute"]).pack(side=tk.LEFT)
         self._ai = ai
         self._ai.grid_remove()
         self._ai_shown = False
 
         # ⑤ 建议：2px 左轨（普通强调色 / 满装替换琥珀色），正文恒为主文本
-        self._suggest = tk.Frame(self.win, bg=P["bg"])
-        self._suggest.pack(**pad)
-        rule_row(self._suggest, "建议", bg=P["bg"]).grid(
+        self._suggest = tk.Frame(self.panel, bg=P["surface"])
+        self._suggest.pack(anchor=tk.W, fill=tk.X, pady=(self.gap, 0))
+        rule_row(self._suggest, "建议", bg=P["surface"]).grid(
             row=0, column=0, sticky="ew")
         self._sug_outer, self._sug_box = left_rail_box(self._suggest, P["accent"])
         self._sug_outer.grid(row=1, column=0, sticky="ew", pady=(3, 0))
@@ -355,30 +381,43 @@ class Overlay:
         self.lbl_suggest.pack(anchor=tk.W)
 
         # ⑥ 海克斯台账
-        ledger = tk.Frame(self.win, bg=P["bg"])
-        ledger.pack(**pad)
-        rule_row(ledger, "海克斯台账", bg=P["bg"]).grid(
+        ledger = tk.Frame(self.panel, bg=P["surface"])
+        ledger.pack(anchor=tk.W, fill=tk.X, pady=(self.gap, 0))
+        rule_row(ledger, "海克斯台账", bg=P["surface"]).grid(
             row=0, column=0, sticky="ew")
         self.lbl_augments = tk.Label(ledger, text="-", font=ov_font("ov_body", False, s),
-                                     bg=P["bg"], fg=P["text_dim"], justify=tk.LEFT,
+                                     bg=P["surface"], fg=P["text_dim"], justify=tk.LEFT,
                                      wraplength=self.wrap)
         self.lbl_augments.grid(row=1, column=0, sticky="ew", pady=(3, 0))
 
         # ⑦ 敌方威胁（标题保持中性，语义色留给档位与真正的告警行）
-        threat = tk.Frame(self.win, bg=P["bg"])
-        threat.pack(**pad)
-        rule_row(threat, "敌方威胁", bg=P["bg"]).grid(
+        threat = tk.Frame(self.panel, bg=P["surface"])
+        threat.pack(anchor=tk.W, fill=tk.X, pady=(self.gap, 0))
+        rule_row(threat, "敌方威胁", bg=P["surface"]).grid(
             row=0, column=0, sticky="ew")
         self.lbl_threat = tk.Label(threat, text="-", font=ov_font("ov_body", False, s),
-                                   bg=P["bg"], fg=P["text_dim"], justify=tk.LEFT,
+                                   bg=P["surface"], fg=P["text_dim"], justify=tk.LEFT,
                                    wraplength=self.wrap)
         self.lbl_threat.grid(row=1, column=0, sticky="ew", pady=(3, 0))
 
         # ⑧ 满装替换预告（告警级，条件显示在末尾）
-        self.lbl_forecast = tk.Label(self.win, text="", font=ov_font("ov_meta", False, s),
-                                     bg=P["bg"], fg=P["warning"], justify=tk.LEFT,
+        self.lbl_forecast = tk.Label(self.panel, text="", font=ov_font("ov_meta", False, s),
+                                     bg=P["surface"], fg=P["warning"], justify=tk.LEFT,
                                      wraplength=self.wrap)
         self._forecast_shown = False
+
+    def _meta_row(self, prefix):
+        """前缀（三级）+ 值（正文）两段式行（军师 / 加点共用）。"""
+        P = Palette
+        s = self.scale
+        row = tk.Frame(self.panel, bg=P["surface"])
+        tk.Label(row, text=prefix, font=ov_font("ov_meta", False, s),
+                 bg=P["surface"], fg=P["text_mute"]).pack(side=tk.LEFT)
+        value = tk.Label(row, text="-", font=ov_font("ov_body", False, s),
+                         bg=P["surface"], fg=P["text"], justify=tk.LEFT,
+                         anchor=tk.W, wraplength=self.wrap)
+        value.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
+        return row, value
 
     # ── 刷新（UI 线程 after 轮询 session 快照） ────────────────────
 
@@ -419,16 +458,17 @@ class Overlay:
         # 等级直出（快照免费事实）：英雄名后缀 Lv.N，无数据（0）省略
         level = state.get("my_level") or 0
         if hero:
-            hero_text = f"{hero} Lv.{level}" if level else hero
-            self.lbl_hero.config(text=hero_text, fg=P["text"])
+            self.lbl_hero.config(text=hero, fg=P["text"])
+            self.lbl_level.config(text=f"Lv.{level}" if level else "")
             self.lbl_stage.config(text=STAGE_SUFFIX.get(stage, ""),
                                   fg=stage_color(stage))
         else:
             self.lbl_hero.config(text="待机中…", fg=P["accent"])
+            self.lbl_level.config(text="")
             self.lbl_stage.config(text=STAGE_SUFFIX.get(stage, ""),
                                   fg=stage_color(stage))
         self._render_coach(state.get("coach_latest") or "")
-        self.lbl_skill.config(text=f"加点: {state.get('skill_order') or '-'}")
+        self.lbl_skill.config(text=state.get("skill_order") or "-")
         # 台账带品质：『① 贪欲束缚（棱彩）』，tier 缺省省略括号；
         # 轮序号用 round_id 直出（检测器界面首次出现即自增为第 1 轮，
         # 与游戏轮次/日志「第 N 轮」同口径，N1 20261019），先验推定
@@ -477,14 +517,13 @@ class Overlay:
             self.win.geometry(f"{self.w}x{h}+{self._x}+{y}")
 
     def _render_coach(self, text: str):
-        """军师提示行：最新一条显示在顶部（英雄行下、加点行上），空则收起"""
+        """军师提示行：最新一条显示在头部下方（英雄行下、加点行上），空则收起"""
         text = strip_emoji(text)
         if text:
             self.lbl_coach.config(text=text)
             if not self._coach_shown:
                 # before= 固定插入位置：重新 pack 不会跑到内容区末尾
-                self._coach.pack(before=self.lbl_skill,
-                                 padx=self.pad_x, pady=self.pad_y, anchor="w")
+                self._coach.pack(before=self._skill, pady=(self.gap, 0), anchor="w")
                 self._coach_shown = True
         elif self._coach_shown:
             self._coach.pack_forget()
@@ -496,8 +535,8 @@ class Overlay:
         if text:
             self.lbl_forecast.config(text="替换预告: " + text)
             if not self._forecast_shown:
-                self.lbl_forecast.pack(padx=self.pad_x, pady=self.pad_y,
-                                       anchor="w")
+                # 面板自带内距，这里不再叠 padx（否则与面板内距叠加偏移）
+                self.lbl_forecast.pack(pady=(self.gap, 0), anchor="w")
                 self._forecast_shown = True
         elif self._forecast_shown:
             self.lbl_forecast.pack_forget()

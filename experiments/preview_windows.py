@@ -81,7 +81,51 @@ def _toplevel_hwnd(win):
     return hwnd or ctypes.windll.user32.GetParent(win.winfo_id())
 
 
-def grab(win, name, settle=0.6):
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+WS_EX_TRANSPARENT = 0x00000020
+SWP_NOMOVE = 0x0002
+SWP_NOSIZE = 0x0001
+SWP_NOACTIVATE = 0x0010
+SWP_FRAMECHANGED = 0x0020
+
+
+def _unlayer(win):
+    """临时摘掉分层/穿透样式：分层窗口 PrintWindow 只能抓出全黑
+    （20261021 实测），出图需要真实像素。抓完用 _relayer 恢复。"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    hwnd = _toplevel_hwnd(win)
+    ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                           ex & ~WS_EX_LAYERED & ~WS_EX_TRANSPARENT)
+    try:
+        win.attributes("-alpha", 1.0)
+    except Exception:
+        pass
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                        | SWP_FRAMECHANGED)
+
+
+def _relayer(win):
+    """恢复分层/穿透样式（出图后调用，运行期行为不变）"""
+    import ctypes
+    user32 = ctypes.windll.user32
+    hwnd = _toplevel_hwnd(win)
+    ex = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+    user32.SetWindowLongW(hwnd, GWL_EXSTYLE,
+                           ex | WS_EX_LAYERED | WS_EX_TRANSPARENT)
+    try:
+        win.attributes("-alpha", 0.88)
+    except Exception:
+        pass
+    user32.SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
+                        | SWP_FRAMECHANGED)
+
+
+def grab(win, name, settle=0.6, flag=2):
     """抓窗口自身内容（Win32 PrintWindow），不依赖 z-order。
 
     ImageGrab 抓的是屏幕像素：窗口被别的窗口压住、或跨显示器置顶失效时，
@@ -114,8 +158,9 @@ def grab(win, name, settle=0.6):
     mdc = gdi32.CreateCompatibleDC(hdc)
     bmp = gdi32.CreateCompatibleBitmap(hdc, ww, hh)
     gdi32.SelectObject(mdc, bmp)
-    # 2 = PW_RENDERFULLCONTENT（Vista+；无边框/分层窗口必须带这个标志）
-    ok = user32.PrintWindow(hwnd, mdc, 2)
+    # flag=2 = PW_RENDERFULLCONTENT（Vista+；分层窗口必须带）；浮窗出图用
+    # flag=0——对无边框顶层窗，flag=2 会把内容**画两遍**（重影，20261021 实测）
+    ok = user32.PrintWindow(hwnd, mdc, flag)
 
     class BITMAPINFOHEADER(ctypes.Structure):
         _fields_ = [("biSize", wintypes.DWORD), ("biWidth", wintypes.LONG),
@@ -160,7 +205,7 @@ def main():
 
     ui_queue, log_queue = _queue.Queue(), _queue.Queue()
     main_win = MainWindow(root, session, ui_queue, log_queue)
-    overlay = Overlay(root, session, ui_queue, visible=True)
+    overlay = Overlay(root, session, ui_queue, visible=True, plain=True)
     overlay.win.geometry("+40+120")
     settings_win = SettingsWindow(root, settings, kb,
                                   lambda: session.engine.stats(),
@@ -174,17 +219,19 @@ def main():
 
     root.deiconify()
     root.update()
-    # 截图机是 1080p，窗口管理器把客户区限到 ~1061px；满载内容（3 条军师 +
-    # 8 行日志）需 ~1200px，pack 会把最后 pack 的卡片压成 0 高度。真机
-    # 2560x1440 无此问题。LIGHT=True 时内容较少，日志再收窄 3 行即可一屏装下。
+    # 20261021 双栏案：主窗口自带几何校准（横向 1040 双栏），这里**不再**
+    # 强改 geometry——旧脚本写死 560 宽会把两栏压扁。新布局满载内容约
+    # 780px 高，1080p 截屏机一屏装得下。
     if LIGHT:
         main_win.txt_log.config(height=5)
         root.update_idletasks()
-        root.geometry(f"560x{main_win.root.winfo_reqheight()}")
-        root.update()
-        print("[note] 轻量局（军师 2 条）+ 日志 5 行，"
-              "以便 1080p 一屏展示完整设计；真机 1440p 满载也装得下")
-    grab(root, "ui_v3_main_window.png")
+        print(f"[note] 主窗口 {root.winfo_width()}x{root.winfo_height()}"
+              "（双栏仪表盘，自带几何校准）")
+    # 挪到 (20,20)：窗口比屏幕工作区高时，WM 可能把它放到屏幕外，
+    # PrintWindow 对屏外区域渲染成白块（底部日志卡整块变白）
+    root.geometry("+20+20")
+    root.update()
+    grab(root, "ui_v4_main_window.png")
 
     # 设置窗口：抓图前转无边框并挪到 (10,10)。带标题栏时客户区起点低于 0，
     # 内容 1009px 的窗口底部会落到屏幕外（抓屏得到黑边），无边框后整窗进屏内。
@@ -192,9 +239,15 @@ def main():
     settings_win.geometry("+10+10")
     settings_win.deiconify()
     settings_win.update()
-    grab(settings_win, "ui_v3_settings_window.png")
+    grab(settings_win, "ui_v4_settings_window.png")
 
-    grab(overlay.win, "ui_v3_overlay_live.png")
+    # 浮窗：分层窗口（WS_EX_LAYERED|WS_EX_TRANSPARENT）PrintWindow 抓出来
+    # 是全黑（20261021 实测），抓图前临时摘掉分层/穿透样式 + 置 alpha=1，
+    # 抓完再恢复——只影响出图，不改运行期行为。
+    _unlayer(overlay.win)
+    overlay.win.update()
+    grab(overlay.win, "ui_v4_overlay_live.png", flag=0)
+    _relayer(overlay.win)
 
     # 海克斯时刻评级卡单独出一张：主窗口满载内容 ~1200px，而 1080p 截屏机的
     # 窗口管理器把客户区限在 1061px，最后一张卡会被压到屏外（真机 1440p 无此
@@ -246,7 +299,7 @@ def _grab_log_card(root):
     txt.config(yscrollcommand=bar.set)
     for ts, msg, color in LOG_LINES:
         txt.insert(tk.END, f"[{ts}] {msg}\n", color)
-    grab(mini, "ui_v3_log_card.png")
+    grab(mini, "ui_v4_log_card.png")
 
 
 def _grab_ranks_card(root):
@@ -271,7 +324,7 @@ def _grab_ranks_card(root):
         tk.Label(row, text=strip_emoji(r["reason"]),
                  font=(Theme.FAMILY, Type["small"]),
                  bg=P["surface"], fg=P["text_mute"]).pack(side=tk.LEFT, padx=(6, 0))
-    grab(mini, "ui_v3_ranks_card.png")
+    grab(mini, "ui_v4_ranks_card.png")
 
 
 if __name__ == "__main__":

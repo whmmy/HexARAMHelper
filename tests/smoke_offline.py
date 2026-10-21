@@ -5421,6 +5421,42 @@ def test_ui_design_system():
           and "self.canvas.config(height=main.winfo_reqheight())" in mw_src
           and 'self._card(main, "上局账本"' in mw_src)
 
+    # 11) 20261021 双栏仪表盘案 + 浮窗美化案：新架构契约守卫
+    #     （源级断言，无 Tk 窗口；行为级已真机出图验证）
+    th_src = srcs["theme.py"]
+    check("主窗双栏仪表盘：两列 grid 等宽（uniform）+ 满宽行（阵容/上局账本）",
+          "grid_columnconfigure(0, weight=1, uniform=" in mw_src
+          and "grid_columnconfigure(1, weight=1, uniform=" in mw_src
+          and 'self._card(main, "上局账本"' in mw_src
+          and "col_l" in mw_src and "col_r" in mw_src)
+    check("主窗换行按**列宽**算（wraplength 随容器宽，不随窗口宽）",
+          "def _wrap_in(" in mw_src and "def _resize_group(" in mw_src
+          and "self._wrap_groups" in mw_src
+          and "self._wraps" not in mw_src)
+    check("主窗滚动条按需显隐（内容装得下就藏起来；右侧槽固定宽→画布宽恒定）",
+          "def _sync_scroll(" in mw_src
+          and "self.scroll.pack_forget()" in mw_src
+          and "width=SCROLL_GUTTER" in mw_src)
+    check("主窗窗口随内容长高（夹屏内）：满载内容不被裁掉（一屏看全）",
+          "def _fit_window(" in mw_src
+          and "self.root.winfo_screenheight() - 90" in mw_src
+          and "self.main.winfo_reqheight()" in mw_src)
+    check("浮窗描边面板：framed_panel 由工厂自己 pack 外层、只返回内层"
+          "（Tk 里父容器创建即固定，调用方再 pack 内层=挂不上去）",
+          "def framed_panel(" in th_src and "if pack:" in th_src
+          and "outer.pack(**pack)" in th_src)
+    check("浮窗不再自行 pack 面板内层（改为把 pack 交给工厂）",
+          "self.panel = framed_panel(self.win" in ov_src
+          and "self.panel.pack(" not in ov_src)
+    check("浮窗头部层级：英雄名 + 等级 + 右侧阶段 chip（分色标签）",
+          "self.lbl_level" in ov_src and "self.lbl_stage" in ov_src
+          and 'text="待机中…"' in ov_src)
+    check("浮窗合规红线：默认仍设分层+穿透+不抢焦点；plain 出图模式默认关闭",
+          "CLICK_THROUGH_MASK" in ov_src
+          and "self._apply_click_through()" in ov_src
+          and "plain: bool = False" in ov_src
+          and "if not self.plain:" in ov_src)
+
 
 # ── 17. P3 杂项：启动延迟刷新可取消 + 起飞提示计数可见（20261013） ──
 

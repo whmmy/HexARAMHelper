@@ -29,6 +29,16 @@ ui_queue 既承载事件字符串也承载可调用对象（跨线程 UI 调度�
   packer 整张 unmap（评级卡/AI 仪表行/账本本体不可见且够不着，1080p
   必现）。画布作受压方：pack 顺位最后、被截短只是少显示内容不 unmap，
   滚动条常驻兜底。卡片/段落顺序、_render_* 消费方式不变
+- 20261021 双栏仪表盘案（用户口径「主页面不需要长条，不然都有滚动条，
+  很多东西一眼显示不全」）：单列长条改成 **双栏 + 满宽行** 的仪表盘
+  ——顶栏（阶段/英雄/按钮）→ 阵容（满宽）→ 双栏主体（左：当前建议/
+  敌方威胁/替换预告/军师提示；右：海克斯时刻评级/海克斯台账/成型度
+  对比）→ 上局账本（满宽行）→ 日志（窗口底部固定）→ 状态底栏。
+  滚动画布保留为**溢出兜底**（窗口被手动缩到很小/内容暴涨时不丢控件），
+  但滚动条改为**按需显隐**：内容装得下就藏起来，且藏在固定宽度的右侧
+  槽里（显隐不改画布宽度 → 不引发 wraplength 连锁重排抖动）。
+  wraplength 改为**按容器宽**计算（单列时按窗口宽算，两栏后各列宽不
+  同，按窗口宽算会错行）；渲染链、ui_state 消费方式、字段一字未改。
 """
 import queue
 import time
@@ -45,9 +55,12 @@ STAGE_CN = {
     "idle": "待机", "champ_select": "选人中", "game_start": "加载中", "in_game": "对局中",
 }
 
-# 窗口几何：默认高度按内容请求校准，下限 1150（原 760 装得下满载内容）；
-# 再夹到屏幕内，1080p 机器不至于开出超屏窗口。
-MIN_H = 1150
+# 窗口几何（20261021 双栏案）：默认宽度给到两栏并排的舒适区（1080p 下
+# 横向放得下），高度按内容校准后夹进屏幕工作区——滚动画布兜底，装不下
+# 时滚动条自动出现，不再靠"超屏窗口"硬扛。
+WIN_W = 1040
+MIN_H = 720
+SCROLL_GUTTER = 12      # 右侧滚动条槽宽（常驻占位，画布宽度恒定）
 
 
 class MainWindow:
@@ -68,7 +81,10 @@ class MainWindow:
         self._review_checked = 0.0     # 上局回顾目录扫描时刻（15s 限频）
         self._last_poll_err = None     # 轮询异常签名（限频去重，防 500ms 刷屏）
         self._last_poll_err_ts = 0.0
-        self._wraps = []               # 需随窗口宽度重排的标签（wraplength）
+        self._wrap_groups = {}         # 容器 → [(标签, 占比, 内缩)]（列内换行）
+        self._wrap_bound = set()        # 已绑 <Configure> 的容器（避免重复绑）
+        self._scroll_shown = False      # 滚动条是否已显形（按需显隐）
+        self._win_w = WIN_W             # 目标窗宽（构建期算好，供 _fit_window）
         self._build()
         self.root.after(100, self._poll_ui)
         self.root.after(200, self._poll_log)
@@ -79,28 +95,70 @@ class MainWindow:
         P = Palette
         ver = version_label()
         self.root.title(f"HexARAMHelper 海克斯大乱斗助手 {ver}")
-        # 默认高度兜底 1150：成型度/预告/军师面板就位后满载内容实测约 1121px，
-        # 旧值 760 只装得下空面板，日志会被 expand 挤到 1px（构建完按请求高度再校准）
-        self.root.minsize(480, 560)
+        # 默认尺寸按内容校准（双栏案：横向 1040 / 纵向 ~780 装得下满载
+        # 内容），minsize 只防窗口被缩到两栏都放不下的程度
+        self.root.minsize(880, 620)
         Theme.style_root(self.root)
 
         outer = ttk.Frame(self.root)
         outer.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        # ── 底部固定区：状态底栏 + 日志卡 ────────────────────────────
+        # pack 顺序 = 腔体分配顺序：先 pack(BOTTOM) 占住底边，剩下的腔体
+        # 留给上方内容区（expand 归它）。日志在画布外、自带滚动，不与画布
+        # 抢滚轮（祖籍过滤见 _on_wheel）。
+        bottom = tk.Frame(outer, bg=P["bg"])
+        bottom.pack(side=tk.BOTTOM, fill=tk.X)
+
+        # 状态底栏（薄一行）：手动英雄兜底 | 数据新鲜度 | 刷新数据 | AI 仪表
+        # 20261021 双栏案：手动设英雄从独立行挪进底栏——它是兜底功能，
+        # 视觉降权更合理，且腾出一行纵向（1080p 屏只有 ~990px 可用，
+        # 满载内容要压进这个数才能一屏看全、滚动条不出现）。
+        footer = tk.Frame(bottom, bg=P["bg"])
+        footer.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+
+        manual = tk.Frame(footer, bg=P["bg"])
+        manual.pack(side=tk.LEFT, padx=(0, Metrics["gap_l"]))
+        tk.Label(manual, text="手动英雄", font=(Theme.FAMILY, Type["small"]),
+                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
+        self.ent_hero = ttk.Entry(manual, width=12)
+        self.ent_hero.pack(side=tk.LEFT, padx=4)
+        ttk.Button(manual, text="设置", width=4,
+                   command=self._on_manual_hero).pack(side=tk.LEFT)
+        self.lbl_manual_hint = tk.Label(manual, text="",
+                                        font=(Theme.FAMILY, Type["small"]),
+                                        bg=P["bg"], fg=P["text_mute"])
+        self.lbl_manual_hint.pack(side=tk.LEFT, padx=6)
+
+        self.lbl_fresh = tk.Label(footer, text="数据版本: -", bg=P["bg"],
+                                  fg=P["text_mute"], justify=tk.LEFT,
+                                  anchor=tk.W, font=(Theme.FAMILY, Type["small"]),
+                                  wraplength=260)
+        self.lbl_fresh.pack(side=tk.LEFT, fill=tk.X, expand=True,
+                            padx=(Metrics["gap_l"], 0))
+        self.lbl_engine = tk.Label(footer, text="AI: -", bg=P["bg"],
+                                   fg=P["text_mute"], justify=tk.RIGHT,
+                                   anchor=tk.E, font=(Theme.FAMILY, Type["small"]),
+                                   wraplength=300)
+        self.lbl_engine.pack(side=tk.RIGHT)
+        if self.on_refresh_data:
+            self._refresh_btn = ttk.Button(footer, text="刷新数据", width=8,
+                                           command=self._on_refresh_data)
+            self._refresh_btn.pack(side=tk.RIGHT, padx=(0, 8))
+        self._wrap_in(footer, self.lbl_fresh, 1.0)
+        self._wrap_in(footer, self.lbl_engine, 1.0)
 
         # 日志：自建 Text + ttk 滚动条，不用 scrolledtext.ScrolledText。
         # 原因（本 Python 3.12 的 ScrolledText 是 **Text 子类**：Text 挂在内层
         # frame 上却没被 pack，frame 保持 Tk 默认浅底 → 日志区右侧/下方露白，
         # 实机出图才看出来（2026-09-30）；且它的滚动条是经典 tk.Scrollbar，
         # 吃不到 theme 注册的深色 TScrollbar（旧版那个亮灰滚动条就是这么来的）。
-        # 先 pack（side=BOTTOM）才在 packer 分配里先于滚动外壳被满足：腔体
-        # 不足时截短的是卡片叠画布，日志卡永不被挤出可见区。
-        logcard = card_frame(outer, title="日志",
-                             pack=dict(side=tk.BOTTOM, fill=tk.BOTH,
-                                       expand=True, pady=(8, 0)))
+        logcard = card_frame(bottom, title="日志",
+                             pack=dict(side=tk.TOP, fill=tk.X, pady=(8, 0)))
         log_body = tk.Frame(logcard, bg=P["surface_inset"])
         log_body.pack(fill=tk.BOTH, expand=True)
         self.txt_log = tk.Text(
-            log_body, height=8, bg=P["surface_inset"], fg=P["text_dim"],
+            log_body, height=3, bg=P["surface_inset"], fg=P["text_dim"],
             font=Theme.FONT_MONO, relief=tk.FLAT, highlightthickness=0, bd=0,
             insertbackground=P["accent"], state=tk.DISABLED, wrap=tk.WORD,
             padx=7, pady=5)
@@ -110,28 +168,34 @@ class MainWindow:
         log_bar.pack(side=tk.RIGHT, fill=tk.Y)
         self.txt_log.config(yscrollcommand=log_bar.set)
 
-        # 卡片滚动外壳：卡片叠内容高无上界（账本轮数/成型度行数随对局增长）
-        # 而窗口高固定——直排在外层时腔体不足，packer 会把放不下的后 pack
-        # 卡片整张 unmap（1080p 被屏幕夹窗后评级卡/仪表行/账本本体不可见且
-        # 无任何自救，见文末几何校准注释记录的同款坑）。画布作受压方：pack
-        # 顺位最后、被截短只是少显示内容永不 unmap，滚动条兜底到每张卡。
-        # 滚动条常驻不做按需显隐——显隐让画布宽跳一个滚动条宽，wraplength
-        # 连锁重排抖动。
-        scroll = ttk.Scrollbar(outer, orient=tk.VERTICAL)
-        scroll.pack(side=tk.RIGHT, fill=tk.Y)
-        canvas = tk.Canvas(outer, bg=P["bg"], highlightthickness=0, bd=0)
-        canvas.pack(side=tk.TOP, fill=tk.BOTH)
+        # ── 内容区：画布 + 右侧滚动条槽（按需显隐） ──────────────────
+        # 画布保留为「溢出兜底」：窗口被手动缩到很小、或账本/成型度行数暴涨
+        # 时，内容不被裁掉而是可滚到（老版把后 pack 的卡片整张 unmap，
+        # 够不着也看不见）。滚动条不再常驻：装得下就藏起来（用户口径：主
+        # 页面不要滚动条），且它住在**固定宽度的右侧槽**里 → 显隐不改画布
+        # 宽度，不会引发 wraplength 连锁重排抖动。
+        gutter = tk.Frame(outer, bg=P["bg"], width=SCROLL_GUTTER)
+        gutter.pack_propagate(False)
+        gutter.pack(side=tk.RIGHT, fill=tk.Y)
+        self.scroll = ttk.Scrollbar(gutter, orient=tk.VERTICAL,
+                                     style="Slim.Vertical.TScrollbar")
+
+        area = tk.Frame(outer, bg=P["bg"])
+        area.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(area, bg=P["bg"], highlightthickness=0, bd=0)
+        canvas.pack(fill=tk.BOTH, expand=True)
         self.canvas = canvas
-        scroll.config(command=canvas.yview)
-        canvas.config(yscrollcommand=scroll.set)
+        self.scroll.config(command=canvas.yview)
+        canvas.config(yscrollcommand=self.scroll.set)
         # 卡片叠容器沿用 main 命名：下方全部卡片/行的父容器引用逐字不动，
         # 滚动外壳只是包在它外面的新增一层
         main = tk.Frame(canvas, bg=P["bg"])
+        self.main = main            # 供 _fit_window 量内容高
+        self.bottom = bottom        # 供 _fit_window 算窗口目标高
         self._canvas_item = canvas.create_window((0, 0), window=main,
                                                  anchor="nw")
-        # 画布宽变（拉窗/滚动条出现）→ 内层 frame 跟宽，卡片只纵滚不横滚
-        canvas.bind("<Configure>", lambda ev: canvas.itemconfigure(
-            self._canvas_item, width=ev.width))
+        # 画布宽变（拉窗）→ 内层 frame 跟宽，卡片只纵滚不横滚
+        canvas.bind("<Configure>", self._on_canvas_resize)
         # 内层 frame 宽高变（wraplength 重排/卡片文本增删）→ 刷 scrollregion
         main.bind("<Configure>", self._on_resize)
         # 滚轮事件递给指针下的具体控件（多为卡内 label/frame），不会沿几何
@@ -141,7 +205,7 @@ class MainWindow:
 
         # 状态行：阶段色片 + 英雄（路线已删，见模块 docstring）
         status = tk.Frame(main, bg=P["bg"])
-        status.pack(fill=tk.X, pady=(0, 6))
+        status.pack(fill=tk.X)
         self.lbl_stage = tk.Label(status, text="待机", font=Theme.FONT_BOLD,
                                   bg=P["surface_inset"], fg=P["text_mute"],
                                   padx=7, pady=2)
@@ -158,59 +222,32 @@ class MainWindow:
         if self.on_calibrate:
             ttk.Button(status, text="开始标定", command=self.on_calibrate
                        ).pack(side=tk.RIGHT, padx=(0, 8))
-        tk.Frame(main, height=1, bg=P["line"]).pack(fill=tk.X)
+        tk.Frame(status, height=1, bg=P["line"]).pack(fill=tk.X, pady=(6, 0))
 
-        # 手动输英雄兜底行（视觉降权：三级文本 + 小字）
-        manual = tk.Frame(main, bg=P["bg"])
-        manual.pack(fill=tk.X, pady=(6, 0))
-        tk.Label(manual, text="手动设英雄(兜底):", font=(Theme.FAMILY, Type["small"]),
-                 bg=P["bg"], fg=P["text_mute"]).pack(side=tk.LEFT)
-        self.ent_hero = ttk.Entry(manual, width=16)
-        self.ent_hero.pack(side=tk.LEFT, padx=6)
-        ttk.Button(manual, text="设置", command=self._on_manual_hero).pack(side=tk.LEFT)
-        self.lbl_manual_hint = tk.Label(manual, text="", font=(Theme.FAMILY, Type["small"]),
-                                        bg=P["bg"], fg=P["text_mute"])
-        self.lbl_manual_hint.pack(side=tk.LEFT, padx=8)
+        # 手动输英雄兜底行已挪进底部状态栏（见底栏构建处）——20261021 双栏
+        # 案为纵向空间让位；功能与接线一字未改。
 
-        # 阵容卡片（两列 + 中缝 1px 竖线）
+        # 阵容卡片（满宽，单行：己方 | 敌方）——双栏案压缩纵向：两支队伍
+        # 挤在一行（1007px 内 5 个名字放得下），省下的高度给内容更密的
+        # 主体双栏（1080p 屏只有 ~990px 可用，满载内容必须压进这个数）
         teams = card_frame(main, pack=dict(fill=tk.X, pady=(8, 0)))
-        col_a = tk.Frame(teams, bg=P["surface"])
-        col_a.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        col_b = tk.Frame(teams, bg=P["surface"])
-        col_b.pack(side=tk.LEFT, fill=tk.BOTH, expand=True,
-                   padx=(Metrics["gap_m"], 0))
-        tk.Frame(teams, width=1, bg=P["line_soft"]).pack(side=tk.LEFT,
-                                                           fill=tk.Y, padx=Metrics["gap_m"])
-        for col, tag in ((col_a, "己方"), (col_b, "敌方")):
-            tk.Label(col, text=tag, font=(Theme.FAMILY, Type["small"]),
-                     bg=P["surface"], fg=P["text_mute"]).pack(anchor=tk.W)
-        self.lbl_ally = tk.Label(col_a, text="-", font=Theme.FONT, bg=P["surface"],
-                                 fg=P["text"], justify=tk.LEFT)
-        self.lbl_ally.pack(anchor=tk.W)
-        self.lbl_enemy = tk.Label(col_b, text="-", font=Theme.FONT, bg=P["surface"],
-                                  fg=P["text"], justify=tk.LEFT)
-        self.lbl_enemy.pack(anchor=tk.W)
-        self._wraps.append((self.lbl_ally, 0.5))
-        self._wraps.append((self.lbl_enemy, 0.5))
-
-        # 威胁 + 建议 + 替换预告 + 军师滚动列表 + 成型度对比 + 台账(纠错)卡片
-        # （顺序沿用旧版，不重排）
-        self.card_threat = self._card(main, "敌方威胁画像")
-        self.card_suggest = self._card(main, "当前建议", rail="accent",
-                                       note="主输出")
-        self.card_forecast = self._card(main, "满装替换预告")
-        self.card_coach = self._card(main, "军师提示（最近 3 条）")
-
-        # 成型度对比（v4.6）：敌我十人六神装进度（传说件 x/6 + 装备估值）
-        bp = card_frame(main, title="成型度对比", note="传说件 x/6 · 装备估值",
-                        pack=dict(fill=tk.X, pady=(8, 0)))
-        self.bp_box = tk.Frame(bp, bg=P["surface"])
-        self.bp_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
-
-        ledger = card_frame(main, title="海克斯台账", note="点名字撤销纠错",
-                            pack=dict(fill=tk.X, pady=(8, 0)))
-        self.ledger_box = tk.Frame(ledger, bg=P["surface"])
-        self.ledger_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+        team_row = tk.Frame(teams, bg=P["surface"])
+        team_row.pack(anchor=tk.W, fill=tk.X)
+        tk.Label(team_row, text="己方", font=(Theme.FAMILY, Type["small"]),
+                 bg=P["surface"], fg=P["text_mute"]).pack(side=tk.LEFT)
+        self.lbl_ally = tk.Label(team_row, text="-", font=Theme.FONT,
+                                 bg=P["surface"], fg=P["text"], justify=tk.LEFT)
+        self.lbl_ally.pack(side=tk.LEFT, padx=(6, 0))
+        tk.Frame(team_row, width=1, bg=P["line_soft"]).pack(
+            side=tk.LEFT, fill=tk.Y, padx=Metrics["gap_l"])
+        tk.Label(team_row, text="敌方", font=(Theme.FAMILY, Type["small"]),
+                 bg=P["surface"], fg=P["text_mute"]).pack(
+                     side=tk.LEFT, padx=(Metrics["gap_l"], 0))
+        self.lbl_enemy = tk.Label(team_row, text="-", font=Theme.FONT,
+                                  bg=P["surface"], fg=P["text"], justify=tk.LEFT)
+        self.lbl_enemy.pack(side=tk.LEFT, padx=(6, 0))
+        self._wrap_in(team_row, self.lbl_ally, 0.45)
+        self._wrap_in(team_row, self.lbl_enemy, 0.45)
 
         # 上局账本（20261013 回顾面板案；N4 20261019 升级本局账本一屏）：
         # 复盘 JSON 局终落盘早已存在（game_state._write_review_log →
@@ -219,31 +256,55 @@ class MainWindow:
         # 胜负 KDA，纯事实对账）。缺文件/缺字段一律占位不炸（渲染链断链
         # 会让全部卡片冻结，见 _poll_ui 注释）。内容静态：目录扫描 15s
         # 限频、(路径, mtime) 变化才重建（台账同款缓存惯例）。
+        #
+        # 20261021 双栏案：改成**满宽行**并 pack 在双栏主体之前 → 落在腔体
+        # 底边（账本是对账信息，铺满一行读起来不折行、不占纵向空间）。
         self.card_review = self._card(main, "上局账本",
-                                      note="log/games 最近一份 · 采纳对账")
+                                      note="log/games 最近一份 · 采纳对账",
+                                      pack=dict(fill=tk.X, side=tk.BOTTOM,
+                                                pady=(8, 0)),
+                                      # 账本是对账明细（8~12 行），用小字排：
+                                      # 1080p 屏只有 ~990px 可用，正文密度
+                                      # 直接决定主页面能不能一屏装下
+                                      font=(Theme.FAMILY, Type["small"]))
         self.card_review.config(
             text="-（完成一局后自动显示：结果/听劝/采纳/海克斯台账/终局出装）",
             fg=P["text_mute"])
 
-        self._build_ranks_card(main)
+        # ── 主体双栏（20261021 双栏仪表盘案）────────────────────────
+        # 左栏 = 局内要盯的（主输出 → 威胁 → 替换预告 → 军师）；
+        # 右栏 = 盘点类（海克斯时刻评级 → 台账 → 成型度对比）。
+        # 两栏等宽（uniform）——左栏文字多、右栏是表，宽度差会让表挤成两行。
+        body = tk.Frame(main, bg=P["bg"])
+        body.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+        body.grid_columnconfigure(0, weight=1, uniform="cols")
+        body.grid_columnconfigure(1, weight=1, uniform="cols")
+        body.grid_rowconfigure(0, weight=1)
+        col_l = tk.Frame(body, bg=P["bg"])
+        col_l.grid(row=0, column=0, sticky="nsew")
+        col_r = tk.Frame(body, bg=P["bg"])
+        col_r.grid(row=0, column=1, sticky="nsew", padx=(Metrics["gap_m"], 0))
 
-        # 数据新鲜度（版本翻译器底线：抓取日期常显 + >7 天黄标）
-        fresh = tk.Frame(main, bg=P["bg"])
-        fresh.pack(fill=tk.X, pady=(8, 0))
-        self.lbl_fresh = tk.Label(fresh, text="数据版本: -", bg=P["bg"],
-                                  fg=P["text_mute"], justify=tk.LEFT,
-                                  anchor=tk.W, font=(Theme.FAMILY, Type["small"]))
-        self.lbl_fresh.pack(side=tk.LEFT, fill=tk.X, expand=True)
-        self.lbl_engine = tk.Label(fresh, text="AI: -", bg=P["bg"],
-                                   fg=P["text_mute"], justify=tk.RIGHT,
-                                   anchor=tk.E, font=(Theme.FAMILY, Type["small"]))
-        self.lbl_engine.pack(side=tk.RIGHT)
-        if self.on_refresh_data:
-            self._refresh_btn = ttk.Button(fresh, text="刷新数据", width=8,
-                                           command=self._on_refresh_data)
-            self._refresh_btn.pack(side=tk.RIGHT, padx=(0, 8))
-        self._wraps.append((self.lbl_fresh, 0.5))
-        self._wraps.append((self.lbl_engine, 0.5))
+        # 左栏：当前建议挂强调左轨（主输出），其余保持中性
+        self.card_suggest = self._card(col_l, "当前建议", rail="accent",
+                                       note="主输出")
+        self.card_threat = self._card(col_l, "敌方威胁画像")
+        self.card_forecast = self._card(col_l, "满装替换预告")
+        self.card_coach = self._card(col_l, "军师提示（最近 3 条）")
+
+        # 右栏：海克斯时刻评级 → 海克斯台账(纠错) → 成型度对比
+        self._build_ranks_card(col_r)
+
+        ledger = card_frame(col_r, title="海克斯台账", note="点名字撤销纠错",
+                            pack=dict(fill=tk.X, pady=(8, 0)))
+        self.ledger_box = tk.Frame(ledger, bg=P["surface"])
+        self.ledger_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
+
+        # 成型度对比（v4.6）：敌我十人六神装进度（传说件 x/6 + 装备估值）
+        bp = card_frame(col_r, title="成型度对比", note="传说件 x/6 · 装备估值",
+                        pack=dict(fill=tk.X, pady=(8, 0)))
+        self.bp_box = tk.Frame(bp, bg=P["surface"])
+        self.bp_box.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
 
         # 构建完按实际内容请求高度校准默认窗口（后续面板扩展自动适配，不低于兜底值）
         #
@@ -259,31 +320,109 @@ class MainWindow:
         self.root.update_idletasks()
         self.canvas.config(height=main.winfo_reqheight())
         self.root.update_idletasks()
-        self.root.geometry(f"560x{max(MIN_H, self.root.winfo_reqheight())}")
+        # 20261021 双栏案：横向固定 1040（两栏并排的舒适区，1080p 放得下），
+        # 纵向按内容校准后夹进屏幕工作区——**不再超屏**（旧版靠"窗口略超
+        # 屏"硬扛内容，代价是日志底部落到屏外）。装不下的部分由画布 +
+        # 按需滚动条兜底（老版会把后 pack 的卡片整张 unmap，够不着）。
+        w = min(WIN_W, max(880, self.root.winfo_screenwidth() - 60))
+        h = max(MIN_H, self.root.winfo_reqheight())
+        h = min(h, max(MIN_H, self.root.winfo_screenheight() - 90))
+        # 目标宽度存一份：窗口未映射时 winfo_width() 返回 1，直接拿它改
+        # 几何会把宽度写成 1（被 minsize 兜成 880，两栏被压扁）
+        self._win_w = w
+        self.root.geometry(f"{w}x{h}")
+        self._sync_scroll()
 
-    def _card(self, parent, title, rail=None, note=None):
+    def _card(self, parent, title, rail=None, note=None, pack=None, font=None):
         """带标题轨的卡片，返回正文标签（调用点仍只 config(text=...)）"""
         P = Palette
         box = card_frame(parent, rail=rail, title=title, note=note,
                          tick=(rail or "line"),
-                         pack=dict(fill=tk.X, pady=(8, 0)))
-        body = tk.Label(box, text="-", font=Theme.FONT, bg=P["surface"],
-                        fg=P["text"], justify=tk.LEFT, anchor=tk.W)
+                         pack=pack or dict(fill=tk.X, pady=(8, 0)))
+        body = tk.Label(box, text="-", font=font or Theme.FONT, bg=P["surface"],
+                        fg=P["text"], justify=tk.LEFT, anchor=tk.W,
+                        wraplength=240)
         body.pack(anchor=tk.W, fill=tk.X, pady=(4, 0))
-        self._wraps.append((body, 1.0))
+        # 正文换行宽度跟随**所在卡片内宽**（双栏后两列宽不同，按窗口宽算
+        # 会错行）；inset = 卡片左右内距。初始 wraplength=240 是为了不让
+        # 长文本在首帧把整列撑宽（grid 列最小宽 = 内容请求宽）。
+        self._wrap_in(box, body, 1.0, inset=Metrics["pad_card"] * 2)
         return body
 
-    def _on_resize(self, ev):
-        """wraplength 跟随窗口宽（旧值写死 500/250，缩放后换行错乱/底部截断）；
-        内层 frame 挂在滚动画布里，宽高变化同时刷新 scrollregion"""
-        width = max(160, ev.width - Metrics["pad_card"] * 2)
-        for lbl, frac in self._wraps:
+    # ── 换行与滚动（20261021 双栏案）────────────────────────────────
+
+    def _wrap_in(self, container, label, frac=1.0, inset=0):
+        """登记「随容器宽度换行」的标签：容器 <Configure> 时按**容器宽**
+        （双栏后 = 列宽，不是窗口宽）算 wraplength。"""
+        self._wrap_groups.setdefault(container, []).append((label, frac, inset))
+        if container not in self._wrap_bound:
+            self._wrap_bound.add(container)
+            container.bind("<Configure>",
+                           lambda ev, c=container: self._resize_group(c))
+
+    def _resize_group(self, container):
+        """按容器实际宽重排该容器内的换行标签（列宽变化 → 文本重排）。"""
+        width = container.winfo_width()
+        if width <= 1:
+            return
+        for label, frac, inset in self._wrap_groups.get(container, []):
             try:
-                lbl.config(wraplength=max(120, int(width * frac) - 6))
+                label.config(wraplength=max(120, int((width - inset) * frac) - 6))
             except tk.TclError:
                 pass
+
+    def _on_canvas_resize(self, ev):
+        """画布宽变（拉窗）→ 内层 frame 跟宽，卡片只纵滚不横滚；顺带按需
+        显隐滚动条（内容装得下就不留滚动条）。"""
+        self.canvas.itemconfigure(self._canvas_item, width=ev.width)
+        self._sync_scroll()
+
+    def _on_resize(self, ev):
+        """内层 frame 宽高变（wraplength 重排/卡片文本增删）→ 刷 scrollregion
+        并按需显隐滚动条。"""
         try:
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        except tk.TclError:
+            pass
+        self._sync_scroll()
+
+    def _sync_scroll(self):
+        """滚动条按需显隐：内容装得下就藏起来（用户口径「主页面不需要长条，
+        不然都有滚动条」），装不下才出现。滚动条住在**固定宽度的右侧槽**
+        里 → 显隐不改画布宽度，不会引发 wraplength 连锁重排抖动。"""
+        try:
+            bbox = self.canvas.bbox("all")
+            need = bool(bbox) and (bbox[3] - bbox[1]) > self.canvas.winfo_height() + 2
+        except tk.TclError:
+            need = False
+        if need and not self._scroll_shown:
+            self.scroll.pack(side=tk.RIGHT, fill=tk.Y)
+            self._scroll_shown = True
+        elif not need and self._scroll_shown:
+            self.scroll.pack_forget()
+            self._scroll_shown = False
+
+    def _fit_window(self):
+        """窗口随内容长高（夹屏幕内）——「一眼看全」的落地动作。
+
+        20261021 双栏案实测坑：构建期各卡片还是空的（评级行/台账行/成型度
+        行都是运行期才填），按空内容校准的窗口高只有 ~744px；满载后真实
+        内容高 ~830px —— 上局账本整卡与成型度卡下半被裁掉，正是用户说的
+        「一眼显示不全」。这里在轮询里按**实际内容高**补足窗口高度，
+        超屏则停住（剩下的交给滚动条兜底，不让窗口开到屏外）。
+
+        只长不缩：内容回缩（切回小内容）时窗口保持大尺寸——收窗是用户
+        的动作，程序擅自缩会让人以为界面在闪。
+        """
+        try:
+            self.root.update_idletasks()
+            content_h = self.main.winfo_reqheight()
+            bottom_h = self.bottom.winfo_reqheight()
+            want = content_h + bottom_h + 24     # 24 = outer pady(10×2) + 余量
+            cur = self.root.winfo_height()
+            limit = self.root.winfo_screenheight() - 90
+            if want > cur + 4 and want <= limit:
+                self.root.geometry(f"{self._win_w}x{want}")
         except tk.TclError:
             pass
 
@@ -321,8 +460,11 @@ class MainWindow:
             name = tk.Label(row, text="", font=Theme.FONT, bg=P["surface"],
                             fg=P["text"], anchor=tk.W)
             name.pack(side=tk.LEFT)
+            # 理由给 wraplength 封顶：双栏后列宽固定，长理由若不限宽会把
+            # 整列撑宽、把左栏挤扁（grid 列最小宽 = 内容请求宽）
             reason = tk.Label(row, text="", font=(Theme.FAMILY, Type["small"]),
-                              bg=P["surface"], fg=P["text_mute"], anchor=tk.W)
+                              bg=P["surface"], fg=P["text_mute"], anchor=tk.W,
+                              wraplength=230)
             reason.pack(side=tk.LEFT, padx=(6, 0))
             self.ranks_rows.append({"row": row, "badge": badge, "name": name,
                                     "reason": reason, "shown": False})
@@ -375,7 +517,13 @@ class MainWindow:
             stage = state["stage"]
             self.lbl_stage.config(text=STAGE_CN.get(stage, stage),
                                   fg=stage_color(stage))
-            self.lbl_hero.config(text=f"英雄: {state['my_hero'] or '-'}")
+            # 英雄行带等级（快照直出的免费事实，同 overlay 口径）
+            hero = state["my_hero"]
+            level = state.get("my_level") or 0
+            hero_txt = f"英雄: {hero or '-'}"
+            if hero and level:
+                hero_txt += f" Lv.{level}"
+            self.lbl_hero.config(text=hero_txt)
             self.lbl_ally.config(text=" ".join(state["ally"]) or "-")
             self.lbl_enemy.config(text=" ".join(state["enemy"]) or "-")
             self.card_threat.config(text=strip_emoji(state["threat"]) or "-")
@@ -404,6 +552,8 @@ class MainWindow:
                                 state.get('kda_alerts_used'),
                                 state.get('kda_alerts_limit'))
             self._render_review()
+            # 窗口随内容长高（夹屏内）——满载内容不被裁掉，用户一眼看全
+            self._fit_window()
         except Exception as e:
             # 渲染异常只记日志不冒出：异常冒出会让本 after 链不再续约，
             # 状态卡/评级/仪表全冻结且 ui_queue 无人消费（F10 显隐、托盘退出失效）。
