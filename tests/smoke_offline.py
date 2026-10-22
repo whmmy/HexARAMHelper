@@ -386,10 +386,12 @@ def test_rules():
               for c in cands3), str([c.name for c in cands3][:5]))
 
     # v4.3 核心线优先（用户验收 20260927：先出自己流派的核心三件套，
-    # 敌方阵容是后续调整；小丑 ad=收集者线 / ap=黯炎火炬·面具线）
+    # 敌方阵容是后续调整）。16.21 重抓后小丑 OP.GG 核心组合全线 AP，
+    # ad 组合消失（同 bias 票全 0）→ ad 请求按设计回退 OP.GG 首组——
+    # 与剑魔 20260929 重抓案同型：断言跟随数据，投票机制不变。
     seq = rules.build_sequence([], "ad", ThreatProfile(), hero="恶魔小丑")
-    check("小丑AD核心线置顶",
-          [c.name for c in seq] == ["收集者", "电震涡流剑", "无尽之刃"]
+    check("小丑16.21无ad线回退OP.GG首组",
+          [c.name for c in seq] == ["黯炎火炬", "兰德里的折磨", "影焰"]
           and all("核心装" in c.reason for c in seq),
           str([(c.name, c.reason) for c in seq]))
     seq_ap = rules.build_sequence([], "ap", ThreatProfile(), hero="恶魔小丑")
@@ -402,9 +404,9 @@ def test_rules():
     # ad bias，票数压过 星蚀·焚天·死亡之舞 的 3 票）
     check("剑魔爆杀流核心线", seq_j and seq_j[0].name == "锯齿短匕",
           str([c.name for c in seq_j]))
-    seq2 = rules.build_sequence(["收集者"], "ad", ThreatProfile(),
+    seq2 = rules.build_sequence(["黯炎火炬"], "ap", ThreatProfile(),
                                 hero="恶魔小丑")
-    check("核心线跳过已拥有", seq2 and seq2[0].name == "电震涡流剑",
+    check("核心线跳过已拥有", seq2 and seq2[0].name == "兰德里的折磨",
           str([c.name for c in seq2]))
     # 按当前地图过滤（真机回归：峡谷局曾推出 KIWI 专属 麦瑞德裂血手套）
     tp_ad = ThreatProfile(ad_count=4)
